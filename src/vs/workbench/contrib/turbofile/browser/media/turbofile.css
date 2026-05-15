@@ -1684,9 +1684,15 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	outline: none;
 }
 
-.turbofile-device-select-option.is-selected {
-	background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
-	color: var(--vscode-list-activeSelectionForeground, inherit);
+.turbofile-device-select-option.is-selected,
+.turbofile-device-select-option.is-selected:hover,
+.turbofile-device-select-option.is-selected:focus,
+.turbofile-device-select-option.is-selected:focus-visible {
+	background: transparent;
+	color: inherit;
+	outline: none;
+	box-shadow: none;
+	border-color: transparent;
 }
 
 .turbofile-browser-header {
@@ -4260,10 +4266,20 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 }
 
 .vs .turbofile-file-row.is-selected,
-.vs .turbofile-device-select-option.is-selected,
 .vs .turbofile-sync-row.is-reversed {
 	color: var(--tf-brand-blue-dark);
 	background: var(--tf-brand-soft);
+}
+
+.vs .turbofile-device-select-option.is-selected,
+.vs .turbofile-device-select-option.is-selected:hover,
+.vs .turbofile-device-select-option.is-selected:focus,
+.vs .turbofile-device-select-option.is-selected:focus-visible {
+	color: var(--tf-text);
+	background: transparent;
+	outline: none;
+	box-shadow: none;
+	border-color: transparent;
 }
 
 .vs .turbofile-file-row-name,
