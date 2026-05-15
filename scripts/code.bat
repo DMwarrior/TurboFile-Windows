@@ -5,32 +5,21 @@ title VSCode Dev
 
 pushd %~dp0\..
 
-set "NAMESHORT="
-for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do if not defined NAMESHORT set "NAMESHORT=%%~a"
-set NAMESHORT=%NAMESHORT: "=%
-set NAMESHORT=%NAMESHORT:"=%.exe
-set CODE=".build\electron\%NAMESHORT%"
-set "CODE_ABS=%CD%\.build\electron\%NAMESHORT%"
-if not exist %CODE% if exist ".build\electron\TurboFile.exe" (
-	set "NAMESHORT=TurboFile.exe"
-	set CODE=".build\electron\TurboFile.exe"
-	set "CODE_ABS=%CD%\.build\electron\TurboFile.exe"
-)
-if not exist %CODE% (
-	for %%F in (".build\electron\*.exe") do if not exist %CODE% (
-		set "NAMESHORT=%%~nxF"
-		set CODE="%%~fF"
-		set "CODE_ABS=%%~fF"
-	)
-)
+call :resolveElectronExe
 
-if not "%TURBOFILE_KEEP_RUNNING_DEV%"=="1" (
+if not "%TURBOFILE_KEEP_RUNNING_DEV%"=="1" if defined CODE_ABS (
 	call :stopRunningDevInstance
 )
 
 :: Get electron, compile, built-in extensions
 if "%VSCODE_SKIP_PRELAUNCH%"=="" (
 	node build/lib/preLaunch.ts
+)
+
+call :resolveElectronExe
+if not defined CODE_ABS (
+	echo Could not find Electron executable in .build\electron.
+	goto end
 )
 
 :: Manage built-in extensions
@@ -64,6 +53,17 @@ popd
 endlocal
 
 exit /b %ERRORLEVEL%
+
+:resolveElectronExe
+set "NAMESHORT="
+set "CODE="
+set "CODE_ABS="
+for /f "usebackq delims=" %%F in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$exe = Get-ChildItem -LiteralPath '.build\electron' -Filter '*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1; if ($exe) { $exe.FullName }"`) do (
+	set "CODE_ABS=%%F"
+	set "NAMESHORT=%%~nxF"
+	set CODE="%%F"
+)
+exit /b 0
 
 :stopRunningDevInstance
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$target = [System.IO.Path]::GetFullPath('%CODE_ABS%'); Get-CimInstance Win32_Process -Filter \"Name='%NAMESHORT%'\" | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $target) } | ForEach-Object { Write-Host ('Stopping existing dev process ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }"

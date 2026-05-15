@@ -95,7 +95,7 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 ];
 
 const TURBOFILE_NAV_COLLAPSED_WIDTH = 48;
-const TURBOFILE_NAV_EXPANDED_WIDTH = 214;
+const TURBOFILE_NAV_EXPANDED_WIDTH = 168;
 
 let turboFileActivePage: TurboFileWorkbenchPage = 'transfer';
 let turboFileNavigationExpanded = false;

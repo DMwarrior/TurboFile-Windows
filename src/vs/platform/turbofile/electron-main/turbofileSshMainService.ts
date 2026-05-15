@@ -487,19 +487,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await fsp.rm(endpoint.path, { recursive, force: true });
 			} else {
-				await this.withSftp(endpoint, async sftp => {
-					const stats = await this.remoteStat(sftp, endpoint.path);
-					if (stats.isDirectory()) {
-						await this.deleteRemoteDirectory(sftp, endpoint.path);
-					} else {
-						await this.unlinkRemote(sftp, endpoint.path);
+				try {
+					await this.deleteRemotePathNative(endpoint, recursive);
+				} catch (error) {
+					if (error instanceof Error && error.message === 'Refusing to delete a filesystem root.') {
+						throw error;
 					}
-				});
+					await this.withSftp(endpoint, async sftp => {
+						const stats = await this.remoteStat(sftp, endpoint.path);
+						if (stats.isDirectory()) {
+							await this.deleteRemoteDirectory(sftp, endpoint.path);
+						} else {
+							await this.unlinkRemote(sftp, endpoint.path);
+						}
+					});
+				}
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			return { ok: true, message: 'Path deleted.' };
 		} catch (error) {
 			return { ok: false, message: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private async deleteRemotePathNative(endpoint: ITurboFileTransferEndpoint, recursive: boolean): Promise<void> {
+		this.assertSafeDeletePath(endpoint.path);
+		const command = looksLikeWindowsPath(endpoint.path)
+			? buildWindowsDeleteCommand(endpoint.path, recursive)
+			: buildPosixDeleteCommand(endpoint.path, recursive);
+		await this.withSshClient(endpoint, client => this.execRemote(client, command));
+	}
+
+	private assertSafeDeletePath(path: string): void {
+		const trimmed = path.trim();
+		const normalized = trimmed.replace(/[\\/]+$/, '');
+		if (!trimmed || trimmed === '/' || trimmed === '\\' || normalized === '' || /^[A-Za-z]:$/.test(normalized)) {
+			throw new Error('Refusing to delete a filesystem root.');
 		}
 	}
 
@@ -774,8 +797,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const sshTransport = buildOptimizedRsyncSshCommand(target.port || 22);
 		const sshpassPrefix = buildSshpassPrefix(target.password);
-		const targetParentPath = getRemoteParentPath(request.target.path);
-		const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(targetParentPath)}`)}`;
+		const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+		const sourceIsDirectory = sourceType === 'directory';
+		const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
+		const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
 		const rsyncOptions = [
 			'-a',
 			'--inplace',
@@ -790,7 +815,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			'--omit-dir-times',
 			'--info=progress2'
 		].join(' ');
-		const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(request.source.path)} ${quotePosixShellArg(`${targetUserHost}:${request.target.path}`)}`;
+		const rsyncSourcePath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path;
+		const rsyncTargetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
+		const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
 		let lastRsyncBytes = 0;
 		let rsyncProgressBuffer = '';
 		const handleRsyncOutput = (chunk: string): void => {
@@ -2070,6 +2097,10 @@ function getRemoteParentPath(path: string): string {
 	return normalized.substring(0, index);
 }
 
+function ensureTrailingRemoteSlash(path: string): string {
+	return path.endsWith('/') || path.endsWith('\\') ? path : `${path}/`;
+}
+
 function getRemoteDirectoryFallbackPaths(options: ITurboFileSshConnectionOptions, path: string): string[] {
 	const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
 	const username = options.username;
@@ -2165,6 +2196,18 @@ function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string
 	const source = sourcePath.replace(/'/g, "''");
 	const target = targetPath.replace(/'/g, "''");
 	return `powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $src='${source}'; $dst='${target}'; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse"`;
+}
+
+function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
+	const literalPath = path.replace(/'/g, "''");
+	const recurseFlag = recursive ? ' -Recurse' : '';
+	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $path='${literalPath}'; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force${recurseFlag} }"`;
+}
+
+function buildPosixDeleteCommand(path: string, recursive: boolean): string {
+	const quotedPath = quotePosixShellArg(path);
+	const removeCommand = recursive ? `rm -rf -- ${quotedPath}` : `rm -f -- ${quotedPath}`;
+	return `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then ${removeCommand}; fi`;
 }
 
 function getMimeType(path: string): string {
