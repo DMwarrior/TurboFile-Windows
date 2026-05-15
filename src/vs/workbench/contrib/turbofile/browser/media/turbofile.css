@@ -3860,12 +3860,21 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-workbench.is-turbofile-dark .turbofile-device-card,
 .turbofile-workbench.is-turbofile-dark .turbofile-device-select-button,
+.turbofile-workbench.is-turbofile-dark .turbofile-device-select-menu,
 .vs-dark .turbofile-workbench .turbofile-device-card,
 .vs-dark .turbofile-workbench .turbofile-device-select-button,
+.vs-dark .turbofile-workbench .turbofile-device-select-menu,
 .hc-black .turbofile-workbench .turbofile-device-card,
-.hc-black .turbofile-workbench .turbofile-device-select-button {
+.hc-black .turbofile-workbench .turbofile-device-select-button,
+.hc-black .turbofile-workbench .turbofile-device-select-menu {
 	border: 1px solid var(--turbofile-pane-border);
 	background: var(--tf-file-surface);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-device-select-menu,
+.vs-dark .turbofile-workbench .turbofile-device-select-menu,
+.hc-black .turbofile-workbench .turbofile-device-select-menu {
+	background: var(--turbofile-unified-background);
 }
 
 .turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:hover,
