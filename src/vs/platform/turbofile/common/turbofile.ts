@@ -21,6 +21,7 @@ export interface ITurboFileSshService {
 	createDirectory(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult>;
 	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
+	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
 	writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
@@ -109,6 +110,10 @@ export interface ITurboFileTransferProgressEvent {
 export interface ITurboFileFileOperationResult {
 	readonly ok: boolean;
 	readonly message: string;
+}
+
+export interface ITurboFilePathSizeResult extends ITurboFileFileOperationResult {
+	readonly size: number;
 }
 
 export type TurboFileContentEncoding = 'utf8' | 'base64';

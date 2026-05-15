@@ -191,7 +191,7 @@ interface TurboFileDialogState {
 	readonly resolve: (value: boolean | string | undefined) => void;
 }
 
-type TurboFileTaskKind = 'transfer' | 'delete' | 'rename' | 'mkdir' | 'compress' | 'extract' | 'save' | 'ssh-test' | 'terminal' | 'sync';
+type TurboFileTaskKind = 'transfer' | 'delete' | 'rename' | 'mkdir' | 'create-file' | 'size' | 'compress' | 'extract' | 'save' | 'ssh-test' | 'terminal' | 'sync';
 type TurboFileTaskStatus = 'running' | 'success' | 'error' | 'canceled';
 type TurboFileTransferItemStatus = 'waiting' | 'running' | 'success' | 'error' | 'canceled';
 
@@ -3697,7 +3697,7 @@ export class TurboFileEditor extends EditorPane {
 			const state = this.paneStates[side];
 			if (item.parent || !state.selectedPaths.has(item.path)) {
 				this.selectItem(side, item, undefined, false);
-				this.statusMessage = item.parent ? '双击或右键菜单可返回上级目录。' : `已选择 ${item.name}。可预览、传输、删除、重命名、压缩或解压。`;
+				this.statusMessage = item.parent ? '已选择上级目录入口。' : `已选择 ${item.name}。可右键新建、重命名、复制路径、计算大小、解压、压缩或删除。`;
 				this.render();
 			}
 		}
@@ -3721,52 +3721,29 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getFileContextActions(side: 'left' | 'right', item: TurboFileFileItem): IAction[] {
-		const otherSide = this.getOppositeSide(side);
 		const canOperate = !!item.path && !item.parent;
-		const canPreview = canOperate && !item.directory;
-		const canExtract = canPreview && isArchiveFile(item.name);
+		const canExtract = canOperate && !item.directory && isArchiveFile(item.name);
 
 		if (item.parent) {
-			return [
-				this.menuAction('turbofile.openParent', '返回上级目录', Codicon.arrowUp, () => this.openItem(side, item), !!item.path),
-				new Separator(),
-				this.menuAction('turbofile.refreshPane', `刷新${this.getSideLabel(side)}`, Codicon.refresh, () => this.refreshPane(side)),
-				this.menuAction('turbofile.openTerminal', `在${this.getSideLabel(side)}打开终端`, Codicon.terminal, () => this.openTerminal(side))
-			];
+			return this.getPaneContextActions(side);
 		}
 
 		return [
-			item.directory
-				? this.menuAction('turbofile.openDirectory', '打开目录', Codicon.folderOpened, () => this.openItem(side, item), canOperate)
-				: this.menuAction('turbofile.preview', '预览 / 编辑', Codicon.eye, () => this.previewSelected(side), canPreview),
-			this.menuAction('turbofile.copyToOtherSide', this.getTransferMenuLabel(side, otherSide), Codicon.arrowRight, () => this.transferSelected(side, otherSide), canOperate),
-			this.menuAction('turbofile.moveToOtherSide', `剪切到${this.getSideLabel(otherSide)}`, Codicon.move, () => this.moveSelected(side, otherSide), canOperate),
-			new Separator(),
-			this.menuAction('turbofile.newFolder', `在${this.getSideLabel(side)}新建文件夹`, Codicon.newFolder, () => this.createFolder(side)),
+			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
+			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side)),
 			this.menuAction('turbofile.rename', '重命名', Codicon.edit, () => this.renameSelected(side), canOperate),
-			this.menuAction('turbofile.delete', '删除', Codicon.trash, () => this.deleteSelected(side), canOperate),
-			new Separator(),
-			this.menuAction('turbofile.compress', '压缩', Codicon.archive, () => this.compressSelected(side), canOperate),
+			this.menuAction('turbofile.copyPath', '复制路径', Codicon.copy, () => this.copySelectedPath(side), canOperate),
+			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate),
 			this.menuAction('turbofile.extract', '解压', Codicon.unarchive, () => this.extractSelected(side), canExtract),
-			new Separator(),
-			this.menuAction('turbofile.openTerminal', `在${this.getSideLabel(side)}打开终端`, Codicon.terminal, () => this.openTerminal(side)),
-			this.menuAction('turbofile.refreshPane', `刷新${this.getSideLabel(side)}`, Codicon.refresh, () => this.refreshPane(side))
+			this.menuAction('turbofile.compress', '压缩', Codicon.archive, () => this.compressSelected(side), canOperate),
+			this.menuAction('turbofile.delete', '删除', Codicon.trash, () => this.deleteSelected(side), canOperate)
 		];
 	}
 
 	private getPaneContextActions(side: 'left' | 'right'): IAction[] {
-		const otherSide = this.getOppositeSide(side);
-		const otherSelected = this.getSelectedTransferItems(otherSide);
-		const canTransferFromOtherSide = otherSelected.length > 0;
-
 		return [
-			this.menuAction('turbofile.refreshPane', `刷新${this.getSideLabel(side)}`, Codicon.refresh, () => this.refreshPane(side)),
-			this.menuAction('turbofile.newFolder', `在${this.getSideLabel(side)}新建文件夹`, Codicon.newFolder, () => this.createFolder(side)),
-			new Separator(),
-			this.menuAction('turbofile.copyFromOtherSide', this.getTransferMenuLabel(otherSide, side), Codicon.arrowRight, () => this.transferSelected(otherSide, side), canTransferFromOtherSide),
-			this.menuAction('turbofile.moveFromOtherSide', `剪切${this.getSideLabel(otherSide)}选中项到${this.getSideLabel(side)}`, Codicon.move, () => this.moveSelected(otherSide, side), canTransferFromOtherSide),
-			new Separator(),
-			this.menuAction('turbofile.openTerminal', `在${this.getSideLabel(side)}打开终端`, Codicon.terminal, () => this.openTerminal(side))
+			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
+			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side))
 		];
 	}
 
@@ -3787,22 +3764,6 @@ export class TurboFileEditor extends EditorPane {
 
 	private getSideLabel(side: 'left' | 'right'): string {
 		return side === 'left' ? '左侧' : '右侧';
-	}
-
-	private getTransferMenuLabel(sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): string {
-		const sourceDevice = this.getPaneDevice(sourceSide);
-		const targetDevice = this.getPaneDevice(targetSide);
-		const targetLabel = this.getSideLabel(targetSide);
-		if (sourceDevice?.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice?.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			return `上传到${targetLabel}`;
-		}
-		if (sourceDevice?.id !== LOCAL_WINDOWS_DEVICE_ID && targetDevice?.id === LOCAL_WINDOWS_DEVICE_ID) {
-			return `下载到${targetLabel}`;
-		}
-		if (sourceDevice?.id !== LOCAL_WINDOWS_DEVICE_ID && targetDevice?.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			return `传输到${targetLabel}`;
-		}
-		return `复制到${targetLabel}`;
 	}
 
 	private async testCurrentSshConnection(): Promise<void> {
@@ -4544,7 +4505,6 @@ export class TurboFileEditor extends EditorPane {
 			const result = await this.sshService.createDirectory(await this.toTransferEndpoint(device, targetPath));
 			if (result.ok) {
 				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				await this.refreshPane(side);
 				this.finishTask(task, 'success', `已创建文件夹：${name.trim()}`);
 			} else {
 				this.finishTask(task, 'error', `新建文件夹失败：${result.message}`, { error: result.message });
@@ -4552,6 +4512,38 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `新建文件夹失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
+		}
+	}
+
+	private async createFile(side: 'left' | 'right'): Promise<void> {
+		const state = this.paneStates[side];
+		const device = this.getPaneDevice(side);
+		if (!device) {
+			return;
+		}
+
+		const name = await this.showDialogPrompt('新建文件', '请输入新文件名称');
+		if (!name?.trim()) {
+			return;
+		}
+
+		const targetPath = joinPanePath(state.path, name.trim(), this.isWindowsDevice(device));
+		const task = this.beginTask('create-file', `新建文件 ${name.trim()}`, device.name);
+		try {
+			const result = await this.sshService.writeFile(await this.toTransferEndpoint(device, targetPath), '', 'utf8');
+			if (result.ok) {
+				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
+				this.finishTask(task, 'success', `已创建文件：${name.trim()}`);
+			} else {
+				this.finishTask(task, 'error', `新建文件失败：${result.message}`, { error: result.message });
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', `新建文件失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
 		}
 	}
 
@@ -4633,7 +4625,6 @@ export class TurboFileEditor extends EditorPane {
 			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, item.path), targetPath);
 			if (result.ok) {
 				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				await this.refreshPane(side);
 				this.finishTask(task, 'success', `已重命名：${item.name} -> ${nextName.trim()}`);
 			} else {
 				this.finishTask(task, 'error', `重命名失败：${result.message}`, { error: result.message });
@@ -4641,6 +4632,8 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `重命名失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
 		}
 	}
 
@@ -5597,7 +5590,6 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const result = await this.sshService.compressPath(await this.toTransferEndpoint(device, item.path));
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-			await this.refreshPane(side);
 			if (result.ok) {
 				this.finishTask(task, 'success', `压缩完成：${item.name}`);
 			} else {
@@ -5606,6 +5598,8 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `压缩失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
 		}
 	}
 
@@ -5631,7 +5625,6 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const result = await this.sshService.extractPath(await this.toTransferEndpoint(device, item.path));
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-			await this.refreshPane(side);
 			if (result.ok) {
 				this.finishTask(task, 'success', `解压完成：${item.name}`);
 			} else {
@@ -5640,6 +5633,8 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `解压失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
 		}
 	}
 
@@ -5650,6 +5645,48 @@ export class TurboFileEditor extends EditorPane {
 		await this.clipboardService.writeText(path);
 		this.statusMessage = `已复制当前路径：${path}`;
 		this.render();
+	}
+
+	private async copySelectedPath(side: 'left' | 'right'): Promise<void> {
+		const item = this.getSelectedItem(side);
+		const device = this.getPaneDevice(side);
+		if (!item?.path || !device || item.parent) {
+			this.statusMessage = '请先选择要复制路径的文件或目录。';
+			this.render();
+			return;
+		}
+
+		const path = this.formatPanePathForDisplay(item.path, this.isWindowsDevice(device));
+		await this.clipboardService.writeText(path);
+		this.statusMessage = `已复制路径：${path}`;
+		await this.refreshPane(side, { force: true });
+		this.render();
+	}
+
+	private async calculateSelectedSize(side: 'left' | 'right'): Promise<void> {
+		const item = this.getSelectedItem(side);
+		const device = this.getPaneDevice(side);
+		if (!item?.path || !device || item.parent) {
+			this.statusMessage = '请先选择要计算大小的文件或目录。';
+			this.render();
+			return;
+		}
+
+		const task = this.beginTask('size', `计算大小 ${item.name}`, device.name);
+		try {
+			const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, item.path));
+			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
+			if (result.ok) {
+				this.finishTask(task, 'success', `${item.name} 大小：${formatSize(result.size)}`);
+			} else {
+				this.finishTask(task, 'error', `计算大小失败：${result.message}`, { error: result.message });
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', `计算大小失败：${message}`, { error: message });
+		} finally {
+			await this.refreshPane(side, { force: true });
+		}
 	}
 
 	private async searchInPane(side: 'left' | 'right'): Promise<void> {
