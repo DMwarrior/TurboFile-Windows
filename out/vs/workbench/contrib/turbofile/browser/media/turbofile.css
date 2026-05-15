@@ -2092,7 +2092,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-width: 0;
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -3751,7 +3751,7 @@ body.hc-black .turbofile-live-transfer-panel {
 	--tf-bg: var(--vscode-editor-background);
 	--tf-bg-secondary: var(--vscode-sideBar-background);
 	--tf-surface: var(--vscode-sideBar-background);
-	--tf-file-surface: color-mix(in srgb, var(--vscode-editor-background) 58%, var(--turbofile-unified-background) 42%);
+	--tf-file-surface: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
 	--tf-surface-muted: color-mix(in srgb, var(--vscode-foreground) 6%, var(--vscode-editor-background));
 	--tf-text: var(--vscode-foreground);
 	--tf-text-muted: var(--vscode-descriptionForeground);
