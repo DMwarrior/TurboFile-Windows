@@ -149,6 +149,22 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	background-color: var(--vscode-activityBar-background) !important;
 }
 
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon {
+	background-color: transparent !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon:hover {
+	background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar.light .window-controls-container > .window-icon:hover {
+	background-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon.window-close:hover {
+	background-color: rgba(232, 17, 35, 0.9) !important;
+}
+
 .turbofile-transfer-page {
 	height: 100%;
 	min-height: 0;
@@ -3749,10 +3765,10 @@ body.hc-black .turbofile-live-transfer-panel {
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench {
 	--tf-bg: var(--vscode-editor-background);
-	--tf-bg-secondary: var(--vscode-sideBar-background);
-	--tf-surface: var(--vscode-sideBar-background);
+	--tf-bg-secondary: color-mix(in srgb, var(--tf-file-surface) 92%, var(--vscode-foreground) 4%);
+	--tf-surface: var(--tf-file-surface);
 	--tf-file-surface: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
-	--tf-surface-muted: color-mix(in srgb, var(--vscode-foreground) 6%, var(--vscode-editor-background));
+	--tf-surface-muted: color-mix(in srgb, var(--vscode-foreground) 6%, var(--tf-file-surface));
 	--tf-text: var(--vscode-foreground);
 	--tf-text-muted: var(--vscode-descriptionForeground);
 	--tf-text-weak: color-mix(in srgb, var(--vscode-foreground) 52%, transparent);
@@ -3769,6 +3785,66 @@ body.hc-black .turbofile-live-transfer-panel {
 	--tf-brand-soft-hover: color-mix(in srgb, var(--tf-brand-blue) 22%, transparent);
 	--turbofile-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
 	--turbofile-pane-border: var(--tf-border);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-page-card,
+.turbofile-workbench.is-turbofile-dark .turbofile-settings-section,
+.turbofile-workbench.is-turbofile-dark .turbofile-appearance-card,
+.turbofile-workbench.is-turbofile-dark .turbofile-dialog-panel,
+.turbofile-workbench.is-turbofile-dark .turbofile-task-log-panel,
+.turbofile-workbench.is-turbofile-dark .turbofile-sync-panel,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-grid-panel,
+.turbofile-workbench.is-turbofile-dark .turbofile-live-transfer-panel,
+.turbofile-workbench.is-turbofile-dark .turbofile-pane,
+.turbofile-workbench.is-turbofile-dark .turbofile-task-row,
+.turbofile-workbench.is-turbofile-dark .turbofile-live-transfer-card,
+.turbofile-workbench.is-turbofile-dark .turbofile-sidebar-device-form,
+.vs-dark .turbofile-workbench .turbofile-page-card,
+.vs-dark .turbofile-workbench .turbofile-settings-section,
+.vs-dark .turbofile-workbench .turbofile-appearance-card,
+.vs-dark .turbofile-workbench .turbofile-dialog-panel,
+.vs-dark .turbofile-workbench .turbofile-task-log-panel,
+.vs-dark .turbofile-workbench .turbofile-sync-panel,
+.vs-dark .turbofile-workbench .turbofile-image-grid-panel,
+.vs-dark .turbofile-workbench .turbofile-live-transfer-panel,
+.vs-dark .turbofile-workbench .turbofile-pane,
+.vs-dark .turbofile-workbench .turbofile-task-row,
+.vs-dark .turbofile-workbench .turbofile-live-transfer-card,
+.vs-dark .turbofile-workbench .turbofile-sidebar-device-form,
+.hc-black .turbofile-workbench .turbofile-page-card,
+.hc-black .turbofile-workbench .turbofile-settings-section,
+.hc-black .turbofile-workbench .turbofile-appearance-card,
+.hc-black .turbofile-workbench .turbofile-dialog-panel,
+.hc-black .turbofile-workbench .turbofile-task-log-panel,
+.hc-black .turbofile-workbench .turbofile-sync-panel,
+.hc-black .turbofile-workbench .turbofile-image-grid-panel,
+.hc-black .turbofile-workbench .turbofile-live-transfer-panel,
+.hc-black .turbofile-workbench .turbofile-pane,
+.hc-black .turbofile-workbench .turbofile-task-row,
+.hc-black .turbofile-workbench .turbofile-live-transfer-card,
+.hc-black .turbofile-workbench .turbofile-sidebar-device-form {
+	background: var(--tf-file-surface);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-pathbar,
+.vs-dark .turbofile-workbench .turbofile-pathbar,
+.hc-black .turbofile-workbench .turbofile-pathbar {
+	background: var(--tf-file-surface);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button,
+.vs-dark .turbofile-workbench .turbofile-location-menu-button,
+.hc-black .turbofile-workbench .turbofile-location-menu-button {
+	background: var(--tf-file-surface);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:hover,
+.turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:focus,
+.vs-dark .turbofile-workbench .turbofile-location-menu-button:hover,
+.vs-dark .turbofile-workbench .turbofile-location-menu-button:focus,
+.hc-black .turbofile-workbench .turbofile-location-menu-button:hover,
+.hc-black .turbofile-workbench .turbofile-location-menu-button:focus {
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, var(--tf-file-surface));
 }
 
 .turbofile-theme-toggle {
