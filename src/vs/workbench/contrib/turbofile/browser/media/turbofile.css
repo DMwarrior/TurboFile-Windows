@@ -3844,6 +3844,15 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: var(--tf-file-surface);
 }
 
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card,
+.turbofile-workbench.is-turbofile-dark .turbofile-device-select-button,
+.vs-dark .turbofile-workbench .turbofile-device-card,
+.vs-dark .turbofile-workbench .turbofile-device-select-button,
+.hc-black .turbofile-workbench .turbofile-device-card,
+.hc-black .turbofile-workbench .turbofile-device-select-button {
+	background: var(--tf-file-surface);
+}
+
 .turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:hover,
 .turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:focus,
 .vs-dark .turbofile-workbench .turbofile-location-menu-button:hover,
