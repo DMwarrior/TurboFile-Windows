@@ -3131,15 +3131,26 @@ export class TurboFileEditor extends EditorPane {
 			placeholder.appendChild(renderIcon(Codicon.fileMedia));
 			preview.appendChild(placeholder);
 		}
+		this.appendImageGridCardChrome(preview, image, index, state.images.length);
 		card.appendChild(preview);
 
 		const name = $('.turbofile-image-page-card-name');
 		name.textContent = image.item.name;
 		card.appendChild(name);
 
-		card.addEventListener('click', () => this.selectImageGridItem(index));
-		card.addEventListener('dblclick', () => this.openImageGridPreview(index));
+		card.addEventListener('click', () => this.openImageGridPreview(index));
 		return card;
+	}
+
+	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number, total: number): void {
+		const badge = $('.turbofile-image-page-card-badge');
+		badge.appendChild(renderIcon(Codicon.fileMedia));
+		badge.append(`${index + 1}/${total}`);
+		preview.appendChild(badge);
+
+		const meta = $('.turbofile-image-page-card-meta');
+		meta.textContent = image.item.name;
+		preview.appendChild(meta);
 	}
 
 	private renderImagePreviewOverlay(): HTMLElement {
@@ -3149,18 +3160,43 @@ export class TurboFileEditor extends EditorPane {
 			return overlay;
 		}
 
+		overlay.tabIndex = -1;
+		overlay.setAttribute('role', 'dialog');
+		overlay.setAttribute('aria-modal', 'true');
+		overlay.setAttribute('aria-label', 'Image preview');
 		overlay.addEventListener('click', event => {
 			if (event.target === overlay) {
 				this.closeImageGridPreview();
 			}
 		});
+		overlay.addEventListener('keydown', event => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				this.closeImageGridPreview();
+			} else if (event.key === 'ArrowLeft') {
+				event.preventDefault();
+				this.moveImageGridPreview(-1);
+			} else if (event.key === 'ArrowRight') {
+				event.preventDefault();
+				this.moveImageGridPreview(1);
+			}
+		});
+
+		const toolbar = $('.turbofile-image-preview-toolbar');
+		const meta = $('.turbofile-image-preview-meta');
+		meta.appendChild(renderIcon(Codicon.fileMedia));
+		const metaText = $('span.turbofile-image-preview-meta-text');
+		metaText.textContent = this.getImagePreviewMeta(state);
+		meta.appendChild(metaText);
+		toolbar.appendChild(meta);
 
 		const close = this.createButton('关闭', 'turbofile-secondary-button');
 		close.element.classList.add('turbofile-image-preview-close');
 		clearNode(close.element);
 		close.element.appendChild(renderIcon(Codicon.close));
 		close.element.addEventListener('click', () => this.closeImageGridPreview());
-		overlay.appendChild(close.element);
+		toolbar.appendChild(close.element);
+		overlay.appendChild(toolbar);
 
 		overlay.appendChild(this.renderImagePreviewSideButton(state, -1));
 		const stage = $('.turbofile-image-preview-stage');
@@ -3203,6 +3239,11 @@ export class TurboFileEditor extends EditorPane {
 		next.addEventListener('click', () => this.moveImageGridPreview(1));
 		navigation.appendChild(next);
 		overlay.appendChild(navigation);
+		getWindow(overlay).requestAnimationFrame(() => {
+			if (overlay.isConnected) {
+				overlay.focus({ preventScroll: true });
+			}
+		});
 		return overlay;
 	}
 
@@ -3263,6 +3304,10 @@ export class TurboFileEditor extends EditorPane {
 		const caption = this.container.querySelector<HTMLElement>('.turbofile-image-preview-caption');
 		if (caption) {
 			caption.textContent = this.getImagePreviewCaption(state);
+		}
+		const metaText = this.container.querySelector<HTMLElement>('.turbofile-image-preview-meta-text');
+		if (metaText) {
+			metaText.textContent = this.getImagePreviewMeta(state);
 		}
 	}
 
@@ -4766,8 +4811,7 @@ export class TurboFileEditor extends EditorPane {
 		state.selectedIndex = nextIndex;
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
-		this.updateImageGridSelection(nextIndex);
-		this.updateImagePreviewOverlay();
+		this.render();
 		this.scheduleImageGridPreviewLoaded(state, nextIndex, this.imageGridPreviewRequestSeq);
 		this.scheduleImageGridPreviewNeighborsLoaded(state, nextIndex);
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(nextIndex, state.images.length));
@@ -4816,6 +4860,14 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const sizeText = image.width && image.height ? `原图 ${image.width}x${image.height}` : image.previewLoading ? '正在加载原图' : '原图';
 		return `${image.item.name} (${state.selectedIndex + 1}/${state.images.length}) | ${sizeText}`;
+	}
+
+	private getImagePreviewMeta(state: TurboFileImageGridState): string {
+		const image = state.images[state.selectedIndex];
+		if (!image) {
+			return '';
+		}
+		return `${state.selectedIndex + 1} / ${state.images.length} · ${image.item.name}`;
 	}
 
 	private getImageGridLoadIndexes(selectedIndex: number, total: number): number[] {
@@ -5213,11 +5265,11 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const preview = card.querySelector('.turbofile-image-page-card-preview');
+		const preview = card.querySelector<HTMLElement>('.turbofile-image-page-card-preview');
 		if (!preview) {
 			return;
 		}
-		clearNode(preview as HTMLElement);
+		clearNode(preview);
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 		if (thumbnailSrc) {
 			const thumb = document.createElement('img');
@@ -5232,6 +5284,7 @@ export class TurboFileEditor extends EditorPane {
 			placeholder.appendChild(renderIcon(Codicon.fileMedia));
 			preview.appendChild(placeholder);
 		}
+		this.appendImageGridCardChrome(preview, image, index, state.images.length);
 	}
 
 	private getImageGridDefaultViewportHeight(): number {
