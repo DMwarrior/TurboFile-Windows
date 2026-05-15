@@ -13,7 +13,7 @@ import { pipeline } from 'node:stream/promises';
 import { deflateSync } from 'node:zlib';
 import { nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
+import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -64,6 +64,7 @@ interface ISSHShellWindow {
 	readonly rows?: number;
 	readonly width?: number;
 	readonly height?: number;
+	readonly modes?: Record<string, number>;
 }
 
 interface ISSHShellStream {
@@ -541,6 +542,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	async calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult> {
+		try {
+			const size = endpoint.kind === 'local'
+				? await getLocalPathSize(endpoint.path)
+				: await this.withSftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+			return { ok: true, message: 'Path size calculated.', size };
+		} catch (error) {
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error),
+				size: 0
+			};
+		}
+	}
+
 	async readFile(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadFileOptions = {}): Promise<ITurboFileReadFileResult> {
 		const encoding = options.encoding ?? 'utf8';
 		const maxBytes = options.maxBytes ?? DEFAULT_READ_LIMIT;
@@ -702,9 +718,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			stream.on('close', code => this.cleanupSshTerminalSession(sessionId, code ?? undefined));
 			client.on('close', () => this.cleanupSshTerminalSession(sessionId, undefined));
 
-			if (cwd) {
-				stream.write(`cd ${quotePosixShellArg(cwd)}\n`);
-			}
+			stream.write(buildShellBootstrapCommand(cwd));
 
 			return {
 				sessionId,
@@ -1178,7 +1192,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				cols: Math.max(1, cols || 80),
 				rows: Math.max(1, rows || 24),
 				width: 0,
-				height: 0
+				height: 0,
+				modes: {
+					ECHO: 0
+				}
 			}, (error, stream) => {
 				if (error) {
 					reject(error);
@@ -2095,6 +2112,16 @@ function getRemoteParentPath(path: string): string {
 		return '/';
 	}
 	return normalized.substring(0, index);
+}
+
+function buildShellBootstrapCommand(cwd: string): string {
+	const commands = [
+		'stty echo',
+		'printf "\\033[H\\033[2J\\033[3J"',
+		cwd ? `cd ${quotePosixShellArg(cwd)} 2>/dev/null || true` : undefined
+	].filter((command): command is string => !!command);
+
+	return `${commands.join('; ')}\n`;
 }
 
 function ensureTrailingRemoteSlash(path: string): string {
