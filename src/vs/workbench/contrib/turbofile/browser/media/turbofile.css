@@ -2101,16 +2101,6 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	will-change: transform;
 }
 
-.turbofile-file-theme-icon {
-	flex: 0 0 auto;
-	display: inline-flex;
-	align-items: center;
-}
-
-.turbofile-file-theme-icon::before {
-	padding-right: 0;
-}
-
 .turbofile-file-row.is-clickable:active .turbofile-file-name {
 	transform: scale(1.028);
 }
