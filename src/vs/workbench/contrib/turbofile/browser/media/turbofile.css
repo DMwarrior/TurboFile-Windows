@@ -146,23 +146,30 @@ body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-con
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container {
-	background-color: var(--vscode-activityBar-background) !important;
+	background-color: var(--vscode-titleBar-activeBackground, var(--vscode-activityBar-background)) !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon {
 	background-color: transparent !important;
+	transition: background 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon:hover {
-	background-color: rgba(255, 255, 255, 0.1) !important;
+	background: color-mix(in srgb, var(--vscode-titleBar-activeForeground, #111111) 8%, var(--vscode-titleBar-activeBackground, #ffffff)) !important;
+	box-shadow: 0 4px 14px color-mix(in srgb, var(--vscode-widget-shadow, #000000) 16%, transparent) !important;
+	transform: translateY(-1px);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar.light .window-controls-container > .window-icon:hover {
-	background-color: rgba(0, 0, 0, 0.1) !important;
+	background: color-mix(in srgb, var(--vscode-titleBar-activeForeground, #111111) 8%, var(--vscode-titleBar-activeBackground, #ffffff)) !important;
+	box-shadow: 0 4px 14px color-mix(in srgb, var(--vscode-widget-shadow, #000000) 16%, transparent) !important;
+	transform: translateY(-1px);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon.window-close:hover {
-	background-color: rgba(232, 17, 35, 0.9) !important;
+	background: rgba(232, 17, 35, 0.9) !important;
+	box-shadow: 0 4px 14px color-mix(in srgb, var(--vscode-widget-shadow, #000000) 16%, transparent) !important;
+	transform: translateY(-1px);
 }
 
 .turbofile-transfer-page {
@@ -1535,6 +1542,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	display: grid;
 	grid-template-rows: 20px 30px;
 	gap: 4px;
+	border-top: 1px solid var(--turbofile-pane-border);
 	border-bottom: 1px solid var(--turbofile-pane-border);
 	position: relative;
 	z-index: 10;
@@ -3850,6 +3858,7 @@ body.hc-black .turbofile-live-transfer-panel {
 .vs-dark .turbofile-workbench .turbofile-device-select-button,
 .hc-black .turbofile-workbench .turbofile-device-card,
 .hc-black .turbofile-workbench .turbofile-device-select-button {
+	border: 1px solid var(--turbofile-pane-border);
 	background: var(--tf-file-surface);
 }
 
