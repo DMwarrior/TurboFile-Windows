@@ -290,7 +290,7 @@ export function getWindowControlsStyle(configurationService: IConfigurationServi
 		return style;
 	}
 
-	return WindowControlsStyle.NATIVE; // default to native on all OS
+	return WindowControlsStyle.CUSTOM; // default to custom controls so product titlebar styling is consistent
 }
 
 export const DEFAULT_CUSTOM_TITLEBAR_HEIGHT = 35; // includes space for command center

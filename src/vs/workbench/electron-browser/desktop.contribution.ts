@@ -249,7 +249,7 @@ import product from '../../platform/product/common/product.js';
 			'window.controlsStyle': {
 				'type': 'string',
 				'enum': ['native', 'custom', 'hidden'],
-				'default': 'native',
+				'default': 'custom',
 				'included': !isMacintosh,
 				'scope': ConfigurationScope.APPLICATION,
 				'description': localize('controlsStyle', "Adjust the appearance of the window controls to be native by the OS, custom drawn or hidden. Changes require a full restart to apply."),

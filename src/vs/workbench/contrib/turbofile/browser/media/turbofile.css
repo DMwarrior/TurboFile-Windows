@@ -145,8 +145,13 @@ body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-con
 	display: none !important;
 }
 
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar > .titlebar-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .titlebar-left,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .titlebar-center,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .titlebar-right,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container {
-	background-color: var(--vscode-activityBar-background) !important;
+	background-color: var(--turbofile-unified-background, var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)))) !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon {
