@@ -1794,7 +1794,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	line-height: 1.25;
 	white-space: nowrap;
 	overflow: hidden;
-	background: var(--vscode-editor-background);
+	background: var(--tf-file-surface, var(--vscode-editor-background));
 }
 
 .turbofile-pathbar-primary {
@@ -1814,7 +1814,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	padding: 0 10px;
 	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
 	border-radius: 8px;
-	background: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-editor-background));
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, var(--tf-file-surface, var(--vscode-editor-background)));
 	color: var(--turbofile-browser-font-color, var(--vscode-input-foreground));
 	font-family: inherit;
 	font-size: inherit;
@@ -3827,8 +3827,14 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-workbench.is-turbofile-dark .turbofile-pathbar,
+.turbofile-workbench.is-turbofile-dark .turbofile-browser-header,
+.turbofile-workbench.is-turbofile-dark .turbofile-browser-toolbar,
 .vs-dark .turbofile-workbench .turbofile-pathbar,
-.hc-black .turbofile-workbench .turbofile-pathbar {
+.vs-dark .turbofile-workbench .turbofile-browser-header,
+.vs-dark .turbofile-workbench .turbofile-browser-toolbar,
+.hc-black .turbofile-workbench .turbofile-pathbar,
+.hc-black .turbofile-workbench .turbofile-browser-header,
+.hc-black .turbofile-workbench .turbofile-browser-toolbar {
 	background: var(--tf-file-surface);
 }
 
