@@ -31,6 +31,7 @@ const SFTP_LARGE_TRANSFER_CONCURRENCY = 96;
 const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 512 * 1024;
 const SFTP_STREAM_RELAY_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
+const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 
 class TurboFileTransferCanceledError extends Error {
 	constructor() {
@@ -121,6 +122,8 @@ interface ITurboFileSshTerminalMainSession {
 	dataEmitter: Emitter<string>;
 	exitEmitter: Emitter<number | undefined>;
 	dataBuffer: string[];
+	bootstrapBuffer: string;
+	bootstrapping: boolean;
 	hasDataListener: boolean;
 	closed: boolean;
 }
@@ -694,6 +697,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				dataEmitter: new Emitter<string>(),
 				exitEmitter: new Emitter<number | undefined>(),
 				dataBuffer: [],
+				bootstrapBuffer: '',
+				bootstrapping: true,
 				hasDataListener: false,
 				closed: false
 			};
@@ -701,6 +706,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			stream.on('data', data => {
 				const chunk = data.toString();
+				if (session.bootstrapping) {
+					session.bootstrapBuffer += chunk;
+					const markerIndex = session.bootstrapBuffer.indexOf(SSH_TERMINAL_READY_MARKER);
+					if (markerIndex >= 0) {
+						const remaining = session.bootstrapBuffer.slice(markerIndex + SSH_TERMINAL_READY_MARKER.length).replace(/^\r?\n/, '');
+						session.bootstrapBuffer = '';
+						session.bootstrapping = false;
+						if (remaining) {
+							if (session.hasDataListener) {
+								session.dataEmitter.fire(remaining);
+							} else {
+								session.dataBuffer.push(remaining);
+							}
+						}
+					}
+					return;
+				}
 				if (session.hasDataListener) {
 					session.dataEmitter.fire(chunk);
 				} else {
@@ -2118,7 +2140,8 @@ function buildShellBootstrapCommand(cwd: string): string {
 	const commands = [
 		'stty echo',
 		'printf "\\033[H\\033[2J\\033[3J"',
-		cwd ? `cd ${quotePosixShellArg(cwd)} 2>/dev/null || true` : undefined
+		cwd ? `cd ${quotePosixShellArg(cwd)} 2>/dev/null || true` : undefined,
+		`printf "\\n${SSH_TERMINAL_READY_MARKER}\\n"`
 	].filter((command): command is string => !!command);
 
 	return `${commands.join('; ')}\n`;
