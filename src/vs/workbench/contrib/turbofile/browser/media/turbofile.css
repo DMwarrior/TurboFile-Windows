@@ -145,6 +145,10 @@ body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-con
 	display: none !important;
 }
 
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container {
+	background-color: var(--vscode-activityBar-background) !important;
+}
+
 .turbofile-transfer-page {
 	height: 100%;
 	min-height: 0;
