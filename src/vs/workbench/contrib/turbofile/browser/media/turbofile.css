@@ -2092,13 +2092,23 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-width: 0;
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	transform-origin: left center;
 	transition: transform 80ms ease;
 	will-change: transform;
+}
+
+.turbofile-file-theme-icon {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+}
+
+.turbofile-file-theme-icon::before {
+	padding-right: 0;
 }
 
 .turbofile-file-row.is-clickable:active .turbofile-file-name {

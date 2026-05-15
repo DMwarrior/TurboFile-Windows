@@ -16,9 +16,12 @@ import { Disposable, DisposableStore, IDisposable } from '../../../../base/commo
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IAction, Separator, toAction } from '../../../../base/common/actions.js';
+import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
+import { ILanguageService } from '../../../../editor/common/languages/language.js';
+import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
-import { createFileSystemProviderError, FileChangeType, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
+import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -523,6 +526,8 @@ export class TurboFileEditor extends EditorPane {
 		@ITurboFileSshService private readonly sshService: ITurboFileSshService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 		@IFileService private readonly fileService: IFileService,
+		@IModelService private readonly modelService: IModelService,
+		@ILanguageService private readonly languageService: ILanguageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IEditorService private readonly editorService: IEditorService,
 		@ITerminalService private readonly terminalService: ITerminalService,
@@ -1563,6 +1568,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const list = $('.turbofile-file-list');
 		list.classList.toggle('is-external-drop-target', this.externalDropTargetSide === side);
+		list.classList.add('show-file-icons');
 		list.tabIndex = 0;
 		list.addEventListener('pointerdown', () => {
 			this.lastActiveSide = side;
@@ -2103,7 +2109,7 @@ export class TurboFileEditor extends EditorPane {
 		});
 
 		const name = $('.turbofile-file-name');
-		name.appendChild(renderFileBrowserIcon(item));
+		name.appendChild(this.renderFileBrowserIcon(item));
 		name.append(item.name);
 
 		const size = $('.turbofile-file-meta');
@@ -6305,6 +6311,19 @@ export class TurboFileEditor extends EditorPane {
 		return this.getAllDevices().find(device => device.id === deviceId);
 	}
 
+	private renderFileBrowserIcon(item: TurboFileFileItem): Element {
+		if (item.parent) {
+			return renderTurboFileIcon('arrow-up-circle', 'primary');
+		}
+
+		const icon = $('span.turbofile-file-theme-icon.monaco-icon-label') as HTMLSpanElement;
+		const resource = item.path ? URI.file(item.path) : undefined;
+		const fileKind = item.directory ? FileKind.FOLDER : FileKind.FILE;
+		icon.classList.add(...getIconClasses(this.modelService, this.languageService, resource, fileKind));
+		icon.setAttribute('aria-hidden', 'true');
+		return icon;
+	}
+
 	private getDeviceDisplayLabel(device: TurboFileDevice): string {
 		const host = device.id === LOCAL_WINDOWS_DEVICE_ID && device.host === 'localhost' ? '10.190.129.29' : device.host;
 		return `${device.name} (${host})`;
@@ -7025,19 +7044,6 @@ function toProviderFileType(type: TurboFileFileType): FileType {
 
 function createTurboFileProviderError(message: string, code: FileSystemProviderErrorCode): Error {
 	return createFileSystemProviderError(message, code);
-}
-
-function renderFileBrowserIcon(item: TurboFileFileItem): SVGElement {
-	if (item.parent) {
-		return renderTurboFileIcon('arrow-up-circle', 'primary');
-	}
-	if (item.directory) {
-		return renderTurboFileIcon('folder-fill', 'warning');
-	}
-	if (isArchiveFile(item.name)) {
-		return renderTurboFileIcon('file-earmark-zip', 'primary');
-	}
-	return renderTurboFileIcon('file-earmark', 'info');
 }
 
 function renderTurboFileIcon(icon: TurboFileBootstrapIcon, color?: TurboFileIconColor): SVGElement {
