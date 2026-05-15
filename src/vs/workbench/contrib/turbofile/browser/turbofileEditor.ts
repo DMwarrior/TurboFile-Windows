@@ -6315,11 +6315,13 @@ export class TurboFileEditor extends EditorPane {
 		if (item.parent) {
 			return renderTurboFileIcon('arrow-up-circle', 'primary');
 		}
+		if (item.directory) {
+			return renderTurboFileIcon('folder-fill', 'warning');
+		}
 
 		const icon = $('span.turbofile-file-theme-icon.monaco-icon-label') as HTMLSpanElement;
 		const resource = item.path ? URI.file(item.path) : undefined;
-		const fileKind = item.directory ? FileKind.FOLDER : FileKind.FILE;
-		icon.classList.add(...getIconClasses(this.modelService, this.languageService, resource, fileKind));
+		icon.classList.add(...getIconClasses(this.modelService, this.languageService, resource, FileKind.FILE));
 		icon.setAttribute('aria-hidden', 'true');
 		return icon;
 	}
