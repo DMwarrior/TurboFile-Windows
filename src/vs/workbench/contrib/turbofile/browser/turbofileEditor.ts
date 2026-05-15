@@ -5725,18 +5725,23 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const displayPath = this.formatPanePathForDisplay(item.path, this.isWindowsDevice(device));
 		const task = this.beginTask('size', `计算大小 ${item.name}`, device.name);
 		try {
 			const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, item.path));
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			if (result.ok) {
-				this.finishTask(task, 'success', `${item.name} 大小：${formatSize(result.size)}`);
+				const sizeText = formatSize(result.size);
+				this.finishTask(task, 'success', `${item.name} 大小：${sizeText}`);
+				this.showDialogInfo('计算大小完成', `${item.name} 大小：${sizeText}`, `设备：${device.name}\n路径：${displayPath}`);
 			} else {
 				this.finishTask(task, 'error', `计算大小失败：${result.message}`, { error: result.message });
+				this.showDialogInfo('计算大小失败', result.message, `设备：${device.name}\n路径：${displayPath}`);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `计算大小失败：${message}`, { error: message });
+			this.showDialogInfo('计算大小失败', message, `设备：${device.name}\n路径：${displayPath}`);
 		} finally {
 			await this.refreshPane(side, { force: true });
 		}
