@@ -606,7 +606,6 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}));
 		void this.loadColorThemes();
-		void this.ensureNativeEditorTheme();
 		void this.refreshWindowsDriveRoots();
 		this.ensurePaneDeviceSelection();
 		this.render();
@@ -1081,10 +1080,6 @@ export class TurboFileEditor extends EditorPane {
 		this.container.classList.toggle('is-turbofile-dark', effectiveMode === 'dark');
 	}
 
-	private isTurboFileTheme(theme: IWorkbenchColorTheme): boolean {
-		return theme.id.startsWith('vs-dark turbofile-') || theme.id.startsWith('vs turbofile-') || theme.id === TURBOFILE_LIGHT_THEME_CLASS_ID;
-	}
-
 	private getAppearanceMode(): 'light' | 'dark' | 'system' {
 		if (this.configurationService.getValue<boolean>(ThemeSettings.DETECT_COLOR_SCHEME)) {
 			return 'system';
@@ -1107,11 +1102,13 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getAppearanceTheme(mode: 'light' | 'dark'): IWorkbenchColorTheme {
+		const label = mode === 'dark' ? TURBOFILE_APPEARANCE_DARK_THEME_LABEL : TURBOFILE_APPEARANCE_LIGHT_THEME_LABEL;
 		const settingsId = mode === 'dark' ? ThemeSettingDefaults.COLOR_THEME_DARK : ThemeSettingDefaults.COLOR_THEME_LIGHT;
-		const nativeThemes = this.availableColorThemes.filter(theme => !this.isTurboFileTheme(theme));
-		return nativeThemes.find(theme => theme.settingsId === settingsId)
-			?? nativeThemes.find(theme => theme.type === (mode === 'dark' ? ColorScheme.DARK : ColorScheme.LIGHT))
-			?? this.workbenchThemeService.getColorTheme();
+		const themeId = mode === 'light' ? TURBOFILE_LIGHT_THEME_CLASS_ID : 'vs-dark turbofile-2017-dark-cpp';
+		const themes = [...this.getBuiltinColorThemes(), ...this.availableColorThemes];
+		return themes.find(theme => theme.label === label || theme.id === themeId)
+			?? themes.find(theme => theme.settingsId === settingsId)
+			?? this.createBuiltinColorTheme(mode === 'dark' ? 'vs-dark turbofile-2017-dark-cpp' : TURBOFILE_LIGHT_THEME_CLASS_ID, label, settingsId, mode === 'dark' ? COLOR_THEME_DARK_INITIAL_COLORS : TURBOFILE_LIGHT_THEME_COLORS);
 	}
 
 
@@ -1178,19 +1175,6 @@ export class TurboFileEditor extends EditorPane {
 			if (this.activePage === 'themes') {
 				this.render();
 			}
-		}
-	}
-
-	private async ensureNativeEditorTheme(): Promise<void> {
-		const currentTheme = this.workbenchThemeService.getColorTheme();
-		if (!this.isTurboFileTheme(currentTheme)) {
-			return;
-		}
-
-		await this.loadColorThemes(true);
-		const replacement = currentTheme.type === ColorScheme.LIGHT ? this.getAppearanceTheme('light') : this.getAppearanceTheme('dark');
-		if (!this.isTurboFileTheme(replacement) && replacement.id !== currentTheme.id) {
-			await this.workbenchThemeService.setColorTheme(replacement, 'auto');
 		}
 	}
 
