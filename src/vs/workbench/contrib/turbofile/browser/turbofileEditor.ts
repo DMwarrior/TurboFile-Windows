@@ -6227,17 +6227,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getWindowsLocationMenuIconClass(path: string): string {
-		const desktopPath = joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
-		if (isSameWindowsPath(path, desktopPath)) {
-			return ThemeIcon.asClassName(Codicon.deviceDesktop);
-		}
-
-		const driveRoot = getWindowsDriveRoot(path);
-		if (driveRoot?.substring(0, 1).toUpperCase() === 'C') {
-			return ThemeIcon.asClassName(Codicon.window);
-		}
-
-		return ThemeIcon.asClassName(Codicon.database);
+		return `turbofile-windows-location-action turbofile-location-menu-icon ${this.getWindowsLocationIconClass(path)}`;
 	}
 
 	private showWindowsLocationMenu(side: 'left' | 'right', event: MouseEvent | KeyboardEvent): void {
