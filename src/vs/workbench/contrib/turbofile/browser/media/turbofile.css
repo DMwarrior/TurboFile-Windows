@@ -1237,6 +1237,14 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	border-radius: 4px;
 	color: var(--vscode-input-foreground);
 	background: var(--vscode-input-background);
+	appearance: textfield;
+	-moz-appearance: textfield;
+}
+
+.turbofile-editor-font-size-input::-webkit-outer-spin-button,
+.turbofile-editor-font-size-input::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
 }
 
 .turbofile-browser-select {

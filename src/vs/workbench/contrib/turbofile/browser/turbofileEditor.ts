@@ -894,12 +894,17 @@ export class TurboFileEditor extends EditorPane {
 		card.appendChild(header);
 
 		const rows = $('.turbofile-appearance-font-summary');
+		rows.appendChild(this.renderEditorFontSizeSetting());
 		rows.appendChild(this.renderUiFontSizeSetting());
 		rows.appendChild(this.renderUiFontFamilySetting());
 		rows.appendChild(this.renderBrowserFontSizeSetting());
 		rows.appendChild(this.renderBrowserFontFamilySetting());
 		card.appendChild(rows);
 		return card;
+	}
+
+	private renderEditorFontSizeSetting(): HTMLElement {
+		return this.renderFontSizeSetting('文档字体大小', '调整当前打开文档的字号，修改后立即生效。', 'editor.fontSize', this.getEditorFontSize(), 8, 40, value => this.updateEditorFontSize(value));
 	}
 
 	private renderUiFontSizeSetting(): HTMLElement {
@@ -930,8 +935,6 @@ export class TurboFileEditor extends EditorPane {
 		copy.appendChild(description);
 
 		const controls = $('.turbofile-editor-setting-controls');
-		const decrease = this.createPageButton(Codicon.remove, '减小', () => update(currentFontSize - 1));
-		const increase = this.createPageButton(Codicon.add, '增大', () => update(currentFontSize + 1), true);
 		const input = $('input.turbofile-editor-font-size-input') as HTMLInputElement;
 		input.id = id;
 		input.type = 'number';
@@ -946,9 +949,7 @@ export class TurboFileEditor extends EditorPane {
 				update(input.valueAsNumber);
 			}
 		});
-		controls.appendChild(decrease);
 		controls.appendChild(input);
-		controls.appendChild(increase);
 
 		row.appendChild(copy);
 		row.appendChild(controls);
@@ -989,6 +990,11 @@ export class TurboFileEditor extends EditorPane {
 		return this.normalizeUiFontSize(stored, TURBOFILE_UI_DEFAULT_FONT_SIZE);
 	}
 
+	private getEditorFontSize(): number {
+		const value = this.configurationService.getValue<number>('editor.fontSize');
+		return this.normalizeEditorFontSize(typeof value === 'number' ? value : TURBOFILE_UI_DEFAULT_FONT_SIZE, TURBOFILE_UI_DEFAULT_FONT_SIZE);
+	}
+
 	private normalizeUiFontSize(value: number, fallback: number): number {
 		if (!Number.isFinite(value)) {
 			return fallback;
@@ -996,10 +1002,24 @@ export class TurboFileEditor extends EditorPane {
 		return Math.min(24, Math.max(11, Math.round(value)));
 	}
 
+	private normalizeEditorFontSize(value: number, fallback: number): number {
+		if (!Number.isFinite(value)) {
+			return fallback;
+		}
+		return Math.min(40, Math.max(8, Math.round(value)));
+	}
+
 	private updateUiFontSize(value: number): void {
 		const fontSize = this.normalizeUiFontSize(value, this.getUiFontSize());
 		this.storageService.store(TURBOFILE_UI_FONT_SIZE_STORAGE_KEY, String(fontSize), StorageScope.PROFILE, StorageTarget.USER);
 		this.statusMessage = `UI 字号已设置为 ${fontSize}px。`;
+		this.render();
+	}
+
+	private updateEditorFontSize(value: number): void {
+		const fontSize = this.normalizeEditorFontSize(value, this.getEditorFontSize());
+		void this.configurationService.updateValue('editor.fontSize', fontSize, ConfigurationTarget.USER);
+		this.statusMessage = `文档字体大小已设置为 ${fontSize}px。`;
 		this.render();
 	}
 
@@ -1191,40 +1211,47 @@ export class TurboFileEditor extends EditorPane {
 			const settingsText = (await this.fileService.readFile(settingsUri)).value.toString();
 			const settings = JSON.parse(settingsText) as Record<string, unknown>;
 			const updates: Promise<void>[] = [];
+			const applyIfUnset = (key: string, value: unknown): void => {
+				const inspect = this.configurationService.inspect(key);
+				if (inspect.userValue !== undefined || inspect.userLocalValue !== undefined || inspect.userRemoteValue !== undefined || inspect.workspaceValue !== undefined || inspect.workspaceFolderValue !== undefined || inspect.memoryValue !== undefined) {
+					return;
+				}
+				updates.push(this.configurationService.updateValue(key, value, ConfigurationTarget.MEMORY));
+			};
 
 			const editorFontSize = settings['editor.fontSize'];
 			if (typeof editorFontSize === 'number' && Number.isFinite(editorFontSize)) {
-				updates.push(this.configurationService.updateValue('editor.fontSize', editorFontSize, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.fontSize', editorFontSize);
 			}
 
 			const editorFontFamily = settings['editor.fontFamily'];
 			if (typeof editorFontFamily === 'string' && editorFontFamily.length) {
-				updates.push(this.configurationService.updateValue('editor.fontFamily', editorFontFamily, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.fontFamily', editorFontFamily);
 			}
 
 			const editorLineHeight = settings['editor.lineHeight'];
 			if (typeof editorLineHeight === 'number' && Number.isFinite(editorLineHeight)) {
-				updates.push(this.configurationService.updateValue('editor.lineHeight', editorLineHeight, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.lineHeight', editorLineHeight);
 			}
 
 			const editorFontLigatures = settings['editor.fontLigatures'];
 			if (typeof editorFontLigatures === 'boolean' || typeof editorFontLigatures === 'string') {
-				updates.push(this.configurationService.updateValue('editor.fontLigatures', editorFontLigatures, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.fontLigatures', editorFontLigatures);
 			}
 
 			const tokenColorCustomizations = settings['editor.tokenColorCustomizations'];
 			if (tokenColorCustomizations && typeof tokenColorCustomizations === 'object') {
-				updates.push(this.configurationService.updateValue('editor.tokenColorCustomizations', tokenColorCustomizations as object, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.tokenColorCustomizations', tokenColorCustomizations as object);
 			}
 
 			const semanticTokenColorCustomizations = settings['editor.semanticTokenColorCustomizations'];
 			if (semanticTokenColorCustomizations && typeof semanticTokenColorCustomizations === 'object') {
-				updates.push(this.configurationService.updateValue('editor.semanticTokenColorCustomizations', semanticTokenColorCustomizations as object, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.semanticTokenColorCustomizations', semanticTokenColorCustomizations as object);
 			}
 
 			const semanticHighlighting = settings['editor.semanticHighlighting.enabled'];
 			if (typeof semanticHighlighting === 'boolean' || typeof semanticHighlighting === 'string') {
-				updates.push(this.configurationService.updateValue('editor.semanticHighlighting.enabled', semanticHighlighting, ConfigurationTarget.MEMORY));
+				applyIfUnset('editor.semanticHighlighting.enabled', semanticHighlighting);
 			}
 
 			await Promise.all(updates);
