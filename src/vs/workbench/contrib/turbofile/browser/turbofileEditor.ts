@@ -15,6 +15,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
+import { joinPath } from '../../../../base/common/resources.js';
 import { IAction, Separator, toAction } from '../../../../base/common/actions.js';
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
@@ -605,6 +606,7 @@ export class TurboFileEditor extends EditorPane {
 				this.render();
 			}
 		}));
+		void this.syncNativeEditorDisplaySettings();
 		void this.loadColorThemes();
 		void this.refreshWindowsDriveRoots();
 		this.ensurePaneDeviceSelection();
@@ -1175,6 +1177,59 @@ export class TurboFileEditor extends EditorPane {
 			if (this.activePage === 'themes') {
 				this.render();
 			}
+		}
+	}
+
+	private async syncNativeEditorDisplaySettings(): Promise<void> {
+		const settingsHome = this.environmentService.parentAppUserRoamingDataHome;
+		if (!settingsHome) {
+			return;
+		}
+
+		const settingsUri = joinPath(settingsHome, 'settings.json');
+		try {
+			const settingsText = (await this.fileService.readFile(settingsUri)).value.toString();
+			const settings = JSON.parse(settingsText) as Record<string, unknown>;
+			const updates: Promise<void>[] = [];
+
+			const editorFontSize = settings['editor.fontSize'];
+			if (typeof editorFontSize === 'number' && Number.isFinite(editorFontSize)) {
+				updates.push(this.configurationService.updateValue('editor.fontSize', editorFontSize, ConfigurationTarget.MEMORY));
+			}
+
+			const editorFontFamily = settings['editor.fontFamily'];
+			if (typeof editorFontFamily === 'string' && editorFontFamily.length) {
+				updates.push(this.configurationService.updateValue('editor.fontFamily', editorFontFamily, ConfigurationTarget.MEMORY));
+			}
+
+			const editorLineHeight = settings['editor.lineHeight'];
+			if (typeof editorLineHeight === 'number' && Number.isFinite(editorLineHeight)) {
+				updates.push(this.configurationService.updateValue('editor.lineHeight', editorLineHeight, ConfigurationTarget.MEMORY));
+			}
+
+			const editorFontLigatures = settings['editor.fontLigatures'];
+			if (typeof editorFontLigatures === 'boolean' || typeof editorFontLigatures === 'string') {
+				updates.push(this.configurationService.updateValue('editor.fontLigatures', editorFontLigatures, ConfigurationTarget.MEMORY));
+			}
+
+			const tokenColorCustomizations = settings['editor.tokenColorCustomizations'];
+			if (tokenColorCustomizations && typeof tokenColorCustomizations === 'object') {
+				updates.push(this.configurationService.updateValue('editor.tokenColorCustomizations', tokenColorCustomizations as object, ConfigurationTarget.MEMORY));
+			}
+
+			const semanticTokenColorCustomizations = settings['editor.semanticTokenColorCustomizations'];
+			if (semanticTokenColorCustomizations && typeof semanticTokenColorCustomizations === 'object') {
+				updates.push(this.configurationService.updateValue('editor.semanticTokenColorCustomizations', semanticTokenColorCustomizations as object, ConfigurationTarget.MEMORY));
+			}
+
+			const semanticHighlighting = settings['editor.semanticHighlighting.enabled'];
+			if (typeof semanticHighlighting === 'boolean' || typeof semanticHighlighting === 'string') {
+				updates.push(this.configurationService.updateValue('editor.semanticHighlighting.enabled', semanticHighlighting, ConfigurationTarget.MEMORY));
+			}
+
+			await Promise.all(updates);
+		} catch {
+			// If the host VS Code settings file is unavailable, keep the current editor configuration.
 		}
 	}
 
