@@ -146,7 +146,7 @@ body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-con
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container {
-	background-color: var(--vscode-titleBar-activeBackground, var(--vscode-activityBar-background)) !important;
+	background-color: var(--vscode-activityBar-background) !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .window-controls-container > .window-icon {
@@ -3878,7 +3878,7 @@ body.hc-black .turbofile-live-transfer-panel {
 	flex: 0 0 auto;
 	align-items: center;
 	justify-content: center;
-	margin: 0 6px 0 4px;
+	margin: 0 0 0 4px;
 	border: 1px solid transparent;
 	border-radius: 999px;
 	color: var(--vscode-titleBar-activeForeground, #111111);
