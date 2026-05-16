@@ -513,6 +513,7 @@ export class TurboFileEditor extends EditorPane {
 	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
+	private readonly windowsClipboardPasteInFlight = new Set<string>();
 	private availableWindowsDriveRoots: string[] = [];
 	private statusMessage = '极速传已启动：双栏浏览、设备管理、传输、预览和终端入口已接入。';
 	private taskSequence = 1;
@@ -1669,10 +1670,6 @@ export class TurboFileEditor extends EditorPane {
 				event.preventDefault();
 				void this.deleteSelected(side);
 				return;
-			}
-			if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
-				event.preventDefault();
-				void this.pasteWindowsClipboardFiles(side);
 			}
 		});
 		list.addEventListener('paste', event => {
@@ -4338,7 +4335,26 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		await this.transferExternalPaths(targetSide, clipboardFiles.paths, clipboardFiles.operation);
+		const pasteKey = this.getWindowsClipboardPasteKey(targetSide, clipboardFiles.paths, clipboardFiles.operation);
+		if (this.windowsClipboardPasteInFlight.has(pasteKey)) {
+			return;
+		}
+
+		this.windowsClipboardPasteInFlight.add(pasteKey);
+		try {
+			await this.transferExternalPaths(targetSide, clipboardFiles.paths, clipboardFiles.operation);
+		} finally {
+			this.windowsClipboardPasteInFlight.delete(pasteKey);
+		}
+	}
+
+	private getWindowsClipboardPasteKey(targetSide: 'left' | 'right', paths: readonly string[], operation: 'copy' | 'move'): string {
+		const targetPath = this.paneStates[targetSide].path.toLowerCase();
+		const sourcePaths = paths
+			.map(path => path.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase())
+			.sort()
+			.join('\n');
+		return `${targetSide}:${targetPath}:${operation}:${sourcePaths}`;
 	}
 
 	private async deleteExternalSourceItems(task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
