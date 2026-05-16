@@ -30,6 +30,7 @@ const SFTP_LARGE_FILE_THRESHOLD = 512 * 1024 * 1024;
 const SFTP_LARGE_TRANSFER_CONCURRENCY = 96;
 const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 512 * 1024;
 const SFTP_STREAM_RELAY_HIGH_WATER_MARK = 4 * 1024 * 1024;
+const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 8;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 
@@ -347,10 +348,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				await fsp.mkdir(dirname(request.target.path), { recursive: true });
 				let bytes = 0;
+				const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
 				await this.withSftp(request.source, async sftp => {
 					this.throwIfTransferCanceled(request.progressId);
-					const sourceType = request.sourceType ?? getFileTypeFromStats(await this.remoteStat(sftp, request.source.path));
-					bytes = await this.getRemotePathSize(sftp, request.source.path);
 					this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true);
 					let transferredBytes = 0;
 					const onDelta = (delta: number): void => {
@@ -403,10 +404,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				await fsp.mkdir(relayRoot, { recursive: true });
 				let bytes = 0;
+				const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
 				await this.withSftp(request.source, async sftp => {
 					this.throwIfTransferCanceled(request.progressId);
-					const sourceType = request.sourceType ?? getFileTypeFromStats(await this.remoteStat(sftp, request.source.path));
-					bytes = await this.getRemotePathSize(sftp, request.source.path);
 					const relayTotalBytes = bytes * 2;
 					this.fireTransferProgress(request, 0, relayTotalBytes, 'prepare', 'Preparing SFTP relay.', true);
 					let downloadedBytes = 0;
@@ -549,7 +550,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			const size = endpoint.kind === 'local'
 				? await getLocalPathSize(endpoint.path)
-				: await this.withSftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+				: await this.getRemotePathSizeByCommand(endpoint);
 			return { ok: true, message: 'Path size calculated.', size };
 		} catch (error) {
 			return {
@@ -802,12 +803,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		this.throwIfTransferCanceled(request.progressId);
-		let bytes = 0;
-		try {
-			bytes = await this.withDirectorySftp(request.source, async sftp => this.getRemotePathSize(sftp, request.source.path));
-		} catch {
-			bytes = 0;
-		}
+		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+		const bytes = sourceType === 'directory' ? 0 : await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
 
 		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
@@ -838,22 +835,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const target = request.target.connection;
 		const targetUserHost = `${target.username}@${target.host}`;
+		const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+		const sourceIsDirectory = sourceType === 'directory';
 		let bytes = 0;
-		try {
-			bytes = await this.withSftp(request.source, async sftp => this.getRemotePathSize(sftp, request.source.path), request.progressId);
-		} catch {
-			if (this.isTransferCanceled(request.progressId)) {
-				throw new TurboFileTransferCanceledError();
+		if (!sourceIsDirectory) {
+			try {
+				bytes = await this.getRemotePathSizeByCommand(request.source);
+			} catch {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				bytes = 0;
 			}
-			bytes = 0;
 		}
 
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true);
 
 		const sshTransport = buildOptimizedRsyncSshCommand(target.port || 22);
 		const sshpassPrefix = buildSshpassPrefix(target.password);
-		const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
-		const sourceIsDirectory = sourceType === 'directory';
 		const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 		const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
 		const rsyncOptions = [
@@ -1366,10 +1365,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (stat.isDirectory()) {
 			await fsp.mkdir(targetPath, { recursive: true });
 			const children = await fsp.readdir(sourcePath, { withFileTypes: true });
-			for (const child of children) {
+			await mapLimit(children, SFTP_DIRECTORY_ENTRY_CONCURRENCY, async child => {
 				this.throwIfTransferCanceled(progressId);
 				await this.copyLocalPath(join(sourcePath, child.name), join(targetPath, child.name), onDelta, progressId);
-			}
+			});
 			return;
 		}
 
@@ -1877,6 +1876,28 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return total;
 	}
 
+	private async getRemotePathSizeByCommand(endpoint: ITurboFileTransferEndpoint): Promise<number> {
+		if (endpoint.kind !== 'ssh') {
+			return getLocalPathSize(endpoint.path);
+		}
+
+		try {
+			if (looksLikeWindowsPath(endpoint.path)) {
+				return await this.withDirectorySshClient(endpoint, async client => {
+					const output = await this.execRemoteBytes(client, buildWindowsSizeCommand(endpoint.path));
+					return parseSizeCommandOutput(output.toString());
+				});
+			}
+
+			return await this.withDirectorySshClient(endpoint, async client => {
+				const output = await this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path));
+				return parseSizeCommandOutput(output.toString());
+			});
+		} catch {
+			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+		}
+	}
+
 	private remoteStat(sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPStats> {
 		return new Promise((resolve, reject) => {
 			sftp.stat(remotePath, (error, stats) => {
@@ -2045,27 +2066,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(progressId);
 		await this.ensureRemoteDirectory(sftp, remotePath);
 		const entries = await fsp.readdir(localPath, { withFileTypes: true });
-		for (const entry of entries) {
+		await mapLimit(entries, SFTP_DIRECTORY_ENTRY_CONCURRENCY, async entry => {
 			this.throwIfTransferCanceled(progressId);
 			const localChild = join(localPath, entry.name);
 			const remoteChild = joinRemotePath(remotePath, entry.name);
 			if (entry.isDirectory()) {
 				await this.uploadDirectory(sftp, localChild, remoteChild, onDelta, progressId);
 			} else if (entry.isFile()) {
-				await this.ensureRemoteDirectory(sftp, getRemoteParentPath(remoteChild));
 				await this.fastPut(sftp, localChild, remoteChild, this.createSftpTransferOptions(onDelta, progressId));
 			}
-		}
+		});
 	}
 
 	private async downloadDirectory(sftp: ISFTPWrapper, remotePath: string, localPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
 		this.throwIfTransferCanceled(progressId);
 		await fsp.mkdir(localPath, { recursive: true });
 		const entries = await this.readRemoteDirectory(sftp, remotePath);
-		for (const entry of entries) {
+		await mapLimit(entries, SFTP_DIRECTORY_ENTRY_CONCURRENCY, async entry => {
 			this.throwIfTransferCanceled(progressId);
 			if (entry.filename === '.' || entry.filename === '..') {
-				continue;
+				return;
 			}
 			const remoteChild = joinRemotePath(remotePath, entry.filename);
 			const localChild = join(localPath, entry.filename);
@@ -2075,7 +2095,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await fsp.mkdir(dirname(localChild), { recursive: true });
 				await this.fastGet(sftp, remoteChild, localChild, this.createSftpTransferOptions(onDelta, progressId));
 			}
-		}
+		});
 	}
 
 	private async deleteRemoteDirectory(sftp: ISFTPWrapper, remotePath: string): Promise<void> {
@@ -2322,6 +2342,28 @@ function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
 	const literalPath = path.replace(/'/g, "''");
 	const recurseFlag = recursive ? ' -Recurse' : '';
 	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $path='${literalPath}'; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force${recurseFlag} }"`;
+}
+
+function buildWindowsSizeCommand(path: string): string {
+	const literalPath = path.replace(/'/g, "''");
+	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $path='${literalPath}'; if (Test-Path -LiteralPath $path -PathType Container) { $sum=(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if ($null -eq $sum) { [Int64]0 } else { [Int64]$sum } } elseif (Test-Path -LiteralPath $path -PathType Leaf) { [Int64](Get-Item -LiteralPath $path).Length } else { throw 'Path not found' }"`;
+}
+
+function buildPosixSizeCommand(path: string): string {
+	const quotedPath = quotePosixShellArg(path);
+	return `p=${quotedPath}; if [ -d "$p" ]; then size=''; if command -v du >/dev/null 2>&1; then size=$(du -sb -- "$p" 2>/dev/null | awk 'NR==1 {print $1; exit}'); if [ -z "$size" ]; then size=$(du -sk -- "$p" 2>/dev/null | awk 'NR==1 {printf "%.0f\\n", $1 * 1024; exit}'); fi; fi; if [ -z "$size" ]; then size=$(find "$p" -type f -printf '%s\\n' 2>/dev/null | awk '{s += $1} END {printf "%.0f\\n", s + 0}'); fi; printf '%s\\n' "$size"; elif [ -f "$p" ] || [ -L "$p" ]; then stat -c '%s' -- "$p"; else echo 'Path not found' >&2; exit 2; fi`;
+}
+
+function parseSizeCommandOutput(output: string): number {
+	const match = output.trim().match(/\d+/);
+	if (!match) {
+		throw new Error(`Unable to parse path size: ${output.trim() || 'empty output'}`);
+	}
+	const size = Number(match[0]);
+	if (!Number.isFinite(size)) {
+		throw new Error(`Invalid path size: ${match[0]}`);
+	}
+	return size;
 }
 
 function buildPosixDeleteCommand(path: string, recursive: boolean): string {
@@ -2712,14 +2754,14 @@ async function getLocalPathSize(path: string): Promise<number> {
 	}
 
 	const entries = await fsp.readdir(path, { withFileTypes: true });
-	let total = 0;
-	for (const entry of entries) {
+	const sizes = await mapLimit(entries, LOCAL_DIRECTORY_STAT_CONCURRENCY, async entry => {
 		const childPath = join(path, entry.name);
 		if (entry.isDirectory() || entry.isFile()) {
-			total += await getLocalPathSize(childPath);
+			return getLocalPathSize(childPath);
 		}
-	}
-	return total;
+		return 0;
+	});
+	return sizes.reduce((total, size) => total + size, 0);
 }
 
 function compareFileEntries(a: ITurboFileFileEntry, b: ITurboFileFileEntry): number {
