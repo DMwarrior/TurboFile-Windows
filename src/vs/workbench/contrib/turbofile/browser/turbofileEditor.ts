@@ -4136,8 +4136,10 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		const types = Array.from(dataTransfer.types || []);
 		return !!dataTransfer.getData(CodeDataTransfers.FILES)
 			|| !!dataTransfer.getData(DataTransfers.RESOURCES)
+			|| types.includes(DataTransfers.FILES)
 			|| dataTransfer.files.length > 0;
 	}
 
