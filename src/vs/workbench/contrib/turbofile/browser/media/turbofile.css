@@ -1833,12 +1833,12 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-location-menu-button {
-	height: 30px;
+	height: 28px;
 	display: inline-flex;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	flex: 0 0 auto;
-	padding: 0 10px;
+	padding: 0 8px;
 	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
 	border-radius: 8px;
 	background: color-mix(in srgb, var(--vscode-foreground) 6%, var(--tf-file-surface, var(--vscode-editor-background)));
@@ -1857,7 +1857,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-location-menu-button-label {
-	max-width: 116px;
+	max-width: 48px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -1871,9 +1871,9 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 .turbofile-location-icon {
 	position: relative;
 	display: inline-block;
-	width: 22px;
-	height: 22px;
-	flex: 0 0 22px;
+	width: 18px;
+	height: 18px;
+	flex: 0 0 18px;
 	background-position: center;
 	background-repeat: no-repeat;
 	background-size: contain;
@@ -1916,8 +1916,21 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	background: transparent !important;
 }
 
+.context-view.monaco-menu-container:has(.turbofile-windows-location-action) .monaco-action-bar.vertical .action-label.turbofile-windows-location-action {
+	height: 44px;
+	margin: 3px 10px;
+	border-radius: 8px;
+	color: #f4f7fb !important;
+	background: transparent !important;
+}
+
 .context-view.monaco-menu-container:has(.turbofile-windows-location-action) .monaco-action-bar.vertical .action-item.focused .action-menu-item,
 .context-view.monaco-menu-container:has(.turbofile-windows-location-action) .monaco-action-bar.vertical .action-menu-item:hover {
+	background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-windows-location-action) .monaco-action-bar.vertical .action-item.focused .action-label.turbofile-windows-location-action,
+.context-view.monaco-menu-container:has(.turbofile-windows-location-action) .monaco-action-bar.vertical .action-label.turbofile-windows-location-action:hover {
 	background: rgba(255, 255, 255, 0.08) !important;
 }
 
@@ -1938,15 +1951,16 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	color: #2e8cff !important;
 }
 
-.monaco-menu .monaco-action-bar.vertical .action-label.icon.turbofile-windows-location-action {
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action {
 	display: inline-flex;
 	align-items: center;
-	gap: 16px;
+	gap: 14px;
 	padding-left: 20px;
 	padding-right: 44px;
+	font-family: var(--vscode-font-family);
 }
 
-.monaco-menu .monaco-action-bar.vertical .action-label.icon.turbofile-windows-location-action::before {
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action::before {
 	content: "";
 	display: inline-block;
 	width: 24px;
@@ -1957,15 +1971,27 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	background-size: contain;
 }
 
-.monaco-menu .monaco-action-bar.vertical .action-label.icon.turbofile-windows-location-action.turbofile-location-icon-windows::before {
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action.checked::after {
+	content: "";
+	display: inline-block;
+	width: 10px;
+	height: 18px;
+	margin-left: auto;
+	margin-right: 2px;
+	border-right: 2px solid #2e8cff;
+	border-bottom: 2px solid #2e8cff;
+	transform: rotate(45deg) translateY(-2px);
+}
+
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action.turbofile-location-icon-windows::before {
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%231687ff' d='M2 4.2 11 3v8.1H2V4.2zM12.3 2.8 22 1.5v9.6h-9.7V2.8zM2 12.4h9v8.1l-9-1.2v-6.9zM12.3 12.4H22V22l-9.7-1.3v-8.3z'/%3E%3C/svg%3E");
 }
 
-.monaco-menu .monaco-action-bar.vertical .action-label.icon.turbofile-windows-location-action.turbofile-location-icon-desktop::before {
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action.turbofile-location-icon-desktop::before {
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='4' width='18' height='12' rx='1.8' fill='%232e8cff'/%3E%3Cpath fill='%232e8cff' d='M10 17h4v2h4v2H6v-2h4v-2z'/%3E%3C/svg%3E");
 }
 
-.monaco-menu .monaco-action-bar.vertical .action-label.icon.turbofile-windows-location-action.turbofile-location-icon-drive::before {
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-windows-location-action.turbofile-location-icon-drive::before {
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2367ef67' d='M5 3h14l2 14H3L5 3z'/%3E%3Cpath fill='%234bdc4f' d='M3 17h18v3c0 .9-.7 1.6-1.6 1.6H4.6C3.7 21.6 3 20.9 3 20v-3z'/%3E%3Cpath fill='%23182b19' d='M9.2 7.2h2v5h-2v-5zM13.6 7.2h2v5h-2v-5z'/%3E%3Ccircle fill='%23182b19' cx='8.3' cy='19.2' r='1.1'/%3E%3Ccircle fill='%23182b19' cx='12.2' cy='19.2' r='1.1'/%3E%3C/svg%3E");
 }
 

@@ -16,6 +16,7 @@ import './media/turbofile.css';
 import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { $, clearNode, getWindow } from '../../../../base/browser/dom.js';
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
+import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
@@ -5502,13 +5503,7 @@ let TurboFileEditor = class TurboFileEditor extends EditorPane {
     }
     getWindowsDriveLabel(driveRoot) {
         const drive = driveRoot.substring(0, 1).toUpperCase();
-        if (drive === 'C') {
-            return 'Windows (C:)';
-        }
-        if (drive === 'D') {
-            return 'Data (D:)';
-        }
-        return `${drive}:`;
+        return `${drive}盘`;
     }
     getWindowsLocationIconClass(path) {
         const desktopPath = joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
@@ -5531,6 +5526,9 @@ let TurboFileEditor = class TurboFileEditor extends EditorPane {
         this.contextMenuService.showContextMenu({
             getAnchor: () => anchor,
             getActions: () => this.getWindowsLocationActions(side),
+            getActionViewItem: (action, options) => action.id.startsWith(`turbofile.windowsLocation.${side}.`)
+                ? new ActionViewItem(null, action, { ...options, icon: true, label: true })
+                : undefined,
             skipTelemetry: true
         });
     }
