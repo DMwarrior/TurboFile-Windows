@@ -805,7 +805,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		this.throwIfTransferCanceled(request.progressId);
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
-		const bytes = sourceType === 'directory' ? 0 : await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
+		const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
+		let bytes = sourceType === 'directory' ? expectedBytes : await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
 
 		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
@@ -814,6 +815,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		await this.withDirectorySshClient(request.source, client => this.execRemote(client, command));
 		this.throwIfTransferCanceled(request.progressId);
+		if (bytes === 0 && expectedBytes === 0) {
+			bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
+		}
 		return this.createTransferResult(true, 'remote-copy', bytes, 'Remote copy completed.', startedAt);
 	}
 
@@ -838,7 +842,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const targetUserHost = `${target.username}@${target.host}`;
 		const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 		const sourceIsDirectory = sourceType === 'directory';
-		let bytes = 0;
+		let bytes = sourceIsDirectory ? Math.max(0, request.expectedBytes ?? 0) : 0;
 		if (!sourceIsDirectory) {
 			try {
 				bytes = await this.getRemotePathSizeByCommand(request.source);
@@ -957,12 +961,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		try {
 			this.throwIfTransferCanceled(request.progressId);
-			this.fireTransferProgress(request, 0, 0, 'rsync-direct', 'Parallel rsync directory transfer in progress.', true);
+			const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
+			this.fireTransferProgress(request, 0, expectedBytes, 'rsync-direct', 'Parallel rsync directory transfer in progress.', true);
 			await this.execRemote(client, parallelCommand);
 			this.throwIfTransferCanceled(request.progressId);
-			const bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
-			this.fireTransferProgress(request, bytes, bytes, 'rsync-direct', 'Parallel rsync directory transfer completed.', true);
-			return this.createTransferResult(true, 'rsync-direct-parallel', bytes, 'Parallel rsync directory completed.', startedAt);
+			const bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => expectedBytes);
+			const totalBytes = bytes > 0 ? bytes : expectedBytes;
+			this.fireTransferProgress(request, totalBytes, totalBytes, 'rsync-direct', 'Parallel rsync directory transfer completed.', true);
+			return this.createTransferResult(true, 'rsync-direct-parallel', totalBytes, 'Parallel rsync directory completed.', startedAt);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();

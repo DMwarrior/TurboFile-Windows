@@ -21,7 +21,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -195,6 +195,7 @@ interface TurboFileDialogState {
 type TurboFileTaskKind = 'transfer' | 'delete' | 'rename' | 'mkdir' | 'create-file' | 'size' | 'compress' | 'extract' | 'save' | 'ssh-test' | 'terminal' | 'sync';
 type TurboFileTaskStatus = 'running' | 'success' | 'error' | 'canceled';
 type TurboFileTransferItemStatus = 'waiting' | 'running' | 'success' | 'error' | 'canceled';
+type TurboFileTransferStrategy = ITurboFileTransferResult['strategy'];
 
 interface TurboFileTaskRetryTransfer {
 	readonly sourceSide: 'left' | 'right';
@@ -2319,7 +2320,7 @@ export class TurboFileEditor extends EditorPane {
 		const name = $('.turbofile-live-transfer-name');
 		name.textContent = item.name;
 		const size = $('.turbofile-live-transfer-size');
-		size.textContent = item.displaySize || formatSize(item.rawSize);
+		size.textContent = item.displaySize || (item.rawSize > 0 || item.type !== 'directory' ? formatSize(item.rawSize) : '');
 		identity.appendChild(name);
 		identity.appendChild(size);
 		top.appendChild(identity);
@@ -2348,7 +2349,7 @@ export class TurboFileEditor extends EditorPane {
 		metrics.appendChild(this.renderLiveTransferMetric('lightning-charge-fill', this.formatSpeed(item.speedBytesPerSecond), '当前速度', 'success'));
 		metrics.appendChild(this.renderLiveTransferMetric('arrow-clockwise', this.formatRemaining(item.remainingMs), '剩余时间', 'primary'));
 		metrics.appendChild(this.renderLiveTransferMetric('archive', `${formatSize(item.transferredBytes)} / ${formatSize(this.getLiveTransferItemTotal(item))}`, '已传输', 'info'));
-		metrics.appendChild(this.renderLiveTransferMetric('terminal', item.strategy ?? task.strategy ?? '传输中', '传输模式', 'primary'));
+		metrics.appendChild(this.renderLiveTransferMetric('terminal', this.getTransferProtocolLabel(item.strategy ?? task.strategy) ?? '识别中', '传输协议', 'primary'));
 
 		const wave = $('.turbofile-live-transfer-wave');
 		wave.appendChild(this.renderLiveTransferSparkline(item.speedSamples));
@@ -2695,16 +2696,17 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
-		const totalBytes = event.totalBytes;
+		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
+		const knownTotalBytes = activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
+		const totalBytes = event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
 			: event.phase === 'complete' ? 100 : Math.max(8, task.progress);
 		const detail = this.formatTransferProgressDetail(event.phase, transferredBytes, totalBytes);
 		const now = Date.now();
-		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
-		const strategy = this.getTransferStrategyLabel(event.phase) ?? task.strategy;
+		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
 		if (activeItem) {
 			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
 			activeItem.transferredBytes = transferredBytes;
@@ -2756,14 +2758,71 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private getTransferStrategyLabel(phase: ITurboFileTransferProgressEvent['phase']): string | undefined {
-		if (phase === 'rsync-direct') {
-			return 'rsync-direct';
+	private getTransferStrategyFromProgress(event: ITurboFileTransferProgressEvent): TurboFileTransferStrategy | undefined {
+		const detail = event.detail?.toLowerCase() ?? '';
+		if (event.phase === 'rsync-direct') {
+			return detail.includes('parallel') ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
-		if (phase === 'relay-download' || phase === 'relay-upload') {
+		if (event.phase === 'relay-download' || event.phase === 'relay-upload') {
 			return 'sftp-relay';
 		}
+		if (detail.includes('sftp upload')) {
+			return 'sftp-upload';
+		}
+		if (detail.includes('sftp download')) {
+			return 'sftp-download';
+		}
+		if (detail.includes('sftp relay')) {
+			return 'sftp-relay';
+		}
+		if (detail.includes('direct rsync')) {
+			return 'rsync-direct';
+		}
+		if (detail.includes('remote copy')) {
+			return 'remote-copy';
+		}
+		if (detail.includes('local copy')) {
+			return 'local-copy';
+		}
 		return undefined;
+	}
+
+	private getTransferProtocolLabel(strategy: string | undefined): string | undefined {
+		switch (strategy) {
+			case 'rsync-direct':
+			case 'rsync-direct-parallel':
+				return '直连 rsync';
+			case 'sftp-upload':
+			case 'sftp-download':
+				return '直连 sftp';
+			case 'sftp-relay':
+				return '中转 sftp';
+			case 'remote-copy':
+				return '同机复制';
+			case 'local-copy':
+				return '本地复制';
+			default:
+				return strategy;
+		}
+	}
+
+	private getPlannedTransferStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItem: TurboFileFileItem): TurboFileTransferStrategy {
+		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'local-copy';
+		}
+		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'sftp-upload';
+		}
+		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'sftp-download';
+		}
+		if (sourceDevice.id === targetDevice.id) {
+			return 'remote-copy';
+		}
+		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)) {
+			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
+		}
+		return 'sftp-relay';
 	}
 
 	private formatTransferProgressDetail(phase: ITurboFileTransferProgressEvent['phase'], transferredBytes: number, totalBytes: number): string {
@@ -4107,18 +4166,52 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private createTransferTaskItem(item: TurboFileFileItem): TurboFileTaskTransferItem {
+		const knownSize = Math.max(0, item.rawSize);
+		const displaySize = item.directory && knownSize === 0 ? '' : item.size;
 		return {
 			name: item.name,
 			type: item.type,
-			displaySize: item.size,
-			rawSize: item.rawSize,
+			displaySize,
+			rawSize: knownSize,
 			status: 'waiting',
 			progress: 0,
 			transferredBytes: 0,
-			totalBytes: Math.max(0, item.rawSize),
+			totalBytes: knownSize,
 			speedBytesPerSecond: 0,
 			speedSamples: []
 		};
+	}
+
+	private async ensureTransferItemSize(device: TurboFileDevice, sourceItem: TurboFileFileItem, transferItem: TurboFileTaskTransferItem, task: TurboFileTask): Promise<void> {
+		if (!sourceItem.path || sourceItem.parent) {
+			return;
+		}
+
+		if (!sourceItem.directory) {
+			const size = Math.max(0, sourceItem.rawSize);
+			transferItem.rawSize = size;
+			transferItem.totalBytes = Math.max(transferItem.totalBytes, size);
+			transferItem.displaySize = formatSize(size);
+			return;
+		}
+
+		if (transferItem.rawSize > 0) {
+			transferItem.displaySize = formatSize(transferItem.rawSize);
+			transferItem.totalBytes = Math.max(transferItem.totalBytes, transferItem.rawSize);
+			return;
+		}
+
+		this.updateTask(task, `正在计算目录大小：${sourceItem.name}`, Math.max(10, task.progress));
+		const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, sourceItem.path));
+		if (!result.ok) {
+			transferItem.displaySize = '';
+			return;
+		}
+
+		const size = Math.max(0, result.size);
+		transferItem.rawSize = size;
+		transferItem.totalBytes = Math.max(transferItem.totalBytes, size);
+		transferItem.displaySize = size > 0 ? formatSize(size) : '';
 	}
 
 	private setExternalDropTargetSide(side: 'left' | 'right' | undefined): void {
@@ -4266,6 +4359,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleAt = undefined;
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
+			await this.ensureTransferItemSize(this.localWindowsDevice, sourceItem, transferItem, task);
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(targetSide, targetSide, sourceItem, {
 				refreshTarget: false,
@@ -4476,6 +4570,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleAt = undefined;
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
+			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task);
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task });
 			if (result.ok) {
@@ -4549,6 +4644,15 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, sourceItem.path);
 			const targetEndpoint = await this.toTransferEndpoint(targetDevice, targetPath);
+			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItem);
+			const activeItem = options.task?.activeTransferItemIndex !== undefined ? options.task.transferItems?.[options.task.activeTransferItemIndex] : undefined;
+			const expectedBytes = Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, sourceItem.rawSize, 0);
+			if (activeItem) {
+				activeItem.strategy = plannedStrategy;
+			}
+			if (options.task) {
+				options.task.strategy = plannedStrategy;
+			}
 			if (options.task) {
 				this.updateTask(options.task, `正在传输：${sourceItem.name} -> ${targetDevice.name}`, Math.max(35, options.task.progress));
 			}
@@ -4557,7 +4661,8 @@ export class TurboFileEditor extends EditorPane {
 				target: targetEndpoint,
 				sourceType: sourceItem.type,
 				overwrite: true,
-				progressId
+				progressId,
+				expectedBytes
 			});
 
 			if (result.ok) {

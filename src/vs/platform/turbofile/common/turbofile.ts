@@ -87,6 +87,7 @@ export interface ITurboFileTransferRequest {
 	readonly sourceType?: TurboFileFileType;
 	readonly overwrite?: boolean;
 	readonly progressId?: string;
+	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
 }
 
