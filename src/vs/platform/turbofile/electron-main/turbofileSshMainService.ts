@@ -32,6 +32,7 @@ const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 512 * 1024;
 const SFTP_STREAM_RELAY_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 8;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
+const RSYNC_DIRECTORY_PARALLEL_WORKERS = 4;
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 
 class TurboFileTransferCanceledError extends Error {
@@ -855,6 +856,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const sshpassPrefix = buildSshpassPrefix(target.password);
 		const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 		const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
+		if (sourceIsDirectory) {
+			const parallelResult = await this.tryDirectParallelRsyncDirectoryTransfer(request, startedAt, targetUserHost, sshTransport, sshpassPrefix, mkdirCommand);
+			if (parallelResult?.ok) {
+				return parallelResult;
+			}
+		}
 		const rsyncOptions = [
 			'-a',
 			'--inplace',
@@ -908,6 +915,63 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		return this.createTransferResult(true, 'rsync-direct', bytes, 'Direct rsync completed.', startedAt);
+	}
+
+	private async tryDirectParallelRsyncDirectoryTransfer(request: ITurboFileTransferRequest, startedAt: number, targetUserHost: string, sshTransport: string, sshpassPrefix: string, mkdirCommand: string): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh') {
+			return undefined;
+		}
+
+		const rsyncOptions = [
+			'-a',
+			'--inplace',
+			'--whole-file',
+			'--no-compress',
+			'--numeric-ids',
+			'--timeout=600',
+			'-s',
+			'--no-perms',
+			'--no-owner',
+			'--no-group',
+			'--omit-dir-times'
+		].join(' ');
+		const targetSpec = `${targetUserHost}:${trimTrailingRemoteSlash(request.target.path)}`;
+		const workerScript = [
+			'item="$1"',
+			'base=$(basename "$item")',
+			`target=${quotePosixShellArg(targetSpec)}`,
+			`if [ -d "$item" ]; then ${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} "$item/" "$target/$base/"; else ${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} "$item" "$target/"; fi`
+		].join('; ');
+		const parallelCommand = [
+			'set -e',
+			mkdirCommand,
+			`find ${quotePosixShellArg(request.source.path)} -mindepth 1 -maxdepth 1 -print0 | xargs -0 -r -n 1 -P ${RSYNC_DIRECTORY_PARALLEL_WORKERS} sh -c ${quotePosixShellArg(workerScript)} sh`
+		].join('; ');
+
+		const sourceConfigResult = await this.createConnectConfig(request.source.connection!);
+		if (!sourceConfigResult.ok) {
+			return undefined;
+		}
+
+		const client = await this.connect(sourceConfigResult.config);
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		try {
+			this.throwIfTransferCanceled(request.progressId);
+			this.fireTransferProgress(request, 0, 0, 'rsync-direct', 'Parallel rsync directory transfer in progress.', true);
+			await this.execRemote(client, parallelCommand);
+			this.throwIfTransferCanceled(request.progressId);
+			const bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
+			this.fireTransferProgress(request, bytes, bytes, 'rsync-direct', 'Parallel rsync directory transfer completed.', true);
+			return this.createTransferResult(true, 'rsync-direct-parallel', bytes, 'Parallel rsync directory completed.', startedAt);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			return undefined;
+		} finally {
+			unregisterCancel();
+			client.end();
+		}
 	}
 
 	private async tryStreamRelayTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
@@ -2239,6 +2303,11 @@ function buildShellBootstrapCommand(cwd: string): string {
 
 function ensureTrailingRemoteSlash(path: string): string {
 	return path.endsWith('/') || path.endsWith('\\') ? path : `${path}/`;
+}
+
+function trimTrailingRemoteSlash(path: string): string {
+	const trimmed = path.replace(/[\\/]+$/g, '');
+	return trimmed || '/';
 }
 
 function getRemoteDirectoryFallbackPaths(options: ITurboFileSshConnectionOptions, path: string): string[] {
