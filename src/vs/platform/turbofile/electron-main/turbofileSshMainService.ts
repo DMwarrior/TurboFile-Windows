@@ -11,9 +11,9 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { deflateSync } from 'node:zlib';
-import { nativeImage } from 'electron';
+import { clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
+import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -556,6 +556,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				ok: false,
 				message: error instanceof Error ? error.message : String(error),
 				size: 0
+			};
+		}
+	}
+
+	async readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult> {
+		try {
+			const paths = readWindowsClipboardFilePaths();
+			return {
+				ok: paths.length > 0,
+				message: paths.length > 0 ? 'Windows clipboard files loaded.' : 'No Windows files in clipboard.',
+				paths,
+				operation: readWindowsClipboardOperation()
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error),
+				paths: [],
+				operation: 'copy'
 			};
 		}
 	}
@@ -2094,6 +2113,57 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		return this.nativeRequire;
 	}
+}
+
+function readWindowsClipboardFilePaths(): string[] {
+	const paths: string[] = [];
+	const seen = new Set<string>();
+	const acceptPath = (path: string): void => {
+		const candidate = path.trim().replace(/^"|"$/g, '').replace(/^file:\/\/\/?/i, '');
+		if (!isWindowsClipboardPath(candidate)) {
+			return;
+		}
+
+		const key = candidate.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+		if (seen.has(key)) {
+			return;
+		}
+
+		seen.add(key);
+		paths.push(candidate);
+	};
+
+	for (const path of parseWindowsClipboardBuffer(clipboard.readBuffer('FileNameW'), 'utf16le')) {
+		acceptPath(path);
+	}
+	for (const path of parseWindowsClipboardBuffer(clipboard.readBuffer('FileName'), 'utf8')) {
+		acceptPath(path);
+	}
+	for (const path of clipboard.readText('clipboard').split(/\r?\n/)) {
+		acceptPath(path);
+	}
+
+	return paths;
+}
+
+function parseWindowsClipboardBuffer(buffer: Buffer, encoding: BufferEncoding): string[] {
+	if (!buffer.byteLength) {
+		return [];
+	}
+
+	return buffer.toString(encoding).replace(/\0+$/g, '').split('\0').filter(Boolean);
+}
+
+function readWindowsClipboardOperation(): 'copy' | 'move' {
+	const dropEffect = clipboard.readBuffer('Preferred DropEffect');
+	if (dropEffect.byteLength >= 4 && (dropEffect.readUInt32LE(0) & 2) === 2) {
+		return 'move';
+	}
+	return 'copy';
+}
+
+function isWindowsClipboardPath(path: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]+\\[^\\]+/.test(path);
 }
 
 function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): ITurboFileTransferResult['strategy'] {

@@ -1668,7 +1668,16 @@ export class TurboFileEditor extends EditorPane {
 			if (event.key === 'Delete') {
 				event.preventDefault();
 				void this.deleteSelected(side);
+				return;
 			}
+			if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+				event.preventDefault();
+				void this.pasteWindowsClipboardFiles(side);
+			}
+		});
+		list.addEventListener('paste', event => {
+			event.preventDefault();
+			void this.pasteWindowsClipboardFiles(side);
 		});
 		list.addEventListener('dragover', event => {
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
@@ -4199,11 +4208,11 @@ export class TurboFileEditor extends EditorPane {
 		return paths;
 	}
 
-	private async transferExternalPaths(targetSide: 'left' | 'right', sourcePaths: readonly string[]): Promise<boolean> {
+	private async transferExternalPaths(targetSide: 'left' | 'right', sourcePaths: readonly string[], operation: 'copy' | 'move' = 'copy'): Promise<boolean> {
 		this.taskbarHiddenForTerminal = false;
 		const targetDevice = this.getPaneDevice(targetSide);
 		if (!targetDevice) {
-			this.statusMessage = '当前目标面板未选择设备，无法接收外部拖入。';
+			this.statusMessage = '当前目标面板未选择设备，无法接收本地 Windows 文件。';
 			this.render();
 			return false;
 		}
@@ -4216,7 +4225,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const batch = sourceItems.length > 1;
-		const label = batch ? `拖入 ${sourceItems.length} 项` : `拖入 ${sourceItems[0].name}`;
+		const actionLabel = operation === 'move' ? '剪切粘贴' : '本地复制';
+		const label = batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`;
 		const task = this.beginTask('transfer', label, `Windows -> ${targetDevice.name}`);
 		task.progress = 0;
 		task.cancelRequested = false;
@@ -4300,15 +4310,74 @@ export class TurboFileEditor extends EditorPane {
 		await this.refreshPane(targetSide, { force: true });
 		const strategy = [...strategies].join(', ') || undefined;
 		if (failed > 0) {
-			this.finishTask(task, 'error', batch ? `外部拖入传输完成 ${completed} 项，失败 ${failed} 项。` : `传输失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.finishTask(task, 'error', batch ? `本地 Windows 传输完成 ${completed} 项，失败 ${failed} 项。` : `传输失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
 			return false;
 		}
 
+		if (operation === 'move') {
+			const cleanupFailures = await this.deleteExternalSourceItems(task, sourceItems);
+			await this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean));
+			if (cleanupFailures.length) {
+				this.finishTask(task, 'error', `目标已复制，但删除本地来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy, error: cleanupFailures[0] });
+				return false;
+			}
+		}
+
 		const successMessage = batch
-			? `外部拖入传输完成：${completed} 项，${formatSize(totalBytes)}。`
-			: `传输完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
+			? `${operation === 'move' ? '本地剪切传输' : '本地复制传输'}完成：${completed} 项，${formatSize(totalBytes)}。`
+			: `${operation === 'move' ? '剪切传输' : '复制传输'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
 		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
 		return true;
+	}
+
+	private async pasteWindowsClipboardFiles(targetSide: 'left' | 'right'): Promise<void> {
+		const clipboardFiles = await this.sshService.readWindowsClipboardFiles();
+		if (!clipboardFiles.ok || !clipboardFiles.paths.length) {
+			this.statusMessage = '剪贴板里没有可粘贴的本地 Windows 文件或文件夹。';
+			this.render();
+			return;
+		}
+
+		await this.transferExternalPaths(targetSide, clipboardFiles.paths, clipboardFiles.operation);
+	}
+
+	private async deleteExternalSourceItems(task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
+		const failures: string[] = [];
+		for (const [index, item] of sourceItems.entries()) {
+			if (!item.path) {
+				continue;
+			}
+
+			this.updateTask(task, `正在删除本地来源 ${index + 1}/${sourceItems.length}：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)));
+			const result = await this.sshService.deletePath(await this.toTransferEndpoint(this.localWindowsDevice, item.path), true);
+			if (!result.ok) {
+				failures.push(`${item.name}: ${result.message}`);
+			}
+		}
+		return failures;
+	}
+
+	private async refreshLocalPanesForWindowsPaths(paths: readonly string[]): Promise<void> {
+		const parentPaths = paths
+			.map(path => getPaneParentPath(path, true))
+			.filter((path): path is string => !!path);
+		if (!parentPaths.length) {
+			return;
+		}
+
+		const refreshes: Promise<void>[] = [];
+		for (const side of ['left', 'right'] as const) {
+			const device = this.getPaneDevice(side);
+			if (device?.id !== LOCAL_WINDOWS_DEVICE_ID) {
+				continue;
+			}
+
+			if (parentPaths.some(parentPath => isSameWindowsPath(parentPath, this.paneStates[side].path))) {
+				refreshes.push(this.refreshPane(side, { force: true }));
+			}
+		}
+
+		await Promise.all(refreshes);
 	}
 
 	private async resolveExternalTransferItem(path: string): Promise<TurboFileFileItem | undefined> {

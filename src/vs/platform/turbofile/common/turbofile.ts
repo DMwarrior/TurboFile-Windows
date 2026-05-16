@@ -22,6 +22,7 @@ export interface ITurboFileSshService {
 	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
 	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
+	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
 	writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
@@ -114,6 +115,11 @@ export interface ITurboFileFileOperationResult {
 
 export interface ITurboFilePathSizeResult extends ITurboFileFileOperationResult {
 	readonly size: number;
+}
+
+export interface ITurboFileWindowsClipboardFilesResult extends ITurboFileFileOperationResult {
+	readonly paths: string[];
+	readonly operation: 'copy' | 'move';
 }
 
 export type TurboFileContentEncoding = 'utf8' | 'base64';
