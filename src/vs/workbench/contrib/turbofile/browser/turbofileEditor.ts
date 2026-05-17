@@ -511,6 +511,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly paneStates: Record<'left' | 'right', TurboFilePaneState>;
 	private readonly paneRequestSeq: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private isDeviceFormVisible = false;
+	private hasAppliedInitialRightPaneDefault = false;
 	private editingDeviceId: string | undefined;
 	private deviceFormMessage = '';
 	private readonly deviceConnectionMessages = new Map<string, { status: 'testing' | 'success' | 'error'; message: string }>();
@@ -622,7 +623,7 @@ export class TurboFileEditor extends EditorPane {
 		void this.syncNativeEditorDisplaySettings();
 		void this.loadColorThemes();
 		void this.refreshWindowsDriveRoots();
-		this.ensurePaneDeviceSelection();
+		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
 		this.render();
 		void this.refreshPane('left');
 		void this.refreshPane('right');
@@ -646,7 +647,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.devices = this.deviceStore.loadDevices();
-		this.ensurePaneDeviceSelection();
+		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
 		this.statusMessage = `已加载默认 SSH 设备：新增 ${result.added} 台，更新 ${result.updated} 台。`;
 		this.render();
 		void this.refreshPane('left');
@@ -1573,6 +1574,9 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			const targetSide = this.paneStates.right.deviceId === device.id ? 'left' : 'right';
+			if (targetSide === 'right') {
+				this.hasAppliedInitialRightPaneDefault = true;
+			}
 			const state = this.paneStates[targetSide];
 			state.deviceId = device.id;
 			state.path = device.defaultPath || (device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDefaultPath() : '/');
@@ -6976,7 +6980,14 @@ export class TurboFileEditor extends EditorPane {
 
 	private setPaneDevice(side: 'left' | 'right', device: TurboFileDevice): void {
 		const state = this.paneStates[side];
+		if (side === 'right') {
+			this.hasAppliedInitialRightPaneDefault = true;
+		}
 		if (state.deviceId === device.id) {
+			state.error = undefined;
+			this.clearPaneSelection(side);
+			this.render();
+			void this.refreshPane(side, { path: state.path || this.getDefaultPaneDevicePath(device), force: true, silent: true });
 			return;
 		}
 		this.rememberPaneDeviceSnapshot(side);
@@ -7002,7 +7013,7 @@ export class TurboFileEditor extends EditorPane {
 		void this.refreshPane(side, { path: targetPath, silent: true });
 	}
 
-	private ensurePaneDeviceSelection(): void {
+	private ensurePaneDeviceSelection(options: { preferFirstSshOnRight?: boolean } = {}): void {
 		const devices = this.getAllDevices();
 		for (const side of ['left', 'right'] as const) {
 			const state = this.paneStates[side];
@@ -7012,9 +7023,10 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 
-		if (this.devices[0] && this.paneStates.right.deviceId === LOCAL_WINDOWS_DEVICE_ID) {
+		if (options.preferFirstSshOnRight && !this.hasAppliedInitialRightPaneDefault && this.devices[0] && this.paneStates.right.deviceId === LOCAL_WINDOWS_DEVICE_ID) {
 			this.paneStates.right.deviceId = this.devices[0].id;
 			this.paneStates.right.path = this.devices[0].defaultPath || '/';
+			this.hasAppliedInitialRightPaneDefault = true;
 		}
 	}
 
