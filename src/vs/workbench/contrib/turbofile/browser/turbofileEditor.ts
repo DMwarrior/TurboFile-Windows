@@ -205,6 +205,15 @@ interface TurboFileTaskRetryTransfer {
 	readonly sourceDeviceId?: string;
 }
 
+interface TurboFileInternalTransferClipboard {
+	readonly operation: 'copy' | 'move';
+	readonly sourceSide: 'left' | 'right';
+	readonly sourceDevice: TurboFileDevice;
+	readonly sourcePath: string;
+	readonly items: TurboFileFileItem[];
+	readonly createdAt: number;
+}
+
 interface TurboFileTaskTransferItem {
 	readonly name: string;
 	readonly type: TurboFileFileType;
@@ -514,6 +523,7 @@ export class TurboFileEditor extends EditorPane {
 	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
+	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
 	private readonly windowsClipboardPasteInFlight = new Set<string>();
 	private availableWindowsDriveRoots: string[] = [];
 	private statusMessage = '极速传已启动：双栏浏览、设备管理、传输、预览和终端入口已接入。';
@@ -1672,10 +1682,18 @@ export class TurboFileEditor extends EditorPane {
 				void this.deleteSelected(side);
 				return;
 			}
+			if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+				const key = event.key.toLowerCase();
+				if (key === 'c' || key === 'x') {
+					event.preventDefault();
+					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy');
+					return;
+				}
+			}
 		});
 		list.addEventListener('paste', event => {
 			event.preventDefault();
-			void this.pasteWindowsClipboardFiles(side);
+			void this.pasteIntoPane(side);
 		});
 		list.addEventListener('dragover', event => {
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
@@ -4449,6 +4467,186 @@ export class TurboFileEditor extends EditorPane {
 			.sort()
 			.join('\n');
 		return `${targetSide}:${targetPath}:${operation}:${sourcePaths}`;
+	}
+
+	private copySelectedToInternalClipboard(sourceSide: 'left' | 'right', operation: 'copy' | 'move'): void {
+		const sourceDevice = this.getPaneDevice(sourceSide);
+		const items = this.getSelectedTransferItems(sourceSide);
+		if (!sourceDevice || !items.length) {
+			this.statusMessage = operation === 'move' ? '请先选择要剪切的文件或目录。' : '请先选择要复制的文件或目录。';
+			this.render();
+			return;
+		}
+
+		this.internalTransferClipboard = {
+			operation,
+			sourceSide,
+			sourceDevice: { ...sourceDevice },
+			sourcePath: this.paneStates[sourceSide].path,
+			items: items.map(item => ({ ...item })),
+			createdAt: Date.now()
+		};
+		const action = operation === 'move' ? '剪切' : '复制';
+		this.statusMessage = `已${action} ${items.length} 项，可在目标文件浏览区按 Ctrl+V 粘贴。`;
+		this.render();
+	}
+
+	private async pasteIntoPane(targetSide: 'left' | 'right'): Promise<void> {
+		if (this.internalTransferClipboard?.items.length) {
+			await this.pasteInternalTransferClipboard(targetSide);
+			return;
+		}
+		await this.pasteWindowsClipboardFiles(targetSide);
+	}
+
+	private async pasteInternalTransferClipboard(targetSide: 'left' | 'right'): Promise<boolean> {
+		const clipboard = this.internalTransferClipboard;
+		const targetDevice = this.getPaneDevice(targetSide);
+		if (!clipboard?.items.length || !targetDevice) {
+			this.statusMessage = '当前没有可粘贴的内部文件，或目标面板未选择设备。';
+			this.render();
+			return false;
+		}
+
+		const sourceDevice = clipboard.sourceDevice;
+		const sourceItems = clipboard.items.map(item => ({ ...item }));
+		const batch = sourceItems.length > 1;
+		const actionLabel = clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴';
+		const task = this.beginTask('transfer', batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`, `${sourceDevice.name} -> ${targetDevice.name}`);
+		task.progress = 0;
+		task.cancelRequested = false;
+		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
+		task.speedSamples = [];
+
+		let completed = 0;
+		let failed = 0;
+		let totalBytes = 0;
+		const strategies = new Set<string>();
+		const failures: string[] = [];
+
+		for (const [index, sourceItem] of sourceItems.entries()) {
+			if (task.cancelRequested) {
+				for (const pending of task.transferItems.slice(index)) {
+					pending.status = 'canceled';
+					pending.endedAt = Date.now();
+				}
+				this.finishTask(task, 'canceled', batch ? `已取消内部粘贴：${sourceItem.name}` : `已取消粘贴：${sourceItem.name}`, { bytes: totalBytes });
+				return false;
+			}
+
+			const transferItem = task.transferItems[index];
+			task.activeTransferItemIndex = index;
+			transferItem.status = 'running';
+			transferItem.startedAt = Date.now();
+			transferItem.progress = 0;
+			transferItem.error = undefined;
+			transferItem.speedBytesPerSecond = 0;
+			transferItem.lastSampleAt = undefined;
+			transferItem.lastSampleBytes = undefined;
+			transferItem.speedSamples = [];
+			const progress = Math.min(88, 12 + Math.round((index / sourceItems.length) * 70));
+			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task);
+			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(targetDevice));
+			if (this.isSameTransferTarget(sourceDevice, sourceItem.path, targetDevice, targetPath)) {
+				failed++;
+				transferItem.status = 'error';
+				transferItem.error = '来源和目标路径相同，已跳过。';
+				transferItem.endedAt = Date.now();
+				failures.push(`${sourceItem.name}: 来源和目标路径相同`);
+				continue;
+			}
+
+			this.updateTask(task, batch ? `正在粘贴 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在粘贴：${sourceItem.name}`, progress);
+			const result = await this.transferItem(clipboard.sourceSide, targetSide, sourceItem, {
+				refreshTarget: false,
+				task,
+				sourceDeviceOverride: sourceDevice,
+				targetDeviceOverride: targetDevice
+			});
+			if (result.ok) {
+				completed++;
+				totalBytes += result.bytes;
+				transferItem.status = 'success';
+				transferItem.progress = 100;
+				transferItem.transferredBytes = result.bytes;
+				transferItem.totalBytes = Math.max(result.bytes, transferItem.totalBytes);
+				transferItem.strategy = result.strategy ?? transferItem.strategy;
+				transferItem.endedAt = Date.now();
+				if (result.strategy) {
+					strategies.add(result.strategy);
+				}
+			} else if (result.canceled) {
+				transferItem.status = 'canceled';
+				transferItem.endedAt = Date.now();
+				for (const pending of task.transferItems.slice(index + 1)) {
+					pending.status = 'canceled';
+					pending.endedAt = Date.now();
+				}
+				this.finishTask(task, 'canceled', batch ? `已取消内部粘贴：${sourceItem.name}` : `已取消粘贴：${sourceItem.name}`, { bytes: totalBytes });
+				return false;
+			} else {
+				failed++;
+				transferItem.status = 'error';
+				transferItem.error = result.message;
+				transferItem.endedAt = Date.now();
+				failures.push(`${sourceItem.name}: ${result.message}`);
+			}
+		}
+
+		this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
+		await Promise.all([
+			this.refreshPane(clipboard.sourceSide, { force: true }),
+			this.refreshPane(targetSide, { force: true })
+		]);
+
+		const strategy = [...strategies].join(', ') || undefined;
+		if (failed > 0) {
+			this.finishTask(task, 'error', batch ? `内部粘贴完成 ${completed} 项，失败 ${failed} 项。` : `内部粘贴失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			return false;
+		}
+
+		if (clipboard.operation === 'move') {
+			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, clipboard.sourceSide, sourceItems);
+			if (cleanupFailures.length) {
+				this.finishTask(task, 'error', `目标已复制，但删除来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy, error: cleanupFailures[0] });
+				return false;
+			}
+			this.internalTransferClipboard = undefined;
+		}
+
+		const successMessage = batch
+			? `${clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴'}完成：${completed} 项，${formatSize(totalBytes)}。`
+			: `${clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
+		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
+		return true;
+	}
+
+	private isSameTransferTarget(sourceDevice: TurboFileDevice, sourcePath: string | undefined, targetDevice: TurboFileDevice, targetPath: string): boolean {
+		if (!sourcePath || sourceDevice.id !== targetDevice.id) {
+			return false;
+		}
+		if (this.isWindowsDevice(sourceDevice)) {
+			return isSameWindowsPath(sourcePath, targetPath);
+		}
+		return trimTrailingSlash(sourcePath) === trimTrailingSlash(targetPath);
+	}
+
+	private async deleteInternalClipboardSources(task: TurboFileTask, sourceDevice: TurboFileDevice, sourceSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
+		const failures: string[] = [];
+		const batch = sourceItems.length > 1;
+		this.removePaneItems(sourceSide, sourceItems.filter(item => !!item.path));
+		for (const [index, item] of sourceItems.entries()) {
+			if (!item.path) {
+				continue;
+			}
+			this.updateTask(task, batch ? `正在删除来源 ${index + 1}/${sourceItems.length}：${item.name}` : `正在删除来源：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)));
+			const result = await this.sshService.deletePath(await this.toTransferEndpoint(sourceDevice, item.path), true);
+			if (!result.ok) {
+				failures.push(`${item.name}: ${result.message}`);
+			}
+		}
+		await this.refreshPane(sourceSide, { force: true });
+		return failures;
 	}
 
 	private async deleteExternalSourceItems(task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
@@ -7621,6 +7819,10 @@ function formatSize(size: number): string {
 		return `${mb.toFixed(1)} MB`;
 	}
 	return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+function trimTrailingSlash(path: string): string {
+	return path.length > 1 ? path.replace(/[\\/]+$/, '') : path;
 }
 
 function formatDuration(milliseconds: number): string {
