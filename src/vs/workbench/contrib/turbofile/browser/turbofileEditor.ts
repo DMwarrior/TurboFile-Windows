@@ -6122,7 +6122,7 @@ export class TurboFileEditor extends EditorPane {
 			const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, item.path));
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			if (result.ok) {
-				const sizeText = formatSize(result.size);
+				const sizeText = result.humanSize ?? formatSize(result.size);
 				this.finishTask(task, 'success', `${item.name} 大小：${sizeText}`);
 				this.showDialogInfo('计算大小完成', `${item.name} 大小：${sizeText}`, `设备：${device.name}\n路径：${displayPath}`);
 			} else {

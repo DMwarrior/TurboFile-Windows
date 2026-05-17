@@ -552,7 +552,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const size = endpoint.kind === 'local'
 				? await getLocalPathSize(endpoint.path)
 				: await this.getRemotePathSizeByCommand(endpoint);
-			return { ok: true, message: 'Path size calculated.', size };
+			const humanSize = await this.getPathHumanSize(endpoint, size);
+			return { ok: true, message: 'Path size calculated.', size, humanSize };
 		} catch (error) {
 			return {
 				ok: false,
@@ -1968,6 +1969,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async getPathHumanSize(endpoint: ITurboFileTransferEndpoint, size: number): Promise<string> {
+		if (endpoint.kind === 'ssh' && !looksLikeWindowsPath(endpoint.path)) {
+			try {
+				return await this.withDirectorySshClient(endpoint, async client => {
+					const output = await this.execRemoteBytes(client, buildPosixHumanSizeCommand(endpoint.path));
+					const humanSize = output.toString().trim().split(/\r?\n/)[0]?.trim();
+					if (!humanSize) {
+						throw new Error('Empty human size output.');
+					}
+					return humanSize;
+				});
+			} catch {
+				// Keep the exact byte count usable even when the display-only du command is unavailable.
+			}
+		}
+
+		return formatHumanSize(size);
+	}
+
 	private remoteStat(sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPStats> {
 		return new Promise((resolve, reject) => {
 			sftp.stat(remotePath, (error, stats) => {
@@ -2429,6 +2449,11 @@ function buildPosixSizeCommand(path: string): string {
 	return `p=${quotedPath}; if [ -d "$p" ]; then size=''; if command -v du >/dev/null 2>&1; then size=$(du -sb -- "$p" 2>/dev/null | awk 'NR==1 {print $1; exit}'); if [ -z "$size" ]; then size=$(du -sk -- "$p" 2>/dev/null | awk 'NR==1 {printf "%.0f\\n", $1 * 1024; exit}'); fi; fi; if [ -z "$size" ]; then size=$(find "$p" -type f -printf '%s\\n' 2>/dev/null | awk '{s += $1} END {printf "%.0f\\n", s + 0}'); fi; printf '%s\\n' "$size"; elif [ -f "$p" ] || [ -L "$p" ]; then stat -c '%s' -- "$p"; else echo 'Path not found' >&2; exit 2; fi`;
 }
 
+function buildPosixHumanSizeCommand(path: string): string {
+	const quotedPath = quotePosixShellArg(path);
+	return `du -sh -- ${quotedPath} 2>/dev/null | awk 'NR==1 {print $1; exit}'`;
+}
+
 function parseSizeCommandOutput(output: string): number {
 	const match = output.trim().match(/\d+/);
 	if (!match) {
@@ -2804,6 +2829,20 @@ function formatBytes(size: number): string {
 		return `${mb.toFixed(1)} MB`;
 	}
 	return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+function formatHumanSize(size: number): string {
+	const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+	let value = Number(size);
+	if (!Number.isFinite(value)) {
+		return `${size} bytes`;
+	}
+	let unitIndex = 0;
+	while (value >= 1024 && unitIndex < units.length - 1) {
+		value /= 1024;
+		unitIndex++;
+	}
+	return `${value.toFixed(2)} ${units[unitIndex]}`;
 }
 
 async function getAvailableLocalDirectory(path: string): Promise<string> {

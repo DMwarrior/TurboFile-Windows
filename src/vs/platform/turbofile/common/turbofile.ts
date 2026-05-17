@@ -116,6 +116,7 @@ export interface ITurboFileFileOperationResult {
 
 export interface ITurboFilePathSizeResult extends ITurboFileFileOperationResult {
 	readonly size: number;
+	readonly humanSize?: string;
 }
 
 export interface ITurboFileWindowsClipboardFilesResult extends ITurboFileFileOperationResult {
