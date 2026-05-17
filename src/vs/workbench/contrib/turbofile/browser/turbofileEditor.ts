@@ -2788,6 +2788,9 @@ export class TurboFileEditor extends EditorPane {
 		if (event.phase === 'relay-download' || event.phase === 'relay-upload') {
 			return 'sftp-relay';
 		}
+		if (detail.includes('direct sftp')) {
+			return 'sftp-direct';
+		}
 		if (detail.includes('sftp upload')) {
 			return 'sftp-upload';
 		}
@@ -2814,6 +2817,8 @@ export class TurboFileEditor extends EditorPane {
 			case 'rsync-direct':
 			case 'rsync-direct-parallel':
 				return '直连 rsync';
+			case 'sftp-direct':
+				return '直连 sftp';
 			case 'sftp-upload':
 			case 'sftp-download':
 				return '直连 sftp';
@@ -2844,7 +2849,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice) && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync) {
 			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
-		return 'sftp-relay';
+		return 'sftp-direct';
 	}
 
 	private formatTransferProgressDetail(phase: ITurboFileTransferProgressEvent['phase'], transferredBytes: number, totalBytes: number): string {

@@ -391,6 +391,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 
+			if (request.strategyHint !== 'relay') {
+				const directSftpResult = await this.tryDirectSftpTransfer(request, startedAt);
+				this.throwIfTransferCanceled(request.progressId);
+				if (directSftpResult?.ok) {
+					this.fireTransferProgress(request, directSftpResult.bytes, directSftpResult.bytes, 'complete', 'Direct SFTP completed.', true);
+					this.clearRemoteDirectoryListingCache(request.target);
+					return directSftpResult;
+				}
+			}
+
 			const streamRelayResult = await this.tryStreamRelayTransfer(request, startedAt);
 			this.throwIfTransferCanceled(request.progressId);
 			if (streamRelayResult?.ok) {
@@ -943,6 +953,90 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			checks.push('command -v sshpass >/dev/null 2>&1');
 		}
 		checks.push(`${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg('command -v rsync >/dev/null 2>&1')}`);
+
+		try {
+			await this.execRemote(client, checks.join(' && '));
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async tryDirectSftpTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
+			return undefined;
+		}
+		if (request.strategyHint === 'relay') {
+			return undefined;
+		}
+		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+		this.throwIfTransferCanceled(request.progressId);
+
+		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
+		if (!sourceConfigResult.ok) {
+			return undefined;
+		}
+
+		const target = request.target.connection;
+		const targetUserHost = `${target.username}@${target.host}`;
+		const sshpassPrefix = buildSshpassPrefix(target.password);
+		const sftpCommand = `${sshpassPrefix}${buildOptimizedSftpCommand(target.port || 22, !!target.password)} ${quotePosixShellArg(targetUserHost)}`;
+		const sshTransport = buildCompatibleSshCommand(target.port || 22, !!target.password);
+		const client = await this.connect(sourceConfigResult.config);
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		try {
+			this.throwIfTransferCanceled(request.progressId);
+			const canUseDirectSftp = await this.canUseDirectSftpTransfer(request, client, sftpCommand);
+			if (!canUseDirectSftp) {
+				return undefined;
+			}
+
+			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
+			let bytes = expectedBytes;
+			if (bytes === 0) {
+				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SFTP transfer.', true);
+			const targetParentPath = getRemoteParentPath(request.target.path);
+			const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(targetParentPath)}`)}`;
+			const batch = `${sourceType === 'directory' ? 'put -pr' : 'put -p'} ${quoteSftpBatchPath(request.source.path)} ${quoteSftpBatchPath(request.target.path)}\n`;
+			const putCommand = `printf %s ${quotePosixShellArg(batch)} | ${sftpCommand}`;
+
+			this.throwIfTransferCanceled(request.progressId);
+			await this.execRemote(client, mkdirCommand);
+			this.throwIfTransferCanceled(request.progressId);
+			await this.execRemote(client, putCommand);
+			this.throwIfTransferCanceled(request.progressId);
+
+			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SFTP transfer completed.', true);
+			return this.createTransferResult(true, 'sftp-direct', bytes, 'Direct SFTP completed.', startedAt);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			return undefined;
+		} finally {
+			unregisterCancel();
+			client.end();
+		}
+	}
+
+	private async canUseDirectSftpTransfer(request: ITurboFileTransferRequest, client: ISSHClient, sftpCommand: string): Promise<boolean> {
+		if (!request.target.connection) {
+			return false;
+		}
+
+		const checks = [
+			'command -v sftp >/dev/null 2>&1'
+		];
+		if (request.target.connection.password) {
+			checks.push('command -v sshpass >/dev/null 2>&1');
+		}
+		checks.push(`printf %s ${quotePosixShellArg('pwd\n')} | ${sftpCommand} >/dev/null`);
 
 		try {
 			await this.execRemote(client, checks.join(' && '));
@@ -2459,8 +2553,54 @@ function buildOptimizedRsyncSshCommand(port: number, hasPassword = false): strin
 	return parts.join(' ');
 }
 
+function buildOptimizedSftpCommand(port: number, hasPassword = false): string {
+	const parts = [
+		'sftp',
+		'-q',
+		'-B 1048576',
+		'-R 128',
+		'-b -',
+		'-o Compression=no',
+		'-o ConnectTimeout=5',
+		'-o ConnectionAttempts=1',
+		'-o NumberOfPasswordPrompts=1',
+		'-o ServerAliveInterval=15',
+		'-o ServerAliveCountMax=2',
+		'-o StrictHostKeyChecking=no',
+		'-o UserKnownHostsFile=/dev/null'
+	];
+	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (port && port !== 22) {
+		parts.push(`-P ${port}`);
+	}
+	return parts.join(' ');
+}
+
+function buildCompatibleSshCommand(port: number, hasPassword = false): string {
+	const parts = [
+		'ssh',
+		'-o Compression=no',
+		'-o ConnectTimeout=5',
+		'-o ConnectionAttempts=1',
+		'-o NumberOfPasswordPrompts=1',
+		'-o ServerAliveInterval=15',
+		'-o ServerAliveCountMax=2',
+		'-o StrictHostKeyChecking=no',
+		'-o UserKnownHostsFile=/dev/null'
+	];
+	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (port && port !== 22) {
+		parts.push(`-p ${port}`);
+	}
+	return parts.join(' ');
+}
+
 function buildSshpassPrefix(password: string | undefined): string {
 	return password ? `sshpass -p ${quotePosixShellArg(password)} ` : '';
+}
+
+function quoteSftpBatchPath(value: string): string {
+	return `"${value.replace(/(["\\])/g, '\\$1')}"`;
 }
 
 function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string {

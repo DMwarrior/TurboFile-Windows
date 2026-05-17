@@ -94,7 +94,7 @@ export interface ITurboFileTransferRequest {
 
 export interface ITurboFileTransferResult {
 	readonly ok: boolean;
-	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel';
+	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel';
 	readonly bytes: number;
 	readonly message: string;
 	readonly canceled?: boolean;
