@@ -2841,7 +2841,7 @@ export class TurboFileEditor extends EditorPane {
 		if (sourceDevice.id === targetDevice.id) {
 			return 'remote-copy';
 		}
-		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)) {
+		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice) && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync) {
 			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
 		return 'sftp-relay';
@@ -6625,7 +6625,8 @@ export class TurboFileEditor extends EditorPane {
 			kind: 'ssh',
 			path,
 			connection: await this.getSshConnectionOptions(device),
-			label: device.name
+			label: device.name,
+			supportsRsync: device.capabilities.rsync
 		};
 	}
 

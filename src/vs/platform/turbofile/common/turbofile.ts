@@ -79,6 +79,7 @@ export interface ITurboFileTransferEndpoint {
 	readonly path: string;
 	readonly connection?: ITurboFileSshConnectionOptions;
 	readonly label?: string;
+	readonly supportsRsync?: boolean;
 }
 
 export interface ITurboFileTransferRequest {

@@ -829,6 +829,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.strategyHint === 'relay') {
 			return undefined;
 		}
+		if (request.source.supportsRsync === false || request.target.supportsRsync === false) {
+			return undefined;
+		}
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
 			return undefined;
 		}
@@ -841,70 +844,82 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const target = request.target.connection;
 		const targetUserHost = `${target.username}@${target.host}`;
-		const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
-		const sourceIsDirectory = sourceType === 'directory';
-		let bytes = sourceIsDirectory ? Math.max(0, request.expectedBytes ?? 0) : 0;
-		if (!sourceIsDirectory) {
-			try {
-				bytes = await this.getRemotePathSizeByCommand(request.source);
-			} catch {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				bytes = 0;
-			}
-		}
-
-		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true);
-
-		const sshTransport = buildOptimizedRsyncSshCommand(target.port || 22);
+		const sshTransport = buildOptimizedRsyncSshCommand(target.port || 22, !!target.password);
 		const sshpassPrefix = buildSshpassPrefix(target.password);
-		const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
-		const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
-		if (sourceIsDirectory) {
-			const parallelResult = await this.tryDirectParallelRsyncDirectoryTransfer(request, startedAt, targetUserHost, sshTransport, sshpassPrefix, mkdirCommand);
-			if (parallelResult?.ok) {
-				return parallelResult;
-			}
-		}
-		const rsyncOptions = [
-			'-a',
-			'--inplace',
-			'--whole-file',
-			'--no-compress',
-			'--numeric-ids',
-			'--timeout=600',
-			'-s',
-			'--no-perms',
-			'--no-owner',
-			'--no-group',
-			'--omit-dir-times',
-			'--info=progress2'
-		].join(' ');
-		const rsyncSourcePath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path;
-		const rsyncTargetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
-		const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
-		let lastRsyncBytes = 0;
-		let rsyncProgressBuffer = '';
-		const handleRsyncOutput = (chunk: string): void => {
-			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
-			const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
-			if (transferredBytes === undefined || transferredBytes < lastRsyncBytes) {
-				return;
-			}
-			lastRsyncBytes = transferredBytes;
-			const totalBytes = bytes > 0 ? bytes : transferredBytes;
-			this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'rsync-direct', 'Direct rsync transfer in progress.');
-		};
-
 		const client = await this.connect(sourceConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		try {
+			this.throwIfTransferCanceled(request.progressId);
+			const canUseDirectRsync = await this.canUseDirectRsyncTransfer(request, client, targetUserHost, sshTransport, sshpassPrefix);
+			if (!canUseDirectRsync) {
+				return undefined;
+			}
+
+			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			const sourceIsDirectory = sourceType === 'directory';
+			let bytes = sourceIsDirectory ? Math.max(0, request.expectedBytes ?? 0) : 0;
+			if (!sourceIsDirectory) {
+				try {
+					bytes = await this.getRemotePathSizeByCommand(request.source);
+				} catch {
+					if (this.isTransferCanceled(request.progressId)) {
+						throw new TurboFileTransferCanceledError();
+					}
+					bytes = 0;
+				}
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true);
+
+			const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
+			const mkdirCommand = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
+			if (sourceIsDirectory) {
+				const parallelResult = await this.tryDirectParallelRsyncDirectoryTransfer(request, startedAt, targetUserHost, sshTransport, sshpassPrefix, mkdirCommand);
+				if (parallelResult?.ok) {
+					return parallelResult;
+				}
+			}
+			const rsyncOptions = [
+				'-a',
+				'--inplace',
+				'--whole-file',
+				'--no-compress',
+				'--numeric-ids',
+				'--timeout=600',
+				'-s',
+				'--no-perms',
+				'--no-owner',
+				'--no-group',
+				'--omit-dir-times',
+				'--info=progress2'
+			].join(' ');
+			const rsyncSourcePath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path;
+			const rsyncTargetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
+			const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
+			let lastRsyncBytes = 0;
+			let rsyncProgressBuffer = '';
+			const handleRsyncOutput = (chunk: string): void => {
+				rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+				const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
+				if (transferredBytes === undefined || transferredBytes < lastRsyncBytes) {
+					return;
+				}
+				lastRsyncBytes = transferredBytes;
+				const totalBytes = bytes > 0 ? bytes : transferredBytes;
+				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'rsync-direct', 'Direct rsync transfer in progress.');
+			};
+
 			this.throwIfTransferCanceled(request.progressId);
 			await this.execRemote(client, mkdirCommand);
 			this.throwIfTransferCanceled(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
 			this.throwIfTransferCanceled(request.progressId);
+
+			if (bytes === 0 && lastRsyncBytes > 0) {
+				bytes = lastRsyncBytes;
+			}
+
+			return this.createTransferResult(true, 'rsync-direct', bytes, 'Direct rsync completed.', startedAt);
 		} catch {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -914,12 +929,27 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			unregisterCancel();
 			client.end();
 		}
+	}
 
-		if (bytes === 0 && lastRsyncBytes > 0) {
-			bytes = lastRsyncBytes;
+	private async canUseDirectRsyncTransfer(request: ITurboFileTransferRequest, client: ISSHClient, targetUserHost: string, sshTransport: string, sshpassPrefix: string): Promise<boolean> {
+		if (!request.target.connection) {
+			return false;
 		}
 
-		return this.createTransferResult(true, 'rsync-direct', bytes, 'Direct rsync completed.', startedAt);
+		const checks = [
+			'command -v rsync >/dev/null 2>&1'
+		];
+		if (request.target.connection.password) {
+			checks.push('command -v sshpass >/dev/null 2>&1');
+		}
+		checks.push(`${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg('command -v rsync >/dev/null 2>&1')}`);
+
+		try {
+			await this.execRemote(client, checks.join(' && '));
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	private async tryDirectParallelRsyncDirectoryTransfer(request: ITurboFileTransferRequest, startedAt: number, targetUserHost: string, sshTransport: string, sshpassPrefix: string, mkdirCommand: string): Promise<ITurboFileTransferResult | undefined> {
@@ -2405,11 +2435,16 @@ function isSameSshConnection(left: ITurboFileSshConnectionOptions, right: ITurbo
 		&& left.username === right.username;
 }
 
-function buildOptimizedRsyncSshCommand(port: number): string {
+function buildOptimizedRsyncSshCommand(port: number, hasPassword = false): string {
 	const parts = [
 		'ssh',
 		'-o Compression=no',
 		'-o Ciphers=aes128-ctr',
+		'-o ConnectTimeout=5',
+		'-o ConnectionAttempts=1',
+		'-o NumberOfPasswordPrompts=1',
+		'-o ServerAliveInterval=15',
+		'-o ServerAliveCountMax=2',
 		'-o StrictHostKeyChecking=no',
 		'-o UserKnownHostsFile=/dev/null',
 		'-o MACs=umac-64@openssh.com',
@@ -2417,6 +2452,7 @@ function buildOptimizedRsyncSshCommand(port: number): string {
 		'-o ControlPersist=300',
 		'-o ControlPath=/tmp/turbofile-ssh-%r@%h:%p'
 	];
+	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
 	if (port && port !== 22) {
 		parts.push(`-p ${port}`);
 	}

@@ -36,6 +36,12 @@ const TURBOFILE_DEFAULT_LINUX_CAPABILITIES: TurboFileDeviceCapabilities = {
 	rsync: true
 };
 
+function getDefaultCapabilitiesForPlatform(platform: TurboFileDevicePlatform | undefined): TurboFileDeviceCapabilities {
+	return platform === 'linux' || platform === 'wsl'
+		? TURBOFILE_DEFAULT_LINUX_CAPABILITIES
+		: defaultTurboFileDeviceCapabilities;
+}
+
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 	{
 		id: 'turbofile-default-192-168-9-62',
@@ -163,7 +169,7 @@ export class TurboFileDeviceStore {
 			defaultPath: draft.defaultPath?.trim() || undefined,
 			platform: draft.platform,
 			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
-			capabilities: defaultTurboFileDeviceCapabilities
+			capabilities: getDefaultCapabilitiesForPlatform(draft.platform)
 		};
 
 		const devices = [...this.loadDevices(), device];
@@ -318,6 +324,9 @@ export class TurboFileDeviceStore {
 			return undefined;
 		}
 
+		const platform = device.platform ?? 'unknown';
+		const defaultCapabilities = getDefaultCapabilitiesForPlatform(platform);
+
 		return {
 			id: String(device.id),
 			name: String(device.name || device.host),
@@ -326,9 +335,15 @@ export class TurboFileDeviceStore {
 			username: String(device.username),
 			authType: device.authType === 'privateKey' ? 'privateKey' : 'password',
 			defaultPath: device.defaultPath,
-			platform: device.platform ?? 'unknown',
+			platform,
 			privateKeyPath: device.privateKeyPath,
-			capabilities: device.capabilities ?? defaultTurboFileDeviceCapabilities,
+			capabilities: {
+				...defaultCapabilities,
+				...device.capabilities,
+				rsync: platform === 'linux' || platform === 'wsl'
+					? true
+					: device.capabilities?.rsync ?? defaultCapabilities.rsync
+			},
 			lastConnectedAt: device.lastConnectedAt
 		};
 	}
