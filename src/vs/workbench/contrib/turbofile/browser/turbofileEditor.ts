@@ -342,8 +342,8 @@ interface TurboFileIconPath {
 const IMAGE_GRID_COLUMN_OPTIONS: TurboFileImageGridColumns[] = [4, 6, 8, 10, 12];
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
-const IMAGE_GRID_CARD_GAP = 12;
-const IMAGE_GRID_CARD_VERTICAL_CHROME = 62;
+const IMAGE_GRID_CARD_GAP = 16;
+const IMAGE_GRID_CARD_VERTICAL_CHROME = 0;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
@@ -3239,7 +3239,7 @@ export class TurboFileEditor extends EditorPane {
 			placeholder.appendChild(renderIcon(Codicon.fileMedia));
 			preview.appendChild(placeholder);
 		}
-		this.appendImageGridCardChrome(preview, image, index, state.images.length);
+		this.appendImageGridCardChrome(preview, image, index);
 		card.appendChild(preview);
 
 		const name = $('.turbofile-image-page-card-name');
@@ -3254,15 +3254,29 @@ export class TurboFileEditor extends EditorPane {
 		return card;
 	}
 
-	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number, total: number): void {
-		const badge = $('.turbofile-image-page-card-badge');
-		badge.appendChild(renderIcon(Codicon.fileMedia));
-		badge.append(`${index + 1}/${total}`);
-		preview.appendChild(badge);
+	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number): void {
+		const info = $('.turbofile-image-page-card-info');
 
-		const meta = $('.turbofile-image-page-card-meta');
-		meta.textContent = image.item.name;
-		preview.appendChild(meta);
+		const indexLabel = $('span.turbofile-image-page-card-index');
+		indexLabel.textContent = String(index + 1);
+		info.appendChild(indexLabel);
+
+		const name = $('span.turbofile-image-page-card-filename');
+		name.textContent = image.item.name;
+		info.appendChild(name);
+
+		const dimensions = $('span.turbofile-image-page-card-dimensions');
+		const dimensionsLabel = this.getImageGridCardDimensionsLabel(image);
+		dimensions.textContent = dimensionsLabel;
+		if (!dimensionsLabel) {
+			dimensions.classList.add('is-empty');
+		}
+		info.appendChild(dimensions);
+		preview.appendChild(info);
+	}
+
+	private getImageGridCardDimensionsLabel(image: TurboFileImageGridImage): string {
+		return image.width && image.height ? `${image.width}×${image.height}` : '';
 	}
 
 	private renderImagePreviewOverlay(): HTMLElement {
@@ -6133,7 +6147,7 @@ export class TurboFileEditor extends EditorPane {
 			placeholder.appendChild(renderIcon(Codicon.fileMedia));
 			preview.appendChild(placeholder);
 		}
-		this.appendImageGridCardChrome(preview, image, index, state.images.length);
+		this.appendImageGridCardChrome(preview, image, index);
 	}
 
 	private getImageGridDefaultViewportHeight(): number {

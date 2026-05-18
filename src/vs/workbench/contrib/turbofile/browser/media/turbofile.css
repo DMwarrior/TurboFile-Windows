@@ -4487,6 +4487,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	--tf-image-control-bg: rgba(255, 255, 255, 0.92);
 	--tf-image-control-hover: #f3f3f3;
 	--tf-image-control-text: #111111;
+	--tf-image-frame-bg: #f4f5f7;
+	--tf-image-info-bg: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.62));
+	--tf-image-info-text: #ffffff;
 }
 
 .vs-dark .turbofile-workbench,
@@ -4506,6 +4509,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	--tf-image-control-bg: rgba(20, 20, 20, 0.92);
 	--tf-image-control-hover: #262626;
 	--tf-image-control-text: #f5f5f5;
+	--tf-image-frame-bg: #101114;
+	--tf-image-info-bg: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.68));
+	--tf-image-info-text: #ffffff;
 }
 
 .vs .turbofile-workbench .turbofile-image-page,
@@ -4677,7 +4683,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	position: relative;
 	aspect-ratio: 220 / 150;
 	border-radius: inherit;
-	background: var(--tf-image-surface-muted);
+	padding: 8px;
+	box-sizing: border-box;
+	background: var(--tf-image-frame-bg);
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card-preview img,
@@ -4685,8 +4693,10 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview img {
-	object-fit: cover;
-	transition: transform 200ms ease, opacity 200ms ease;
+	object-fit: contain;
+	border-radius: 6px;
+	background: transparent;
+	transition: opacity 200ms ease;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
@@ -4694,49 +4704,59 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card:hover .turbofile-image-page-card-preview img {
-	transform: scale(1.05);
+	transform: none;
 }
 
-.turbofile-image-page-card-badge {
-	position: absolute;
-	right: 8px;
-	bottom: 8px;
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	max-width: calc(100% - 16px);
-	padding: 3px 7px;
-	border-radius: 7px;
-	background: rgba(0, 0, 0, 0.58);
-	color: #ffffff;
-	font-size: 11px;
-	font-weight: 700;
-	line-height: 1.2;
-	z-index: 2;
-	backdrop-filter: blur(8px);
-}
-
-.turbofile-image-page-card-badge .codicon {
-	font-size: 12px;
-}
-
-.turbofile-image-page-card-meta {
+.turbofile-image-page-card-info {
 	position: absolute;
 	left: 0;
 	right: 0;
 	bottom: 0;
-	padding: 30px 68px 8px 10px;
-	color: #ffffff;
+	display: grid;
+	grid-template-columns: minmax(22px, max-content) minmax(0, 1fr) max-content;
+	align-items: center;
+	gap: 8px;
+	min-height: 34px;
+	padding: 18px 10px 8px;
+	box-sizing: border-box;
+	border-radius: 0 0 10px 10px;
+	background: var(--tf-image-info-bg);
+	color: var(--tf-image-info-text);
 	font-size: 12px;
 	font-weight: 700;
-	line-height: 1.25;
-	text-align: left;
+	line-height: 1.2;
+	z-index: 2;
+	opacity: 0;
+	pointer-events: none;
+	transform: translateY(4px);
+	transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.turbofile-image-page-card:hover .turbofile-image-page-card-info,
+.turbofile-image-page-card:focus-visible .turbofile-image-page-card-info {
+	opacity: 1;
+	transform: none;
+}
+
+.turbofile-image-page-card-index,
+.turbofile-image-page-card-dimensions {
+	color: var(--tf-image-info-text);
 	white-space: nowrap;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.turbofile-image-page-card-filename {
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.58));
-	z-index: 1;
-	pointer-events: none;
+	white-space: nowrap;
+	text-align: center;
+	color: var(--tf-image-info-text);
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.turbofile-image-page-card-dimensions.is-empty {
+	visibility: hidden;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card-placeholder,
