@@ -131,6 +131,10 @@ interface TurboFileImageGridState {
 	columns: TurboFileImageGridColumns;
 	previewVisible: boolean;
 	previewZoom: number;
+	pixelInspectorVisible: boolean;
+	histogramVisible: boolean;
+	histogramX: number;
+	histogramY: number;
 	scrollTop: number;
 	viewportHeight: number;
 }
@@ -159,6 +163,15 @@ interface TurboFileImageGridRange {
 	readonly endIndex: number;
 	readonly topSpacerHeight: number;
 	readonly bottomSpacerHeight: number;
+}
+
+interface TurboFileImagePreviewAnalysis {
+	readonly key: string;
+	readonly canvas: HTMLCanvasElement;
+	readonly context: CanvasRenderingContext2D;
+	width: number;
+	height: number;
+	ready: boolean;
 }
 
 interface TurboFileFileListRange {
@@ -500,6 +513,7 @@ export class TurboFileEditor extends EditorPane {
 	private imageGridPreviewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly imageGridLoadedThumbnailIndexes = new Set<number>();
 	private readonly imageGridLoadedPreviewIndexes = new Set<number>();
+	private imagePreviewAnalysis: TurboFileImagePreviewAnalysis | undefined;
 	private readonly imageReadCache = new Map<string, TurboFileCachedImageReadResult>();
 	private readonly fileListScrollRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRenderedRange: Record<'left' | 'right', { startIndex: number; endIndex: number; total: number } | undefined> = { left: undefined, right: undefined };
@@ -3291,10 +3305,16 @@ export class TurboFileEditor extends EditorPane {
 		overlay.appendChild(stage);
 
 		const toolbar = $('.turbofile-image-preview-toolbar');
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.symbolColor, 'Toggle RGB pixel inspector', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.graphLine, 'Toggle histogram', () => this.toggleImagePreviewHistogram(), state.histogramVisible));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, 'Download image', () => this.downloadImageGridPreview()));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, 'Delete image', () => { void this.deleteImageGridPreview(); }));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, 'Close', () => this.closeImageGridPreview()));
 		overlay.appendChild(toolbar);
+
+		if (state.histogramVisible) {
+			overlay.appendChild(this.renderImagePreviewHistogramPanel(state));
+		}
 
 		overlay.appendChild(this.renderImagePreviewSideButton(state, -1));
 		overlay.appendChild(this.renderImagePreviewSideButton(state, 1));
@@ -3325,11 +3345,15 @@ export class TurboFileEditor extends EditorPane {
 		return overlay;
 	}
 
-	private renderImagePreviewTopAction(icon: ThemeIcon, label: string, handler: () => void): HTMLButtonElement {
+	private renderImagePreviewTopAction(icon: ThemeIcon, label: string, handler: () => void, active = false): HTMLButtonElement {
 		const button = $('button.turbofile-image-preview-action') as HTMLButtonElement;
 		button.type = 'button';
 		button.title = label;
 		button.setAttribute('aria-label', label);
+		if (active) {
+			button.classList.add('is-active');
+			button.setAttribute('aria-pressed', 'true');
+		}
 		button.appendChild(renderIcon(icon));
 		button.addEventListener('click', event => {
 			event.stopPropagation();
@@ -3356,7 +3380,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, 'Zoom in', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) + 0.25));
 		zoomIn.classList.add('is-transient');
-		zoomIn.disabled = state.previewZoom >= 1;
+		zoomIn.disabled = state.previewZoom >= 12;
 		controls.appendChild(zoomIn);
 
 		const reset = this.renderImagePreviewTopAction(Codicon.screenNormal, 'Reset to fit', () => this.setImageGridPreviewZoom(1));
@@ -3370,6 +3394,38 @@ export class TurboFileEditor extends EditorPane {
 		const info = $('.turbofile-image-preview-caption.turbofile-image-preview-info-strip');
 		this.renderImagePreviewInfoStripContent(info, state);
 		return info;
+	}
+
+	private renderImagePreviewHistogramPanel(state: TurboFileImageGridState): HTMLElement {
+		const panel = $('.turbofile-image-preview-histogram');
+		panel.style.left = `${state.histogramX}px`;
+		panel.style.top = `${state.histogramY}px`;
+
+		const header = $('.turbofile-image-preview-histogram-header');
+		header.append('Histogram');
+		const close = $('button.turbofile-image-preview-histogram-close') as HTMLButtonElement;
+		close.type = 'button';
+		close.setAttribute('aria-label', 'Close histogram');
+		close.appendChild(renderIcon(Codicon.close));
+		close.addEventListener('click', event => {
+			event.stopPropagation();
+			this.toggleImagePreviewHistogram();
+		});
+		header.appendChild(close);
+		this.attachImagePreviewHistogramDrag(panel, header, state);
+		panel.appendChild(header);
+
+		const canvas = document.createElement('canvas');
+		canvas.className = 'turbofile-image-preview-histogram-canvas';
+		canvas.width = 260;
+		canvas.height = 130;
+		panel.appendChild(canvas);
+
+		const selected = state.images[state.selectedIndex];
+		const src = this.getImagePreviewSource(selected);
+		const analysis = selected && src ? this.prepareImagePreviewAnalysis(selected, src) : undefined;
+		this.drawImagePreviewHistogram(canvas, analysis);
+		return panel;
 	}
 
 	private renderImagePreviewInfoStripContent(info: HTMLElement, state: TurboFileImageGridState): void {
@@ -3424,16 +3480,14 @@ export class TurboFileEditor extends EditorPane {
 			const figure = $('.turbofile-image-preview-figure');
 			figure.setAttribute('role', 'img');
 			figure.setAttribute('aria-label', selected.item.name);
-			const image = document.createElement('img');
-			image.className = 'turbofile-image-preview-image';
-			image.decoding = 'async';
-			if (!selected.previewUrl && !selected.previewContent) {
-				image.classList.add('is-thumbnail');
+			if (state.pixelInspectorVisible) {
+				figure.classList.add('is-pixel-inspector');
 			}
-			image.src = previewSrc;
-			image.alt = selected.item.name;
-			image.style.transform = `scale(${state.previewZoom})`;
-			figure.appendChild(image);
+			this.appendImagePreviewVectorImage(figure, selected, previewSrc, state.previewZoom);
+			figure.addEventListener('wheel', event => this.handleImagePreviewWheel(event));
+			if (state.pixelInspectorVisible) {
+				this.attachImagePreviewPixelInspector(stage, figure, selected, previewSrc);
+			}
 			stage.appendChild(figure);
 			return;
 		}
@@ -3448,6 +3502,226 @@ export class TurboFileEditor extends EditorPane {
 			|| (image?.previewContent ? `data:${image.previewMime};base64,${image.previewContent}` : '')
 			|| image?.thumbnailUrl
 			|| (image?.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
+	}
+
+	private appendImagePreviewVectorImage(figure: HTMLElement, image: TurboFileImageGridImage, src: string, zoom: number): void {
+		const width = Math.max(1, image.width ?? 1);
+		const height = Math.max(1, image.height ?? 1);
+		if (image.width && image.height) {
+			const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+			svg.classList.add('turbofile-image-preview-vector');
+			if (!image.previewUrl && !image.previewContent) {
+				svg.classList.add('is-thumbnail');
+			}
+			svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+			svg.setAttribute('width', String(width));
+			svg.setAttribute('height', String(height));
+			svg.style.transform = `scale(${zoom})`;
+			const svgImage = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+			svgImage.setAttribute('href', src);
+			svgImage.setAttribute('width', String(width));
+			svgImage.setAttribute('height', String(height));
+			svgImage.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+			svg.appendChild(svgImage);
+			figure.appendChild(svg);
+			return;
+		}
+
+		const fallback = document.createElement('img');
+		fallback.className = 'turbofile-image-preview-image';
+		fallback.decoding = 'async';
+		if (!image.previewUrl && !image.previewContent) {
+			fallback.classList.add('is-thumbnail');
+		}
+		fallback.src = src;
+		fallback.alt = image.item.name;
+		fallback.style.transform = `scale(${zoom})`;
+		figure.appendChild(fallback);
+	}
+
+	private handleImagePreviewWheel(event: WheelEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+		const current = this.imageGridState?.previewZoom ?? 1;
+		const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+		this.setImageGridPreviewZoom(current * factor);
+	}
+
+	private attachImagePreviewPixelInspector(stage: HTMLElement, figure: HTMLElement, image: TurboFileImageGridImage, src: string): void {
+		const tooltip = $('.turbofile-image-preview-pixel-tooltip');
+		tooltip.textContent = 'Loading RGB...';
+		stage.appendChild(tooltip);
+		this.prepareImagePreviewAnalysis(image, src);
+		figure.addEventListener('mousemove', event => this.updateImagePreviewPixelTooltip(event, stage, tooltip, image, src));
+		figure.addEventListener('mouseleave', () => {
+			tooltip.classList.remove('is-visible');
+		});
+	}
+
+	private updateImagePreviewPixelTooltip(event: MouseEvent, stage: HTMLElement, tooltip: HTMLElement, image: TurboFileImageGridImage, src: string): void {
+		const visual = this.container?.querySelector<SVGSVGElement | HTMLImageElement>('.turbofile-image-preview-vector, .turbofile-image-preview-image');
+		const analysis = this.prepareImagePreviewAnalysis(image, src);
+		if (!visual || !analysis) {
+			return;
+		}
+
+		const visualRect = visual.getBoundingClientRect();
+		const stageRect = stage.getBoundingClientRect();
+		const xRatio = visualRect.width ? (event.clientX - visualRect.left) / visualRect.width : 0;
+		const yRatio = visualRect.height ? (event.clientY - visualRect.top) / visualRect.height : 0;
+		const x = Math.max(0, Math.min(Math.max(0, analysis.width - 1), Math.floor(xRatio * analysis.width)));
+		const y = Math.max(0, Math.min(Math.max(0, analysis.height - 1), Math.floor(yRatio * analysis.height)));
+		tooltip.style.left = `${event.clientX - stageRect.left + 12}px`;
+		tooltip.style.top = `${event.clientY - stageRect.top + 12}px`;
+		tooltip.classList.add('is-visible');
+		if (!analysis.ready) {
+			tooltip.textContent = `X: ${x}, Y: ${y}\nLoading RGB...`;
+			return;
+		}
+
+		const pixel = analysis.context.getImageData(x, y, 1, 1).data;
+		const r = pixel[0];
+		const g = pixel[1];
+		const b = pixel[2];
+		tooltip.textContent = `X: ${x}, Y: ${y}\nRGB (${r}, ${g}, ${b})\nHTML (#${this.toHexColor(r, g, b)})`;
+	}
+
+	private toHexColor(r: number, g: number, b: number): string {
+		return [r, g, b].map(value => value.toString(16).padStart(2, '0')).join('');
+	}
+
+	private prepareImagePreviewAnalysis(image: TurboFileImageGridImage, src: string): TurboFileImagePreviewAnalysis | undefined {
+		const ownerDocument = this.container?.ownerDocument ?? document;
+		const key = `${image.item.path ?? image.item.name}|${src}`;
+		if (this.imagePreviewAnalysis?.key === key) {
+			return this.imagePreviewAnalysis;
+		}
+
+		const canvas = ownerDocument.createElement('canvas');
+		const context = canvas.getContext('2d', { willReadFrequently: true });
+		if (!context) {
+			return undefined;
+		}
+		const analysis: TurboFileImagePreviewAnalysis = {
+			key,
+			canvas,
+			context,
+			width: Math.max(1, image.width ?? 1),
+			height: Math.max(1, image.height ?? 1),
+			ready: false
+		};
+		this.imagePreviewAnalysis = analysis;
+
+		const loader = new Image();
+		loader.decoding = 'async';
+		loader.onload = () => {
+			if (this.imagePreviewAnalysis !== analysis) {
+				return;
+			}
+			analysis.width = Math.max(1, loader.naturalWidth || image.width || 1);
+			analysis.height = Math.max(1, loader.naturalHeight || image.height || 1);
+			canvas.width = analysis.width;
+			canvas.height = analysis.height;
+			try {
+				context.clearRect(0, 0, analysis.width, analysis.height);
+				context.drawImage(loader, 0, 0, analysis.width, analysis.height);
+				analysis.ready = true;
+			} catch {
+				analysis.ready = false;
+			}
+			this.updateImagePreviewHistogramCanvas();
+		};
+		loader.src = src;
+		return analysis;
+	}
+
+	private drawImagePreviewHistogram(canvas: HTMLCanvasElement, analysis: TurboFileImagePreviewAnalysis | undefined): void {
+		const context = canvas.getContext('2d');
+		if (!context) {
+			return;
+		}
+		const width = canvas.width;
+		const height = canvas.height;
+		context.clearRect(0, 0, width, height);
+		context.fillStyle = '#808080';
+		context.fillRect(0, 0, width, height);
+		context.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+		for (let x = 0; x <= 5; x++) {
+			const lineX = Math.round((x / 5) * width) + 0.5;
+			context.beginPath();
+			context.moveTo(lineX, 0);
+			context.lineTo(lineX, height);
+			context.stroke();
+		}
+		if (!analysis?.ready) {
+			context.fillStyle = '#ffffff';
+			context.font = '12px Archivo, Segoe UI, sans-serif';
+			context.fillText('Loading histogram...', 12, 24);
+			return;
+		}
+
+		const data = analysis.context.getImageData(0, 0, analysis.width, analysis.height).data;
+		const red = new Uint32Array(256);
+		const green = new Uint32Array(256);
+		const blue = new Uint32Array(256);
+		const sampleStep = Math.max(1, Math.floor((analysis.width * analysis.height) / 260000));
+		for (let pixelIndex = 0; pixelIndex < analysis.width * analysis.height; pixelIndex += sampleStep) {
+			const offset = pixelIndex * 4;
+			red[data[offset]]++;
+			green[data[offset + 1]]++;
+			blue[data[offset + 2]]++;
+		}
+		const max = Math.max(1, ...Array.from(red), ...Array.from(green), ...Array.from(blue));
+		this.drawImagePreviewHistogramChannel(context, red, max, width, height, 'rgba(255, 0, 32, 0.86)');
+		this.drawImagePreviewHistogramChannel(context, green, max, width, height, 'rgba(0, 235, 74, 0.76)');
+		this.drawImagePreviewHistogramChannel(context, blue, max, width, height, 'rgba(0, 46, 255, 0.82)');
+	}
+
+	private drawImagePreviewHistogramChannel(context: CanvasRenderingContext2D, bins: Uint32Array, max: number, width: number, height: number, color: string): void {
+		context.beginPath();
+		context.moveTo(0, height);
+		for (let index = 0; index < bins.length; index++) {
+			const x = (index / (bins.length - 1)) * width;
+			const y = height - (bins[index] / max) * (height - 6);
+			context.lineTo(x, y);
+		}
+		context.lineTo(width, height);
+		context.closePath();
+		context.fillStyle = color;
+		context.fill();
+	}
+
+	private updateImagePreviewHistogramCanvas(): void {
+		const canvas = this.container?.querySelector<HTMLCanvasElement>('.turbofile-image-preview-histogram-canvas');
+		if (canvas) {
+			this.drawImagePreviewHistogram(canvas, this.imagePreviewAnalysis);
+		}
+	}
+
+	private attachImagePreviewHistogramDrag(panel: HTMLElement, handle: HTMLElement, state: TurboFileImageGridState): void {
+		handle.addEventListener('pointerdown', event => {
+			if ((event.target as HTMLElement).closest('button')) {
+				return;
+			}
+			event.preventDefault();
+			const ownerWindow = getWindow(panel);
+			const startX = event.clientX;
+			const startY = event.clientY;
+			const initialX = state.histogramX;
+			const initialY = state.histogramY;
+			const move = (moveEvent: PointerEvent) => {
+				state.histogramX = Math.max(8, initialX + moveEvent.clientX - startX);
+				state.histogramY = Math.max(8, initialY + moveEvent.clientY - startY);
+				panel.style.left = `${state.histogramX}px`;
+				panel.style.top = `${state.histogramY}px`;
+			};
+			const up = () => {
+				ownerWindow.removeEventListener('pointermove', move);
+				ownerWindow.removeEventListener('pointerup', up);
+			};
+			ownerWindow.addEventListener('pointermove', move);
+			ownerWindow.addEventListener('pointerup', up);
+		});
 	}
 
 	private updateImagePreviewOverlay(): void {
@@ -5238,6 +5512,10 @@ export class TurboFileEditor extends EditorPane {
 			columns: 8,
 			previewVisible,
 			previewZoom: 1,
+			pixelInspectorVisible: false,
+			histogramVisible: false,
+			histogramX: 104,
+			histogramY: 72,
 			scrollTop: 0,
 			viewportHeight: this.getImageGridDefaultViewportHeight()
 		};
@@ -5258,6 +5536,7 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
 		this.clearImageGridLoadedImageIndexes();
+		this.imagePreviewAnalysis = undefined;
 		this.imageGridRenderedRange = undefined;
 		this.imageGridState = undefined;
 		this.activePage = 'transfer';
@@ -5282,6 +5561,7 @@ export class TurboFileEditor extends EditorPane {
 		const nextIndex = (state.selectedIndex + delta + state.images.length) % state.images.length;
 		state.selectedIndex = nextIndex;
 		state.previewZoom = 1;
+		this.imagePreviewAnalysis = undefined;
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
@@ -5298,6 +5578,7 @@ export class TurboFileEditor extends EditorPane {
 		state.selectedIndex = index;
 		state.previewVisible = true;
 		state.previewZoom = 1;
+		this.imagePreviewAnalysis = undefined;
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
@@ -5314,7 +5595,26 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridPreviewPrefetchTimer();
 		this.imageGridState.previewVisible = false;
 		this.imageGridState.previewZoom = 1;
+		this.imagePreviewAnalysis = undefined;
 		this.releaseImageGridImagesOutsideRange(this.imageGridState, this.getImageGridVirtualRange(this.imageGridState));
+		this.render();
+	}
+
+	private toggleImagePreviewPixelInspector(): void {
+		const state = this.imageGridState;
+		if (!state?.previewVisible) {
+			return;
+		}
+		state.pixelInspectorVisible = !state.pixelInspectorVisible;
+		this.render();
+	}
+
+	private toggleImagePreviewHistogram(): void {
+		const state = this.imageGridState;
+		if (!state?.previewVisible) {
+			return;
+		}
+		state.histogramVisible = !state.histogramVisible;
 		this.render();
 	}
 
@@ -5323,10 +5623,10 @@ export class TurboFileEditor extends EditorPane {
 		if (!state?.previewVisible) {
 			return;
 		}
-		state.previewZoom = Math.min(1, Math.max(0.5, Math.round(zoom * 4) / 4));
-		const image = this.container?.querySelector<HTMLImageElement>('.turbofile-image-preview-image');
-		if (image) {
-			image.style.transform = `scale(${state.previewZoom})`;
+		state.previewZoom = Math.min(12, Math.max(0.05, Math.round(zoom * 100) / 100));
+		const visual = this.container?.querySelector<SVGSVGElement | HTMLImageElement>('.turbofile-image-preview-vector, .turbofile-image-preview-image');
+		if (visual) {
+			visual.style.transform = `scale(${state.previewZoom})`;
 		}
 		const zoomValue = this.container?.querySelector<HTMLButtonElement>('.turbofile-image-preview-zoom-value');
 		if (zoomValue) {
@@ -5374,6 +5674,7 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
 		this.clearImageGridLoadedImageIndexes();
+		this.imagePreviewAnalysis = undefined;
 		this.removePaneItemsFromState(state.side, [image.item]);
 
 		const task = this.beginTask('delete', `Delete ${image.item.name}`, device.name);

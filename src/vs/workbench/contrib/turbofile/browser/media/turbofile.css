@@ -4986,7 +4986,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 /* Platform-accurate single image preview layer. */
 .vs .turbofile-workbench,
 .turbofile-workbench.is-turbofile-light {
-	--tf-preview-backdrop-bg: rgba(255, 255, 255, 0.6);
+	--tf-preview-backdrop-bg: #f1f1f1;
 	--tf-preview-control-bg: rgba(255, 255, 255, 0.9);
 	--tf-preview-control-hover: rgba(243, 244, 246, 0.95);
 	--tf-preview-control-text: #111111;
@@ -4998,7 +4998,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench,
 .turbofile-workbench.is-turbofile-dark {
-	--tf-preview-backdrop-bg: rgba(20, 20, 20, 0.6);
+	--tf-preview-backdrop-bg: #202020;
 	--tf-preview-control-bg: rgba(20, 20, 20, 0.9);
 	--tf-preview-control-hover: rgba(38, 38, 38, 0.95);
 	--tf-preview-control-text: #f5f5f5;
@@ -5024,7 +5024,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-overlay,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-overlay {
 	background: var(--tf-preview-backdrop-bg);
-	backdrop-filter: blur(8px) saturate(1.2) brightness(1.01);
+	backdrop-filter: none;
 	outline: none;
 	overflow: hidden;
 }
@@ -5057,17 +5057,28 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	width: fit-content;
+	height: fit-content;
 	max-width: 100%;
 	max-height: 100%;
 	pointer-events: auto;
 	user-select: none;
 }
 
+.turbofile-image-preview-figure.is-pixel-inspector {
+	cursor: crosshair;
+}
+
 .vs .turbofile-workbench .turbofile-image-preview-image,
 .vs-dark .turbofile-workbench .turbofile-image-preview-image,
 .hc-black .turbofile-workbench .turbofile-image-preview-image,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-image,
-.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-image {
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-image,
+.vs .turbofile-workbench .turbofile-image-preview-vector,
+.vs-dark .turbofile-workbench .turbofile-image-preview-vector,
+.hc-black .turbofile-workbench .turbofile-image-preview-vector,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-vector,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-vector {
 	width: auto;
 	height: auto;
 	max-width: 100%;
@@ -5114,6 +5125,11 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-image-preview-action:hover,
 .turbofile-image-preview-zoom-controls .turbofile-image-preview-action:hover {
 	background: var(--tf-preview-control-hover);
+}
+
+.turbofile-image-preview-action.is-active {
+	color: #042aff;
+	background: rgba(225, 255, 37, 0.92);
 }
 
 .turbofile-image-preview-action:disabled,
@@ -5209,6 +5225,73 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	white-space: nowrap;
 	font-weight: 700;
 	color: var(--tf-preview-control-text);
+}
+
+.turbofile-image-preview-pixel-tooltip {
+	position: absolute;
+	z-index: 36;
+	display: none;
+	padding: 4px 6px;
+	border: 1px solid rgba(0, 0, 0, 0.18);
+	background: rgba(255, 255, 255, 0.96);
+	color: #111111;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+	font: 11px/1.35 Consolas, "Courier New", monospace;
+	white-space: pre;
+	pointer-events: none;
+}
+
+.turbofile-image-preview-pixel-tooltip.is-visible {
+	display: block;
+}
+
+.turbofile-image-preview-histogram {
+	position: absolute;
+	z-index: 35;
+	width: 264px;
+	border-radius: 4px;
+	background: #808080;
+	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+	overflow: hidden;
+	user-select: none;
+}
+
+.turbofile-image-preview-histogram-header {
+	height: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0 6px 0 8px;
+	background: rgba(0, 0, 0, 0.18);
+	color: #ffffff;
+	font-size: 12px;
+	cursor: move;
+}
+
+.turbofile-image-preview-histogram-close {
+	width: 18px;
+	height: 18px;
+	border: 0;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	color: #ffffff;
+	cursor: pointer;
+}
+
+.turbofile-image-preview-histogram-close:hover {
+	background: rgba(255, 255, 255, 0.18);
+}
+
+.turbofile-image-preview-histogram-canvas {
+	display: block;
+	width: 260px;
+	height: 130px;
+	margin: 2px;
+	border-radius: 2px;
+	background: #808080;
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side,
