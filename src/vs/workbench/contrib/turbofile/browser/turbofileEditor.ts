@@ -6797,7 +6797,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const driveRoot = getWindowsDriveRoot(path);
-		if (driveRoot?.substring(0, 1).toUpperCase() === 'C') {
+		if (driveRoot) {
 			return 'turbofile-location-icon-windows';
 		}
 
