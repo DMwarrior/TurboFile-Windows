@@ -5069,6 +5069,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	padding: 12px 8px;
 	overflow: hidden;
 	pointer-events: none;
+	touch-action: none;
 }
 
 .turbofile-image-preview-figure {
@@ -5083,6 +5084,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	max-height: 100%;
 	pointer-events: auto;
 	user-select: none;
+	touch-action: none;
 }
 
 .turbofile-image-preview-figure.is-pixel-inspector {
@@ -5108,7 +5110,8 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	box-shadow: none;
 	object-fit: contain;
 	transform-origin: center center;
-	transition: transform 160ms ease;
+	transition: none;
+	will-change: transform;
 }
 
 .turbofile-image-preview-toolbar {
@@ -5285,7 +5288,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	background: rgba(0, 0, 0, 0.18);
 	color: #ffffff;
 	font-size: 12px;
-	cursor: move;
 }
 
 .turbofile-image-preview-histogram-close {
