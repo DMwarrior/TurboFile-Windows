@@ -3291,7 +3291,7 @@ export class TurboFileEditor extends EditorPane {
 		overlay.appendChild(stage);
 
 		const toolbar = $('.turbofile-image-preview-toolbar');
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.desktopDownload, 'Download image', () => this.downloadImageGridPreview()));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, 'Download image', () => this.downloadImageGridPreview()));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, 'Delete image', () => { void this.deleteImageGridPreview(); }));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, 'Close', () => this.closeImageGridPreview()));
 		overlay.appendChild(toolbar);
