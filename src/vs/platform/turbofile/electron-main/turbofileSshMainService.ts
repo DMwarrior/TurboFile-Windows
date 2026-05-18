@@ -839,7 +839,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.strategyHint === 'relay') {
 			return undefined;
 		}
-		if (request.source.supportsRsync === false || request.target.supportsRsync === false) {
+		if (request.source.supportsRsync !== true || request.target.supportsRsync !== true) {
 			return undefined;
 		}
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
@@ -2410,7 +2410,13 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 	if (target.kind === 'local') {
 		return 'sftp-download';
 	}
-	return 'sftp-relay';
+	if (source.connection && target.connection && isSameSshConnection(source.connection, target.connection)) {
+		return 'remote-copy';
+	}
+	if (source.supportsRsync === true && target.supportsRsync === true) {
+		return 'rsync-direct';
+	}
+	return 'sftp-direct';
 }
 
 function getFileTypeFromStats(stats: ISFTPStats): TurboFileFileType {
@@ -2557,8 +2563,6 @@ function buildOptimizedSftpCommand(port: number, hasPassword = false): string {
 	const parts = [
 		'sftp',
 		'-q',
-		'-B 1048576',
-		'-R 128',
 		'-b -',
 		'-o Compression=no',
 		'-o ConnectTimeout=5',
