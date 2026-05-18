@@ -349,6 +349,9 @@ const IMAGE_GRID_CARD_VERTICAL_CHROME = 0;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
+const IMAGE_PREVIEW_ZOOM_MIN = 0.05;
+const IMAGE_PREVIEW_ZOOM_MAX = 16;
+const IMAGE_PREVIEW_ZOOM_STEP = 1.18;
 const IMAGE_GRID_THUMB_QUALITY = 72;
 const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
 const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
@@ -3384,9 +3387,9 @@ export class TurboFileEditor extends EditorPane {
 		controls.setAttribute('role', 'group');
 		controls.setAttribute('aria-label', 'Zoom controls');
 
-		const zoomOut = this.renderImagePreviewTopAction(Codicon.zoomOut, 'Zoom out', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) / 1.18));
+		const zoomOut = this.renderImagePreviewTopAction(Codicon.zoomOut, 'Zoom out', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) / IMAGE_PREVIEW_ZOOM_STEP));
 		zoomOut.classList.add('is-transient');
-		zoomOut.disabled = state.previewZoom <= 0.05;
+		zoomOut.disabled = state.previewZoom <= IMAGE_PREVIEW_ZOOM_MIN;
 		controls.appendChild(zoomOut);
 
 		const value = $('button.turbofile-image-preview-zoom-value') as HTMLButtonElement;
@@ -3395,9 +3398,9 @@ export class TurboFileEditor extends EditorPane {
 		value.textContent = `${Math.round(state.previewZoom * 100)}%`;
 		controls.appendChild(value);
 
-		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, 'Zoom in', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) * 1.18));
+		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, 'Zoom in', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) * IMAGE_PREVIEW_ZOOM_STEP));
 		zoomIn.classList.add('is-transient');
-		zoomIn.disabled = state.previewZoom >= 12;
+		zoomIn.disabled = state.previewZoom >= IMAGE_PREVIEW_ZOOM_MAX;
 		controls.appendChild(zoomIn);
 
 		const reset = this.renderImagePreviewTopAction(Codicon.screenNormal, 'Reset to fit', () => this.resetImagePreviewView());
@@ -5694,7 +5697,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!state?.previewVisible) {
 			return;
 		}
-		state.previewZoom = Math.min(12, Math.max(0.05, Math.round(zoom * 100) / 100));
+		state.previewZoom = Math.min(IMAGE_PREVIEW_ZOOM_MAX, Math.max(IMAGE_PREVIEW_ZOOM_MIN, Math.round(zoom * 100) / 100));
 		const visual = this.container?.querySelector<SVGSVGElement | HTMLImageElement>('.turbofile-image-preview-vector, .turbofile-image-preview-image');
 		if (visual) {
 			this.applyImagePreviewVisualTransform(visual, state);

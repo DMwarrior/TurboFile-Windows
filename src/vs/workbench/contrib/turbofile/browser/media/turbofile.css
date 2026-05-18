@@ -5112,6 +5112,13 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	transform-origin: center center;
 	transition: none;
 	will-change: transform;
+	image-rendering: pixelated;
+	image-rendering: crisp-edges;
+}
+
+.turbofile-image-preview-vector image {
+	image-rendering: pixelated;
+	image-rendering: crisp-edges;
 }
 
 .turbofile-image-preview-toolbar {
