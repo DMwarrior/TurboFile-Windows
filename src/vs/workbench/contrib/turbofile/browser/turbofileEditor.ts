@@ -6793,7 +6793,7 @@ export class TurboFileEditor extends EditorPane {
 	private getWindowsLocationIconClass(path: string): string {
 		const desktopPath = joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
 		if (isSameWindowsPath(path, desktopPath)) {
-			return 'turbofile-location-icon-desktop';
+			return 'turbofile-location-icon-windows';
 		}
 
 		const driveRoot = getWindowsDriveRoot(path);
