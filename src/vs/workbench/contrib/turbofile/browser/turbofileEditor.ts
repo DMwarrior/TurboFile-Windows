@@ -130,6 +130,7 @@ interface TurboFileImageGridState {
 	selectedIndex: number;
 	columns: TurboFileImageGridColumns;
 	previewVisible: boolean;
+	previewZoom: number;
 	scrollTop: number;
 	viewportHeight: number;
 }
@@ -3275,49 +3276,29 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 
-		const toolbar = $('.turbofile-image-preview-toolbar');
-		const meta = $('.turbofile-image-preview-meta');
-		meta.appendChild(renderIcon(Codicon.fileMedia));
-		const metaText = $('span.turbofile-image-preview-meta-text');
-		metaText.textContent = this.getImagePreviewMeta(state);
-		meta.appendChild(metaText);
-		toolbar.appendChild(meta);
+		const dismiss = $('button.turbofile-image-preview-dismiss') as HTMLButtonElement;
+		dismiss.type = 'button';
+		dismiss.setAttribute('aria-label', 'Close overlay');
+		dismiss.addEventListener('click', () => this.closeImageGridPreview());
+		overlay.appendChild(dismiss);
 
-		const close = this.createButton('关闭', 'turbofile-secondary-button');
-		close.element.classList.add('turbofile-image-preview-close');
-		clearNode(close.element);
-		close.element.appendChild(renderIcon(Codicon.close));
-		close.element.addEventListener('click', () => this.closeImageGridPreview());
-		toolbar.appendChild(close.element);
+		const stage = $('.turbofile-image-preview-stage');
+		this.renderImagePreviewStageContent(stage, state);
+		overlay.appendChild(stage);
+
+		const toolbar = $('.turbofile-image-preview-toolbar');
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.screenNormal, 'Reset to fit', () => this.setImageGridPreviewZoom(1)));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.desktopDownload, 'Download image', () => this.downloadImageGridPreview()));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, 'Close', () => this.closeImageGridPreview()));
 		overlay.appendChild(toolbar);
 
 		overlay.appendChild(this.renderImagePreviewSideButton(state, -1));
-		const stage = $('.turbofile-image-preview-stage');
-		this.renderImagePreviewStageContent(stage, state);
-		/*
-		const previewSrc = selected?.previewUrl || (selected?.previewContent ? `data:${selected.previewMime};base64,${selected.previewContent}` : '') || selected?.thumbnailUrl || (selected?.thumbnailContent ? `data:${selected.thumbnailMime};base64,${selected.thumbnailContent}` : '');
-		if (selected && previewSrc) {
-			const image = document.createElement('img');
-			image.className = 'turbofile-image-preview-image';
-			if (!selected.previewUrl && !selected.previewContent) {
-				image.classList.add('is-thumbnail');
-			}
-			image.src = previewSrc;
-			image.alt = selected.item.name;
-			stage.appendChild(image);
-		} else {
-			const placeholder = $('.turbofile-image-preview-placeholder');
-			placeholder.appendChild(renderIcon(Codicon.fileMedia));
-			placeholder.append(selected?.previewError ?? (selected?.previewLoading ? '正在加载原图...' : '准备加载原图'));
-			stage.appendChild(placeholder);
-		}
-		*/
-		overlay.appendChild(stage);
 		overlay.appendChild(this.renderImagePreviewSideButton(state, 1));
 
-		const caption = $('.turbofile-image-preview-caption');
-		caption.textContent = this.getImagePreviewCaption(state);
-		overlay.appendChild(caption);
+		const footer = $('.turbofile-image-preview-footer');
+		footer.appendChild(this.renderImagePreviewZoomControls(state));
+		footer.appendChild(this.renderImagePreviewInfoStrip(state));
+		overlay.appendChild(footer);
 
 		const navigation = $('.turbofile-image-preview-navigation');
 		const previous = $('button.turbofile-image-preview-nav-button') as HTMLButtonElement;
@@ -3338,6 +3319,74 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		return overlay;
+	}
+
+	private renderImagePreviewTopAction(icon: ThemeIcon, label: string, handler: () => void): HTMLButtonElement {
+		const button = $('button.turbofile-image-preview-action') as HTMLButtonElement;
+		button.type = 'button';
+		button.title = label;
+		button.setAttribute('aria-label', label);
+		button.appendChild(renderIcon(icon));
+		button.addEventListener('click', event => {
+			event.stopPropagation();
+			handler();
+		});
+		return button;
+	}
+
+	private renderImagePreviewZoomControls(state: TurboFileImageGridState): HTMLElement {
+		const controls = $('.turbofile-image-preview-zoom-controls');
+		controls.setAttribute('role', 'group');
+		controls.setAttribute('aria-label', 'Zoom controls');
+
+		const zoomOut = this.renderImagePreviewTopAction(Codicon.zoomOut, 'Zoom out', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) - 0.25));
+		zoomOut.classList.add('is-transient');
+		zoomOut.disabled = state.previewZoom <= 0.5;
+		controls.appendChild(zoomOut);
+
+		const value = $('button.turbofile-image-preview-zoom-value') as HTMLButtonElement;
+		value.type = 'button';
+		value.disabled = true;
+		value.textContent = `${Math.round(state.previewZoom * 100)}%`;
+		controls.appendChild(value);
+
+		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, 'Zoom in', () => this.setImageGridPreviewZoom((this.imageGridState?.previewZoom ?? 1) + 0.25));
+		zoomIn.classList.add('is-transient');
+		zoomIn.disabled = state.previewZoom >= 3;
+		controls.appendChild(zoomIn);
+
+		const reset = this.renderImagePreviewTopAction(Codicon.screenNormal, 'Reset to fit', () => this.setImageGridPreviewZoom(1));
+		reset.classList.add('is-reset');
+		reset.disabled = state.previewZoom === 1;
+		controls.appendChild(reset);
+		return controls;
+	}
+
+	private renderImagePreviewInfoStrip(state: TurboFileImageGridState): HTMLElement {
+		const info = $('.turbofile-image-preview-caption.turbofile-image-preview-info-strip');
+		this.renderImagePreviewInfoStripContent(info, state);
+		return info;
+	}
+
+	private renderImagePreviewInfoStripContent(info: HTMLElement, state: TurboFileImageGridState): void {
+		clearNode(info);
+		info.setAttribute('aria-label', this.getImagePreviewCaption(state));
+		const image = state.images[state.selectedIndex];
+		if (!image) {
+			return;
+		}
+
+		const index = $('span.turbofile-image-preview-info-index');
+		index.textContent = `${state.selectedIndex + 1} / ${state.images.length}`;
+		info.appendChild(index);
+
+		const name = $('span.turbofile-image-preview-info-name');
+		name.textContent = image.item.name;
+		info.appendChild(name);
+
+		const dimensions = $('span.turbofile-image-preview-info-dimensions');
+		dimensions.textContent = image.width && image.height ? `${image.width} × ${image.height}` : image.previewLoading ? 'Loading original' : 'Original image';
+		info.appendChild(dimensions);
 	}
 
 	private renderImagePreviewSideButton(state: TurboFileImageGridState, delta: -1 | 1): HTMLElement {
@@ -3366,8 +3415,11 @@ export class TurboFileEditor extends EditorPane {
 	private renderImagePreviewStageContent(stage: HTMLElement, state: TurboFileImageGridState): void {
 		clearNode(stage);
 		const selected = state.images[state.selectedIndex];
-		const previewSrc = selected?.previewUrl || (selected?.previewContent ? `data:${selected.previewMime};base64,${selected.previewContent}` : '') || selected?.thumbnailUrl || (selected?.thumbnailContent ? `data:${selected.thumbnailMime};base64,${selected.thumbnailContent}` : '');
+		const previewSrc = this.getImagePreviewSource(selected);
 		if (selected && previewSrc) {
+			const figure = $('.turbofile-image-preview-figure');
+			figure.setAttribute('role', 'img');
+			figure.setAttribute('aria-label', selected.item.name);
 			const image = document.createElement('img');
 			image.className = 'turbofile-image-preview-image';
 			image.decoding = 'async';
@@ -3376,13 +3428,22 @@ export class TurboFileEditor extends EditorPane {
 			}
 			image.src = previewSrc;
 			image.alt = selected.item.name;
-			stage.appendChild(image);
+			image.style.transform = `scale(${state.previewZoom})`;
+			figure.appendChild(image);
+			stage.appendChild(figure);
 			return;
 		}
 		const placeholder = $('.turbofile-image-preview-placeholder');
 		placeholder.appendChild(renderIcon(Codicon.fileMedia));
 		placeholder.append(selected?.previewError ?? (selected?.previewLoading ? 'Loading image...' : 'Preparing image...'));
 		stage.appendChild(placeholder);
+	}
+
+	private getImagePreviewSource(image: TurboFileImageGridImage | undefined): string {
+		return image?.previewUrl
+			|| (image?.previewContent ? `data:${image.previewMime};base64,${image.previewContent}` : '')
+			|| image?.thumbnailUrl
+			|| (image?.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 	}
 
 	private updateImagePreviewOverlay(): void {
@@ -3396,11 +3457,11 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const caption = this.container.querySelector<HTMLElement>('.turbofile-image-preview-caption');
 		if (caption) {
-			caption.textContent = this.getImagePreviewCaption(state);
+			this.renderImagePreviewInfoStripContent(caption, state);
 		}
-		const metaText = this.container.querySelector<HTMLElement>('.turbofile-image-preview-meta-text');
-		if (metaText) {
-			metaText.textContent = this.getImagePreviewMeta(state);
+		const zoomValue = this.container.querySelector<HTMLButtonElement>('.turbofile-image-preview-zoom-value');
+		if (zoomValue) {
+			zoomValue.textContent = `${Math.round(state.previewZoom * 100)}%`;
 		}
 	}
 
@@ -5166,6 +5227,7 @@ export class TurboFileEditor extends EditorPane {
 			selectedIndex,
 			columns: 8,
 			previewVisible,
+			previewZoom: 1,
 			scrollTop: 0,
 			viewportHeight: this.getImageGridDefaultViewportHeight()
 		};
@@ -5209,6 +5271,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const nextIndex = (state.selectedIndex + delta + state.images.length) % state.images.length;
 		state.selectedIndex = nextIndex;
+		state.previewZoom = 1;
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
@@ -5224,6 +5287,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		state.selectedIndex = index;
 		state.previewVisible = true;
+		state.previewZoom = 1;
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
@@ -5239,8 +5303,43 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridPreviewRequestSeq++;
 		this.clearImageGridPreviewPrefetchTimer();
 		this.imageGridState.previewVisible = false;
+		this.imageGridState.previewZoom = 1;
 		this.releaseImageGridImagesOutsideRange(this.imageGridState, this.getImageGridVirtualRange(this.imageGridState));
 		this.render();
+	}
+
+	private setImageGridPreviewZoom(zoom: number): void {
+		const state = this.imageGridState;
+		if (!state?.previewVisible) {
+			return;
+		}
+		state.previewZoom = Math.min(3, Math.max(0.5, Math.round(zoom * 4) / 4));
+		const image = this.container?.querySelector<HTMLImageElement>('.turbofile-image-preview-image');
+		if (image) {
+			image.style.transform = `scale(${state.previewZoom})`;
+		}
+		const zoomValue = this.container?.querySelector<HTMLButtonElement>('.turbofile-image-preview-zoom-value');
+		if (zoomValue) {
+			zoomValue.textContent = `${Math.round(state.previewZoom * 100)}%`;
+		}
+	}
+
+	private downloadImageGridPreview(): void {
+		const state = this.imageGridState;
+		const image = state?.images[state.selectedIndex];
+		const src = this.getImagePreviewSource(image);
+		if (!image || !src) {
+			return;
+		}
+		const ownerDocument = this.container?.ownerDocument ?? document;
+		const anchor = ownerDocument.createElement('a');
+		anchor.href = src;
+		anchor.download = image.item.name;
+		anchor.rel = 'noopener';
+		anchor.style.display = 'none';
+		ownerDocument.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
 	}
 
 	private setImageGridColumns(columns: TurboFileImageGridColumns): void {
@@ -5260,14 +5359,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const sizeText = image.width && image.height ? `原图 ${image.width}x${image.height}` : image.previewLoading ? '正在加载原图' : '原图';
 		return `${image.item.name} (${state.selectedIndex + 1}/${state.images.length}) | ${sizeText}`;
-	}
-
-	private getImagePreviewMeta(state: TurboFileImageGridState): string {
-		const image = state.images[state.selectedIndex];
-		if (!image) {
-			return '';
-		}
-		return `${state.selectedIndex + 1} / ${state.images.length} · ${image.item.name}`;
 	}
 
 	private getImageGridLoadIndexes(selectedIndex: number, total: number): number[] {

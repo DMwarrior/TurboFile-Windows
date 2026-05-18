@@ -4982,3 +4982,324 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 		transform: translateY(-1px);
 	}
 }
+
+/* Platform-accurate single image preview layer. */
+.vs .turbofile-workbench,
+.turbofile-workbench.is-turbofile-light {
+	--tf-preview-backdrop-bg: rgba(255, 255, 255, 0.6);
+	--tf-preview-control-bg: rgba(255, 255, 255, 0.9);
+	--tf-preview-control-hover: rgba(243, 244, 246, 0.95);
+	--tf-preview-control-text: #111111;
+	--tf-preview-muted-text: #6b7280;
+	--tf-preview-border-ring: rgba(229, 231, 235, 0.5);
+	--tf-preview-elevated-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -4px rgba(0, 0, 0, 0.10);
+}
+
+.vs-dark .turbofile-workbench,
+.hc-black .turbofile-workbench,
+.turbofile-workbench.is-turbofile-dark {
+	--tf-preview-backdrop-bg: rgba(20, 20, 20, 0.6);
+	--tf-preview-control-bg: rgba(20, 20, 20, 0.9);
+	--tf-preview-control-hover: rgba(38, 38, 38, 0.95);
+	--tf-preview-control-text: #f5f5f5;
+	--tf-preview-muted-text: #a3a3a3;
+	--tf-preview-border-ring: rgba(255, 255, 255, 0.1);
+	--tf-preview-elevated-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -4px rgba(0, 0, 0, 0.10);
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-overlay,
+.vs-dark .turbofile-workbench .turbofile-image-preview-overlay,
+.hc-black .turbofile-workbench .turbofile-image-preview-overlay,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-overlay,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-overlay {
+	background: var(--tf-preview-backdrop-bg);
+	backdrop-filter: blur(8px) saturate(1.2) brightness(1.01);
+	outline: none;
+	overflow: hidden;
+}
+
+.turbofile-image-preview-dismiss {
+	position: absolute;
+	inset: 0;
+	z-index: 10;
+	border: 0;
+	padding: 0;
+	margin: 0;
+	background: transparent;
+	cursor: pointer;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-stage,
+.vs-dark .turbofile-workbench .turbofile-image-preview-stage,
+.hc-black .turbofile-workbench .turbofile-image-preview-stage,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-stage,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-stage {
+	z-index: 20;
+	padding: 12px 8px;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+.turbofile-image-preview-figure {
+	position: relative;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	max-width: 100%;
+	max-height: 100%;
+	pointer-events: auto;
+	user-select: none;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-image,
+.vs-dark .turbofile-workbench .turbofile-image-preview-image,
+.hc-black .turbofile-workbench .turbofile-image-preview-image,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-image,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-image {
+	width: auto;
+	height: auto;
+	max-width: 100%;
+	max-height: 100%;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+	object-fit: contain;
+	transform-origin: center center;
+	transition: transform 160ms ease;
+}
+
+.turbofile-image-preview-toolbar {
+	top: 16px;
+	right: 16px;
+	left: auto;
+	z-index: 30;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	width: auto;
+	pointer-events: auto;
+}
+
+.turbofile-image-preview-action,
+.turbofile-image-preview-zoom-controls .turbofile-image-preview-action,
+.turbofile-image-preview-zoom-value {
+	width: 32px;
+	height: 32px;
+	border: 0;
+	border-radius: 8px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--tf-preview-control-bg);
+	color: var(--tf-preview-control-text);
+	box-shadow: var(--tf-preview-elevated-shadow);
+	cursor: pointer;
+	transition: background 160ms ease, opacity 160ms ease, transform 160ms ease;
+}
+
+.turbofile-image-preview-action:hover,
+.turbofile-image-preview-zoom-controls .turbofile-image-preview-action:hover {
+	background: var(--tf-preview-control-hover);
+}
+
+.turbofile-image-preview-action:disabled,
+.turbofile-image-preview-zoom-value:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.turbofile-image-preview-action .codicon,
+.turbofile-image-preview-zoom-value {
+	font-size: 14px;
+}
+
+.turbofile-image-preview-footer {
+	position: absolute;
+	left: 16px;
+	right: 16px;
+	bottom: 14px;
+	z-index: 30;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	pointer-events: none;
+}
+
+.turbofile-image-preview-zoom-controls {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 2px;
+	pointer-events: auto;
+}
+
+.turbofile-image-preview-zoom-controls .is-transient,
+.turbofile-image-preview-zoom-controls .is-reset {
+	opacity: 0;
+	transition-delay: 300ms;
+}
+
+.turbofile-image-preview-zoom-controls:hover .is-transient,
+.turbofile-image-preview-zoom-controls:hover .is-reset {
+	opacity: 1;
+	transition-delay: 0ms;
+}
+
+.turbofile-image-preview-zoom-value {
+	width: auto;
+	min-width: 55px;
+	padding: 0 12px;
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-caption,
+.vs-dark .turbofile-workbench .turbofile-image-preview-caption,
+.hc-black .turbofile-workbench .turbofile-image-preview-caption,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-caption,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-caption {
+	position: static;
+	left: auto;
+	bottom: auto;
+	transform: none;
+	max-width: min(720px, calc(100vw - 180px));
+	min-height: 32px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 4px 12px;
+	padding: 6px 12px;
+	border: 0;
+	border-radius: 10px;
+	background: var(--tf-preview-control-bg);
+	color: var(--tf-preview-control-text);
+	font-size: 12px;
+	font-weight: 500;
+	box-shadow: var(--tf-preview-elevated-shadow);
+	backdrop-filter: none;
+	pointer-events: auto;
+}
+
+.turbofile-image-preview-info-index,
+.turbofile-image-preview-info-dimensions {
+	color: var(--tf-preview-muted-text);
+	white-space: nowrap;
+}
+
+.turbofile-image-preview-info-name {
+	max-width: min(360px, 42vw);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 700;
+	color: var(--tf-preview-control-text);
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side,
+.hc-black .turbofile-workbench .turbofile-image-preview-side,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side {
+	top: auto;
+	bottom: 32px;
+	width: 80px;
+	height: 80px;
+	padding: 0;
+	border: 0;
+	border-radius: 10px;
+	background: var(--tf-preview-control-bg);
+	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
+	transform: none;
+	overflow: hidden;
+	z-index: 30;
+	backdrop-filter: blur(8px) saturate(1.2) brightness(1.01);
+	transition: transform 200ms ease, box-shadow 200ms ease, background 200ms ease;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side.is-left,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side.is-left,
+.hc-black .turbofile-workbench .turbofile-image-preview-side.is-left,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-left,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-left {
+	left: 8px;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side.is-right,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side.is-right,
+.hc-black .turbofile-workbench .turbofile-image-preview-side.is-right,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-right,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-right {
+	right: 8px;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side:hover,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side:hover,
+.hc-black .turbofile-workbench .turbofile-image-preview-side:hover,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover {
+	background: var(--tf-preview-control-bg);
+	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
+	transform: scale(1.05);
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side img,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side img,
+.hc-black .turbofile-workbench .turbofile-image-preview-side img,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side img,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side img {
+	width: 100%;
+	height: 100%;
+	border-radius: 0;
+	object-fit: cover;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side-icon,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side-icon,
+.hc-black .turbofile-workbench .turbofile-image-preview-side-icon,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side-icon,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side-icon {
+	color: #ffffff;
+	background: rgba(0, 0, 0, 0.4);
+	transition: background 200ms ease;
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
+.vs-dark .turbofile-workbench .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
+.hc-black .turbofile-workbench .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon {
+	background: rgba(0, 0, 0, 0.2);
+}
+
+.vs .turbofile-workbench .turbofile-image-preview-navigation,
+.vs-dark .turbofile-workbench .turbofile-image-preview-navigation,
+.hc-black .turbofile-workbench .turbofile-image-preview-navigation,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-navigation,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-navigation {
+	display: none;
+}
+
+@media (max-width: 900px) {
+	.vs .turbofile-workbench .turbofile-image-preview-stage,
+	.vs-dark .turbofile-workbench .turbofile-image-preview-stage,
+	.hc-black .turbofile-workbench .turbofile-image-preview-stage,
+	.turbofile-workbench.is-turbofile-light .turbofile-image-preview-stage,
+	.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-stage {
+		padding: 12px 8px 108px;
+	}
+
+	.vs .turbofile-workbench .turbofile-image-preview-side,
+	.vs-dark .turbofile-workbench .turbofile-image-preview-side,
+	.hc-black .turbofile-workbench .turbofile-image-preview-side,
+	.turbofile-workbench.is-turbofile-light .turbofile-image-preview-side,
+	.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side {
+		bottom: 18px;
+		width: 76px;
+		height: 76px;
+	}
+}
