@@ -739,6 +739,7 @@ export class TurboFileEditor extends EditorPane {
 	override dispose(): void {
 		document.body.classList.remove('turbofile-main-editor-visible');
 		document.body.classList.remove('turbofile-transfer-tabs-visible');
+		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark');
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
@@ -1171,6 +1172,8 @@ export class TurboFileEditor extends EditorPane {
 		const effectiveMode = this.getEffectiveAppearanceMode(this.getAppearanceMode());
 		this.container.classList.toggle('is-turbofile-light', effectiveMode === 'light');
 		this.container.classList.toggle('is-turbofile-dark', effectiveMode === 'dark');
+		document.body.classList.toggle('turbofile-editor-theme-light', effectiveMode === 'light');
+		document.body.classList.toggle('turbofile-editor-theme-dark', effectiveMode === 'dark');
 	}
 
 	private getAppearanceMode(): 'light' | 'dark' | 'system' {
