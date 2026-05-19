@@ -580,6 +580,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly tasks: TurboFileTask[] = [];
 	private editorGroupContainer: HTMLElement | undefined;
 	private currentInput: TurboFileEditorInput | undefined;
+	private isEditorVisible = false;
 
 	constructor(
 		group: IEditorGroup,
@@ -721,7 +722,9 @@ export class TurboFileEditor extends EditorPane {
 
 	override setVisible(visible: boolean): void {
 		super.setVisible(visible);
+		this.isEditorVisible = visible;
 		document.body.classList.toggle('turbofile-main-editor-visible', visible);
+		this.updateTransferTabsVisibility();
 		if (visible) {
 			this.ensureTitlebarThemeToggle();
 		} else {
@@ -735,6 +738,7 @@ export class TurboFileEditor extends EditorPane {
 
 	override dispose(): void {
 		document.body.classList.remove('turbofile-main-editor-visible');
+		document.body.classList.remove('turbofile-transfer-tabs-visible');
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
@@ -1505,6 +1509,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private showAddDeviceForm(): void {
 		this.activePage = 'devices';
+		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.isDeviceFormVisible = true;
 		this.editingDeviceId = undefined;
@@ -1519,6 +1524,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.activePage = 'devices';
+		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.isDeviceFormVisible = true;
 		this.editingDeviceId = device.id;
@@ -1543,8 +1549,13 @@ export class TurboFileEditor extends EditorPane {
 		this.isTaskLogVisible = false;
 		this.isDeviceFormVisible = false;
 		this.editingDeviceId = undefined;
+		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.render();
+	}
+
+	private updateTransferTabsVisibility(): void {
+		document.body.classList.toggle('turbofile-transfer-tabs-visible', this.isEditorVisible && this.activePage === 'transfer');
 	}
 
 	private notifyActivePageChanged(): void {
@@ -5802,6 +5813,7 @@ export class TurboFileEditor extends EditorPane {
 			viewportHeight: this.getImageGridDefaultViewportHeight()
 		};
 		this.activePage = 'images';
+		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.statusMessage = `已展开 ${this.getSideLabel(side)} 图片：${images.length} 张。`;
 		this.render();
@@ -5824,6 +5836,7 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridRenderedRange = undefined;
 		this.imageGridState = undefined;
 		this.activePage = 'transfer';
+		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.render();
 	}

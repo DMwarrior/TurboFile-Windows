@@ -130,6 +130,43 @@ body.turbofile-shell .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
+body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
+	display: none !important;
+	height: 0 !important;
+	min-height: 0 !important;
+	border: 0 !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .editor-container {
+	height: 100% !important;
+}
+
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) {
+	width: 64px !important;
+	min-width: 64px !important;
+	max-width: 64px !important;
+}
+
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-name,
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-description,
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-separator {
+	display: none !important;
+}
+
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .tab-label {
+	justify-content: center;
+	padding-left: 0 !important;
+	padding-right: 0 !important;
+}
+
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .tab-label .codicon,
+body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .monaco-icon-label::before {
+	font-size: 22px !important;
+	width: 22px !important;
+	height: 22px !important;
+	line-height: 22px !important;
+}
+
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar > .titlebar-container,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .titlebar-left,
