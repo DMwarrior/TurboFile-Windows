@@ -3117,6 +3117,7 @@ body.hc-black .turbofile-live-transfer-panel {
 	display: grid;
 	gap: 2px;
 	color: currentColor;
+	opacity: 0.72;
 }
 
 .turbofile-image-page-view-icon.is-large {
