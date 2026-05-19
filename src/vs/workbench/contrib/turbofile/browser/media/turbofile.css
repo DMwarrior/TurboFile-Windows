@@ -5077,11 +5077,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-image-preview-figure {
 	position: relative;
 	z-index: 20;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	width: fit-content;
-	height: fit-content;
+	display: block;
+	width: 100%;
+	height: 100%;
 	max-width: 100%;
 	max-height: 100%;
 	pointer-events: auto;
@@ -5093,27 +5091,20 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	cursor: crosshair;
 }
 
-.vs .turbofile-workbench .turbofile-image-preview-image,
-.vs-dark .turbofile-workbench .turbofile-image-preview-image,
-.hc-black .turbofile-workbench .turbofile-image-preview-image,
-.turbofile-workbench.is-turbofile-light .turbofile-image-preview-image,
-.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-image,
-.vs .turbofile-workbench .turbofile-image-preview-vector,
-.vs-dark .turbofile-workbench .turbofile-image-preview-vector,
-.hc-black .turbofile-workbench .turbofile-image-preview-vector,
-.turbofile-workbench.is-turbofile-light .turbofile-image-preview-vector,
-.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-vector {
-	width: auto;
-	height: auto;
-	max-width: 100%;
-	max-height: 100%;
+.vs .turbofile-workbench .turbofile-image-preview-canvas,
+.vs-dark .turbofile-workbench .turbofile-image-preview-canvas,
+.hc-black .turbofile-workbench .turbofile-image-preview-canvas,
+.turbofile-workbench.is-turbofile-light .turbofile-image-preview-canvas,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-preview-canvas {
+	position: absolute;
+	inset: 0;
+	display: block;
+	width: 100%;
+	height: 100%;
 	border-radius: 0;
 	background: transparent;
 	box-shadow: none;
-	object-fit: contain;
-	transform-origin: center center;
-	transition: none;
-	will-change: transform;
+	touch-action: none;
 }
 
 .turbofile-image-preview-toolbar {
