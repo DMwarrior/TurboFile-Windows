@@ -8,6 +8,7 @@ import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { $, clearNode, Dimension, getWindow, IDomPosition } from '../../../../base/browser/dom.js';
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
+import { InputBox, MessageType } from '../../../../base/browser/ui/inputbox/inputBox.js';
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
@@ -22,7 +23,7 @@ import { getIconClasses } from '../../../../editor/common/services/getIconClasse
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
-import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
+import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
@@ -45,6 +46,7 @@ import { BasePty } from '../../terminal/common/basePty.js';
 import { ITerminalProfileService } from '../../terminal/common/terminal.js';
 import { ColorThemeData } from '../../../services/themes/common/colorThemeData.js';
 import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWorkbenchColorTheme, IWorkbenchThemeService, ThemeSettings, ThemeSettingDefaults } from '../../../services/themes/common/workbenchThemeService.js';
+import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDevicePlatform } from '../common/turbofileTypes.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
@@ -248,6 +250,13 @@ interface TurboFileInternalTransferClipboard {
 	readonly sourcePath: string;
 	readonly items: TurboFileFileItem[];
 	readonly createdAt: number;
+}
+
+interface TurboFileInlineRenameState {
+	readonly side: 'left' | 'right';
+	readonly path: string;
+	readonly originalName: string;
+	readonly directory: boolean;
 }
 
 interface TurboFileTaskTransferItem {
@@ -574,6 +583,7 @@ export class TurboFileEditor extends EditorPane {
 	private taskbarHiddenForTerminal = false;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
+	private inlineRename: TurboFileInlineRenameState | undefined;
 	private readonly windowsClipboardPasteInFlight = new Set<string>();
 	private availableWindowsDriveRoots: string[] = [];
 	private statusMessage = '极速传已启动：双栏浏览、设备管理、传输、预览和终端入口已接入。';
@@ -591,6 +601,7 @@ export class TurboFileEditor extends EditorPane {
 		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService,
 		@ITurboFileSshService private readonly sshService: ITurboFileSshService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IContextViewService private readonly contextViewService: IContextViewService,
 		@IFileService private readonly fileService: IFileService,
 		@IModelService private readonly modelService: IModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
@@ -1769,6 +1780,11 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		list.addEventListener('keydown', event => {
+			if (event.key === 'F2') {
+				event.preventDefault();
+				void this.renameSelected(side);
+				return;
+			}
 			if (event.key === 'Delete') {
 				event.preventDefault();
 				void this.deleteSelected(side);
@@ -2284,14 +2300,18 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderFileRow(side: 'left' | 'right', item: TurboFileFileItem, selected: boolean): HTMLElement {
 		const row = $('.turbofile-file-row');
+		const renaming = this.isInlineRenameTarget(side, item);
 		if (item.path) {
 			row.dataset.turbofilePath = item.path;
 		}
-		if (selected) {
+		if (selected || renaming) {
 			row.classList.add('is-selected');
 		}
+		if (renaming) {
+			row.classList.add('is-renaming');
+		}
 		row.classList.add('is-clickable');
-		if (item.path && !item.parent) {
+		if (item.path && !item.parent && !renaming) {
 			row.draggable = true;
 			row.addEventListener('dragstart', event => {
 				this.ensureItemInSelection(side, item);
@@ -2300,6 +2320,9 @@ export class TurboFileEditor extends EditorPane {
 			});
 		}
 		row.addEventListener('click', event => {
+			if (renaming && (event.target as HTMLElement | null)?.closest('.turbofile-inline-rename')) {
+				return;
+			}
 			if (event.detail > 1) {
 				return;
 			}
@@ -2312,6 +2335,9 @@ export class TurboFileEditor extends EditorPane {
 			row.addEventListener('pointerdown', () => this.prefetchPaneDirectory(side, item.path));
 		}
 		row.addEventListener('dblclick', () => {
+			if (renaming) {
+				return;
+			}
 			if (item.directory || item.parent) {
 				void this.openItem(side, item);
 			} else {
@@ -2323,8 +2349,13 @@ export class TurboFileEditor extends EditorPane {
 		});
 
 		const name = $('.turbofile-file-name');
-		name.appendChild(this.renderFileBrowserIcon(item));
-		name.append(item.name);
+		if (renaming) {
+			name.classList.add('is-renaming');
+			this.renderInlineRenameInput(side, item, name);
+		} else {
+			name.appendChild(this.renderFileBrowserIcon(item));
+			name.append(item.name);
+		}
 
 		const size = $('.turbofile-file-meta');
 		size.textContent = item.size;
@@ -2336,6 +2367,129 @@ export class TurboFileEditor extends EditorPane {
 		row.appendChild(size);
 		row.appendChild(modified);
 		return row;
+	}
+
+	private renderInlineRenameInput(side: 'left' | 'right', item: TurboFileFileItem, container: HTMLElement): void {
+		let icon = this.renderFileBrowserIcon(item);
+		container.appendChild(icon);
+
+		const inputHost = $('span.turbofile-inline-rename');
+		container.appendChild(inputHost);
+
+		const inputBox = new InputBox(inputHost, this.contextViewService, {
+			ariaLabel: '输入文件名。按 Enter 确认或 Escape 取消。',
+			inputBoxStyles: defaultInputBoxStyles,
+			validationOptions: {
+				validation: value => {
+					const message = this.validateRenameName(side, item, value);
+					return message ? { content: message, type: MessageType.ERROR } : null;
+				}
+			}
+		});
+
+		const disposables = new DisposableStore();
+		disposables.add(inputBox);
+		this.renderDisposables.add(disposables);
+
+		let currentSelectionState: 'prefix' | 'all' | 'suffix' = 'prefix';
+		let finished = false;
+		const selectByState = () => {
+			const value = inputBox.value;
+			const dotIndex = value.lastIndexOf('.');
+			if (item.directory || dotIndex <= 0) {
+				inputBox.select({ start: 0, end: value.length });
+				return;
+			}
+			if (currentSelectionState === 'prefix') {
+				inputBox.select({ start: 0, end: dotIndex });
+			} else if (currentSelectionState === 'all') {
+				inputBox.select({ start: 0, end: value.length });
+			} else {
+				inputBox.select({ start: dotIndex + 1, end: value.length });
+			}
+		};
+
+		const finish = (success: boolean) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			const nextName = inputBox.value.trim();
+			disposables.dispose();
+			if (!this.isInlineRenameTarget(side, item)) {
+				return;
+			}
+			this.inlineRename = undefined;
+			this.render();
+			if (success && nextName && nextName !== item.name && !this.validateRenameName(side, item, nextName)) {
+				void this.performRename(side, item, nextName);
+			}
+		};
+
+		inputBox.value = item.name;
+		inputBox.validate();
+
+		disposables.add(inputBox.onDidChange(value => {
+			const targetName = value || ' ';
+			const targetPath = item.path ? joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(this.getPaneDevice(side) ?? this.localWindowsDevice)) : undefined;
+			const nextIcon = this.renderFileBrowserIcon({ ...item, name: targetName, path: targetPath });
+			icon.replaceWith(nextIcon);
+			icon = nextIcon;
+			inputBox.validate();
+		}));
+
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				event.stopPropagation();
+				if (!inputBox.validate()) {
+					finish(true);
+				}
+				return;
+			}
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				event.stopPropagation();
+				finish(false);
+				return;
+			}
+			if (event.key === 'F2') {
+				event.preventDefault();
+				event.stopPropagation();
+				if (currentSelectionState === 'prefix') {
+					currentSelectionState = 'all';
+				} else if (currentSelectionState === 'all') {
+					currentSelectionState = 'suffix';
+				} else {
+					currentSelectionState = 'prefix';
+				}
+				selectByState();
+			}
+		};
+		inputBox.inputElement.addEventListener('keydown', handleKeydown);
+		disposables.add({ dispose: () => inputBox.inputElement.removeEventListener('keydown', handleKeydown) });
+
+		const handleBlur = () => {
+			const window = getWindow(inputBox.inputElement);
+			window.setTimeout(() => {
+				if (finished || window.document.activeElement === inputBox.inputElement) {
+					return;
+				}
+				finish(inputBox.isInputValid());
+			}, 0);
+		};
+		inputBox.inputElement.addEventListener('blur', handleBlur);
+		disposables.add({ dispose: () => inputBox.inputElement.removeEventListener('blur', handleBlur) });
+
+		const window = getWindow(inputHost);
+		const frame = window.requestAnimationFrame(() => {
+			if (!finished && this.isInlineRenameTarget(side, item)) {
+				inputBox.focus();
+				currentSelectionState = 'prefix';
+				selectByState();
+			}
+		});
+		disposables.add({ dispose: () => window.cancelAnimationFrame(frame) });
 	}
 
 	private renderTaskbar(): HTMLElement {
@@ -5717,18 +5871,72 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const nextName = await this.showDialogPrompt('重命名', '请输入新名称', item.name);
-		if (!nextName?.trim() || nextName.trim() === item.name) {
+		this.startInlineRename(side, item);
+	}
+
+	private startInlineRename(side: 'left' | 'right', item: TurboFileFileItem): void {
+		if (!item.path || item.parent) {
+			return;
+		}
+		this.inlineRename = {
+			side,
+			path: item.path,
+			originalName: item.name,
+			directory: !!item.directory
+		};
+		this.ensureItemInSelection(side, item);
+		this.statusMessage = `正在重命名：${item.name}`;
+		this.render();
+	}
+
+	private isInlineRenameTarget(side: 'left' | 'right', item: TurboFileFileItem): boolean {
+		return !!item.path && this.inlineRename?.side === side && this.inlineRename.path === item.path;
+	}
+
+	private validateRenameName(side: 'left' | 'right', item: TurboFileFileItem, value: string): string | undefined {
+		const device = this.getPaneDevice(side);
+		const name = value.trim();
+		if (!name) {
+			return '名称不能为空。';
+		}
+		if (name === '.' || name === '..') {
+			return '不能使用 . 或 .. 作为名称。';
+		}
+		if (name.includes('/') || name.includes('\\')) {
+			return '名称不能包含路径分隔符。';
+		}
+		if (device && this.isWindowsDevice(device) && /[<>:"|?*]/.test(name)) {
+			return 'Windows 名称不能包含 < > : " | ? *。';
+		}
+		const caseInsensitive = !device || this.isWindowsDevice(device);
+		const nameKey = caseInsensitive ? name.toLocaleLowerCase() : name;
+		const duplicate = this.paneStates[side].items.some(candidate => {
+			if (!candidate.path || candidate.parent || candidate.path === item.path) {
+				return false;
+			}
+			const candidateKey = caseInsensitive ? candidate.name.toLocaleLowerCase() : candidate.name;
+			return candidateKey === nameKey;
+		});
+		if (duplicate) {
+			return '已存在同名文件或目录。';
+		}
+		return undefined;
+	}
+
+	private async performRename(side: 'left' | 'right', item: TurboFileFileItem, nextName: string): Promise<void> {
+		const device = this.getPaneDevice(side);
+		if (!item.path || !device || item.parent || !nextName.trim() || nextName.trim() === item.name) {
 			return;
 		}
 
-		const targetPath = joinPanePath(this.paneStates[side].path, nextName.trim(), this.isWindowsDevice(device));
-		const task = this.beginTask('rename', `重命名 ${item.name}`, `${item.name} -> ${nextName.trim()}`);
+		const targetName = nextName.trim();
+		const targetPath = joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(device));
+		const task = this.beginTask('rename', `重命名 ${item.name}`, `${item.name} -> ${targetName}`);
 		try {
 			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, item.path), targetPath);
 			if (result.ok) {
 				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				this.finishTask(task, 'success', `已重命名：${item.name} -> ${nextName.trim()}`);
+				this.finishTask(task, 'success', `已重命名：${item.name} -> ${targetName}`);
 			} else {
 				this.finishTask(task, 'error', `重命名失败：${result.message}`, { error: result.message });
 			}

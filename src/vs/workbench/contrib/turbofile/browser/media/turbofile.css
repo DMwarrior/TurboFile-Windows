@@ -2214,6 +2214,14 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	color: var(--vscode-list-activeSelectionForeground);
 }
 
+.turbofile-file-row.is-renaming {
+	grid-template-columns: minmax(220px, 1fr);
+}
+
+.turbofile-file-row.is-renaming .turbofile-file-meta {
+	display: none;
+}
+
 .turbofile-file-name {
 	min-width: 0;
 	display: flex;
@@ -2225,6 +2233,29 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	transform-origin: left center;
 	transition: transform 80ms ease;
 	will-change: transform;
+}
+
+.turbofile-file-name.is-renaming {
+	overflow: visible;
+}
+
+.turbofile-inline-rename {
+	min-width: 80px;
+	flex: 1 1 auto;
+}
+
+.turbofile-inline-rename .monaco-inputbox {
+	width: 100%;
+	min-height: 24px;
+}
+
+.turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
+.turbofile-inline-rename .monaco-inputbox > input {
+	height: 22px;
+	padding: 1px 4px;
+	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
+	font-size: var(--turbofile-browser-font-size, 14px);
+	line-height: 20px;
 }
 
 .turbofile-file-row.is-clickable:active .turbofile-file-name {
