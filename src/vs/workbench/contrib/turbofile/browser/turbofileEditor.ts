@@ -740,6 +740,7 @@ export class TurboFileEditor extends EditorPane {
 		document.body.classList.remove('turbofile-main-editor-visible');
 		document.body.classList.remove('turbofile-transfer-tabs-visible');
 		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark');
+		document.body.style.removeProperty('--turbofile-editor-file-surface');
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
@@ -790,6 +791,7 @@ export class TurboFileEditor extends EditorPane {
 		if (this.dialogState) {
 			this.container.appendChild(this.renderDialogOverlay());
 		}
+		this.syncEditorTabBackground();
 		this.bindImageGridObserver();
 	}
 
@@ -1174,6 +1176,19 @@ export class TurboFileEditor extends EditorPane {
 		this.container.classList.toggle('is-turbofile-dark', effectiveMode === 'dark');
 		document.body.classList.toggle('turbofile-editor-theme-light', effectiveMode === 'light');
 		document.body.classList.toggle('turbofile-editor-theme-dark', effectiveMode === 'dark');
+		this.syncEditorTabBackground();
+	}
+
+	private syncEditorTabBackground(): void {
+		const fileList = this.container?.querySelector<HTMLElement>('.turbofile-file-list');
+		if (!fileList) {
+			return;
+		}
+
+		const background = getWindow(fileList).getComputedStyle(fileList).backgroundColor;
+		if (background) {
+			document.body.style.setProperty('--turbofile-editor-file-surface', background);
+		}
 	}
 
 	private getAppearanceMode(): 'light' | 'dark' | 'system' {
