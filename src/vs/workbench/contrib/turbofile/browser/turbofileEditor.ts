@@ -362,8 +362,7 @@ interface TurboFileIconPath {
 }
 const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
 	{ columns: 4, kind: 'large', label: '大图网格' },
-	{ columns: 8, kind: 'medium', label: '标准网格' },
-	{ columns: 12, kind: 'compact', label: '紧凑列表' }
+	{ columns: 8, kind: 'medium', label: '标准网格' }
 ];
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
