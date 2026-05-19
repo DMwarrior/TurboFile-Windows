@@ -522,7 +522,7 @@ const TURBOFILE_LIGHT_THEME_COLORS = {
 } as const;
 
 export class TurboFileEditor extends EditorPane {
-	static readonly ID = TurboFileEditorInput.EDITOR_ID;
+	static readonly ID: string = TurboFileEditorInput.EDITOR_ID;
 
 	private readonly renderDisposables = this._register(new DisposableStore());
 	private container: HTMLElement | undefined;
@@ -579,6 +579,7 @@ export class TurboFileEditor extends EditorPane {
 	private taskSequence = 1;
 	private readonly tasks: TurboFileTask[] = [];
 	private editorGroupContainer: HTMLElement | undefined;
+	private currentInput: TurboFileEditorInput | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -601,7 +602,7 @@ export class TurboFileEditor extends EditorPane {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService
 	) {
-		super(TurboFileEditor.ID, group, telemetryService, workbenchThemeService, storageService);
+		super((new.target as typeof TurboFileEditor).ID, group, telemetryService, workbenchThemeService, storageService);
 
 		const localWindowsDefaultPath = this.getLocalWindowsDefaultPath();
 		this.localWindowsDevice = {
@@ -704,8 +705,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	override async setInput(input: TurboFileEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.currentInput = input;
+		input.setCancelRunningTasksForClose(() => this.cancelRunningTasksForClose());
+		this.updateInputRunningTaskCount();
 		await super.setInput(input, options, context, token);
 		if (!token.isCancellationRequested) {
+			this.notifyActivePageChanged();
 			this.render();
 		}
 	}
@@ -1500,6 +1505,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private showAddDeviceForm(): void {
 		this.activePage = 'devices';
+		this.notifyActivePageChanged();
 		this.isDeviceFormVisible = true;
 		this.editingDeviceId = undefined;
 		this.deviceFormMessage = '';
@@ -1513,6 +1519,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.activePage = 'devices';
+		this.notifyActivePageChanged();
 		this.isDeviceFormVisible = true;
 		this.editingDeviceId = device.id;
 		this.deviceFormMessage = `正在编辑设备：${device.name}`;
@@ -1536,7 +1543,15 @@ export class TurboFileEditor extends EditorPane {
 		this.isTaskLogVisible = false;
 		this.isDeviceFormVisible = false;
 		this.editingDeviceId = undefined;
+		this.notifyActivePageChanged();
 		this.render();
+	}
+
+	private notifyActivePageChanged(): void {
+		if (!this.currentInput) {
+			return;
+		}
+		turboFileWorkbenchBridge.reportActivePage(this.currentInput.instanceId, this.activePage);
 	}
 
 
@@ -1593,6 +1608,9 @@ export class TurboFileEditor extends EditorPane {
 
 	private handleWorkbenchCommand(command: TurboFileWorkbenchCommand): void {
 		if (!this.deviceStore) {
+			return;
+		}
+		if (command.targetInstanceId && command.targetInstanceId !== this.currentInput?.instanceId) {
 			return;
 		}
 
@@ -2557,6 +2575,25 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private getRunningTaskCount(): number {
+		return this.tasks.filter(task => task.status === 'running').length;
+	}
+
+	private updateInputRunningTaskCount(): void {
+		this.currentInput?.setRunningTaskCount(this.getRunningTaskCount());
+	}
+
+	private async cancelRunningTasksForClose(): Promise<void> {
+		const runningTasks = this.tasks.filter(task => task.status === 'running');
+		await this.cancelRunningTransfers(runningTasks);
+		for (const task of runningTasks) {
+			if (task.status === 'running') {
+				this.finishTask(task, 'canceled', `已取消任务：${task.label}`);
+			}
+		}
+		this.updateInputRunningTaskCount();
+	}
+
 	private renderTaskLogOverlay(): HTMLElement {
 		const overlay = $('.turbofile-task-log-overlay');
 		const panel = $('.turbofile-task-log-panel');
@@ -2754,6 +2791,7 @@ export class TurboFileEditor extends EditorPane {
 			this.tasks.splice(16);
 		}
 		this.statusMessage = detail;
+		this.updateInputRunningTaskCount();
 		this.render();
 		return task;
 	}
@@ -2948,6 +2986,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 		this.statusMessage = detail;
+		this.updateInputRunningTaskCount();
 		this.render();
 	}
 
@@ -5763,6 +5802,7 @@ export class TurboFileEditor extends EditorPane {
 			viewportHeight: this.getImageGridDefaultViewportHeight()
 		};
 		this.activePage = 'images';
+		this.notifyActivePageChanged();
 		this.statusMessage = `已展开 ${this.getSideLabel(side)} 图片：${images.length} 张。`;
 		this.render();
 		if (previewVisible && this.imageGridState) {
@@ -5784,6 +5824,7 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridRenderedRange = undefined;
 		this.imageGridState = undefined;
 		this.activePage = 'transfer';
+		this.notifyActivePageChanged();
 		this.render();
 	}
 

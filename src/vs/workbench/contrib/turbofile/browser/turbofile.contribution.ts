@@ -25,7 +25,7 @@ import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { WorkbenchPhase, registerWorkbenchContribution2, IWorkbenchContribution } from '../../../common/contributions.js';
-import { EditorExtensions } from '../../../common/editor.js';
+import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewsRegistry, ViewContainer, ViewContainerLocation, IViewDescriptorService } from '../../../common/views.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -97,8 +97,44 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 const TURBOFILE_NAV_COLLAPSED_WIDTH = 48;
 const TURBOFILE_NAV_EXPANDED_WIDTH = 152;
 
+let turboFileTransferPageSequence = 1;
 let turboFileActivePage: TurboFileWorkbenchPage = 'transfer';
 let turboFileNavigationExpanded = false;
+
+function createTurboFileTransferEditorInput(instantiationService: IInstantiationService): TurboFileEditorInput {
+	const ordinal = turboFileTransferPageSequence++;
+	const instanceId = `transfer-${ordinal}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const editorPaneId = `${TurboFileEditorInput.EDITOR_ID}.${instanceId}`;
+
+	class TurboFileTransferEditorInput extends TurboFileEditorInput { }
+	class TurboFileTransferEditor extends TurboFileEditor {
+		static override readonly ID = editorPaneId;
+	}
+
+	Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+		EditorPaneDescriptor.create(
+			TurboFileTransferEditor,
+			TurboFileTransferEditor.ID,
+			localize('turbofile.editor.transfer', '传输')
+		),
+		[
+			new SyncDescriptor(TurboFileTransferEditorInput)
+		]
+	);
+
+	return instantiationService.createInstance(TurboFileTransferEditorInput, instanceId, ordinal, editorPaneId);
+}
+
+function getActiveTurboFileEditorInput(editorService: IEditorService): TurboFileEditorInput | undefined {
+	const activeEditor = editorService.activeEditor;
+	return activeEditor instanceof TurboFileEditorInput ? activeEditor : undefined;
+}
+
+function getMostRecentTurboFileEditorInput(editorService: IEditorService): TurboFileEditorInput | undefined {
+	return editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE)
+		.map(identifier => identifier.editor)
+		.find((editor): editor is TurboFileEditorInput => editor instanceof TurboFileEditorInput);
+}
 
 function renderTurboFileAppearanceNavIcon(): SVGElement {
 	const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -153,20 +189,19 @@ class TurboFileRouteView extends ViewPane {
 class TurboFileStartupContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.turbofile.startup';
 	private isOpeningTurboFilePage = false;
+	private readonly activePagesByInstanceId = new Map<string, TurboFileWorkbenchPage>();
 
 	constructor(
 		@IEditorService private readonly editorService: IEditorService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
-		@IViewsService private readonly viewsService: IViewsService
+		@IViewsService private readonly viewsService: IViewsService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService
 	) {
 		super();
 		document.body.classList.add('turbofile-shell');
 		this.configureShell();
 		this.renderNavigation();
 		void this.openTurboFilePage('transfer', true);
-		setTimeout(() => {
-			void this.openTurboFilePage('transfer', true);
-		}, 250);
 
 		this._register(viewsService.onDidChangeViewContainerVisibility(event => {
 			if (!event.visible) {
@@ -179,11 +214,18 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 				}
 			}
 		}));
-		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => {
-			if (command.type === 'showPage') {
-				turboFileActivePage = command.page;
+		this._register(turboFileWorkbenchBridge.onDidChangeActivePage(event => {
+			this.activePagesByInstanceId.set(event.instanceId, event.page);
+			const activeInput = this.getActiveTurboFileEditorInput();
+			if (activeInput?.instanceId === event.instanceId) {
+				turboFileActivePage = event.page;
 				this.renderNavigation();
 			}
+		}));
+		this._register(this.editorService.onDidActiveEditorChange(() => {
+			const activeInput = this.getActiveTurboFileEditorInput();
+			turboFileActivePage = activeInput ? this.activePagesByInstanceId.get(activeInput.instanceId) ?? 'transfer' : 'transfer';
+			this.renderNavigation();
 		}));
 	}
 
@@ -203,10 +245,11 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	private async openTurboFilePage(page: TurboFileWorkbenchPage, _hideSideBar: boolean): Promise<void> {
 		this.isOpeningTurboFilePage = true;
 		try {
-			await this.openOrRevealTurboFileEditor();
+			const input = await this.openOrRevealTurboFileEditor();
 			await this.viewsService.openViewContainer(TURBOFILE_ACTIVITY_ENTRIES[0].containerId, false);
 			turboFileActivePage = page;
-			turboFileWorkbenchBridge.run({ type: 'showPage', page });
+			this.activePagesByInstanceId.set(input.instanceId, page);
+			turboFileWorkbenchBridge.run({ type: 'showPage', page, targetInstanceId: input.instanceId });
 			if (this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
 				this.layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
 			}
@@ -221,10 +264,33 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		}
 	}
 
-	private async openOrRevealTurboFileEditor(): Promise<void> {
-		const existingTurboFileEditor = this.editorService.findEditors(TurboFileEditorInput.RESOURCE)
-			.find(identifier => identifier.editor instanceof TurboFileEditorInput);
-		await this.editorService.openEditor(existingTurboFileEditor?.editor ?? new TurboFileEditorInput(), { pinned: true });
+	private async openOrRevealTurboFileEditor(): Promise<TurboFileEditorInput> {
+		const input = this.getActiveTurboFileEditorInput() ?? getMostRecentTurboFileEditorInput(this.editorService) ?? this.createTurboFileEditorInput();
+		await this.editorService.openEditor(input, { pinned: true });
+		return input;
+	}
+
+	private async openNewTransferPage(): Promise<TurboFileEditorInput> {
+		const input = this.createTurboFileEditorInput();
+		await this.editorService.openEditor(input, { pinned: true });
+		await this.viewsService.openViewContainer(TURBOFILE_ACTIVITY_ENTRIES[0].containerId, false);
+		turboFileActivePage = 'transfer';
+		this.activePagesByInstanceId.set(input.instanceId, 'transfer');
+		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer', targetInstanceId: input.instanceId });
+		this.resizeTurboFileSideBar();
+		this.layoutService.layout();
+		this.renderNavigation();
+		return input;
+	}
+
+	private createTurboFileEditorInput(): TurboFileEditorInput {
+		const input = createTurboFileTransferEditorInput(this.instantiationService);
+		this.activePagesByInstanceId.set(input.instanceId, 'transfer');
+		return input;
+	}
+
+	private getActiveTurboFileEditorInput(): TurboFileEditorInput | undefined {
+		return getActiveTurboFileEditorInput(this.editorService);
 	}
 
 	private resizeTurboFileSideBar(): void {
@@ -256,12 +322,16 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			nav.classList.add('is-nav-expanded');
 		}
 
+		const activeInput = this.getActiveTurboFileEditorInput();
+		const activePage = activeInput ? this.activePagesByInstanceId.get(activeInput.instanceId) ?? 'transfer' : turboFileActivePage;
+		turboFileActivePage = activePage;
+
 		const list = $('.turbofile-page-nav-list');
 		for (const entry of TURBOFILE_ACTIVITY_ENTRIES) {
 			const button = $('button.turbofile-page-nav-item') as HTMLButtonElement;
 			button.type = 'button';
 			button.title = `打开${entry.title.value}`;
-			if (turboFileActivePage === entry.page) {
+			if (activePage === entry.page) {
 				button.classList.add('is-active');
 				button.setAttribute('aria-current', 'page');
 			}
@@ -273,6 +343,9 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 				void this.openTurboFilePage(entry.page, false);
 			});
 			list.appendChild(button);
+			if (entry.page === 'transfer') {
+				list.appendChild(this.renderNewTransferButton());
+			}
 		}
 		nav.appendChild(list);
 
@@ -292,6 +365,20 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		nav.appendChild(toggle);
 
 		sideBar.appendChild(nav);
+	}
+
+	private renderNewTransferButton(): HTMLButtonElement {
+		const button = $('button.turbofile-page-nav-item.turbofile-page-nav-new-transfer') as HTMLButtonElement;
+		button.type = 'button';
+		button.title = '新建传输页';
+		button.appendChild(renderIcon(Codicon.add));
+		const label = $('span.turbofile-page-nav-label');
+		label.textContent = '新建传输';
+		button.appendChild(label);
+		button.addEventListener('click', () => {
+			void this.openNewTransferPage();
+		});
+		return button;
 	}
 }
 
@@ -313,10 +400,35 @@ class OpenTurboFileAction extends Action2 {
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const editorService = accessor.get(IEditorService);
-		const existingTurboFileEditor = editorService.findEditors(TurboFileEditorInput.RESOURCE)
-			.find(identifier => identifier.editor instanceof TurboFileEditorInput);
-		await editorService.openEditor(existingTurboFileEditor?.editor ?? new TurboFileEditorInput(), { pinned: true });
-		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer' });
+		const instantiationService = accessor.get(IInstantiationService);
+		const input = getActiveTurboFileEditorInput(editorService) ?? getMostRecentTurboFileEditorInput(editorService) ?? createTurboFileTransferEditorInput(instantiationService);
+		await editorService.openEditor(input, { pinned: true });
+		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer', targetInstanceId: input.instanceId });
+	}
+}
+
+class NewTurboFileTransferPageAction extends Action2 {
+	constructor() {
+		super({
+			id: 'turbofile.newTransferPage',
+			title: localize2('newTurboFileTransferPage', '新建传输页'),
+			category: localize2('turboFileCategory', '极速传'),
+			f1: true,
+			icon: Codicon.add,
+			menu: {
+				id: MenuId.MenubarHomeMenu,
+				group: '1_turbofile',
+				order: 2
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const instantiationService = accessor.get(IInstantiationService);
+		const input = createTurboFileTransferEditorInput(instantiationService);
+		await editorService.openEditor(input, { pinned: true });
+		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer', targetInstanceId: input.instanceId });
 	}
 }
 
@@ -360,4 +472,5 @@ for (const entry of TURBOFILE_ACTIVITY_ENTRIES) {
 }
 
 registerAction2(OpenTurboFileAction);
+registerAction2(NewTurboFileTransferPageAction);
 registerWorkbenchContribution2(TurboFileStartupContribution.ID, TurboFileStartupContribution, WorkbenchPhase.AfterRestored);

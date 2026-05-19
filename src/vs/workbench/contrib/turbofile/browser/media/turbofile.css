@@ -130,21 +130,6 @@ body.turbofile-shell .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
-body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
-	display: none !important;
-	height: 0 !important;
-	min-height: 0 !important;
-	border: 0 !important;
-}
-
-body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .editor-container {
-	height: 100% !important;
-}
-
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:has(.tab-label[aria-label*="极速传"]) {
-	display: none !important;
-}
-
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar > .titlebar-container,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar .titlebar-left,
