@@ -85,7 +85,6 @@ const TURBOFILE_BROWSER_FONT_FAMILIES = TURBOFILE_UI_FONT_FAMILIES;
 const IMAGE_GRID_VIEW_OPTIONS = [
     { columns: 4, kind: 'large', label: '大图网格' },
     { columns: 8, kind: 'medium', label: '标准网格' },
-    { columns: 12, kind: 'compact', label: '紧凑列表' }
 ];
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
