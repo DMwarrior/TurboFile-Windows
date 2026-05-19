@@ -3062,7 +3062,13 @@ export class TurboFileEditor extends EditorPane {
 			return detail.includes('parallel') ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
 		if (event.phase === 'relay-download' || event.phase === 'relay-upload') {
+			if (detail.includes('rsync relay')) {
+				return 'rsync-relay';
+			}
 			return 'sftp-relay';
+		}
+		if (detail.includes('rsync relay')) {
+			return 'rsync-relay';
 		}
 		if (detail.includes('direct sftp')) {
 			return 'sftp-direct';
@@ -3098,6 +3104,8 @@ export class TurboFileEditor extends EditorPane {
 			case 'sftp-upload':
 			case 'sftp-download':
 				return '直连 sftp';
+			case 'rsync-relay':
+				return '中转 rsync';
 			case 'sftp-relay':
 				return '中转 sftp';
 			case 'remote-copy':

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
@@ -29,10 +30,12 @@ const SFTP_TRANSFER_CHUNK_SIZE = 128 * 1024;
 const SFTP_LARGE_FILE_THRESHOLD = 512 * 1024 * 1024;
 const SFTP_LARGE_TRANSFER_CONCURRENCY = 96;
 const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 512 * 1024;
-const SFTP_STREAM_RELAY_HIGH_WATER_MARK = 4 * 1024 * 1024;
+const SFTP_RELAY_CHUNK_SIZE = 512 * 1024;
+const SFTP_RELAY_CONCURRENCY = 64;
 const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 8;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
 const RSYNC_DIRECTORY_PARALLEL_WORKERS = 4;
+const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 
 class TurboFileTransferCanceledError extends Error {
@@ -46,11 +49,21 @@ interface ISSHClient {
 	on(event: 'ready', listener: () => void): ISSHClient;
 	on(event: 'error', listener: (err: Error) => void): ISSHClient;
 	on(event: 'close', listener: () => void): ISSHClient;
+	on(event: 'tcp connection', listener: (details: ISSHForwardedTcpDetails, accept: () => NodeJS.ReadWriteStream, reject: () => void) => void): ISSHClient;
 	connect(config: ConnectConfig): void;
 	sftp(callback: (err: Error | undefined, sftp: ISFTPWrapper) => void): void;
 	exec(command: string, callback: (err: Error | undefined, stream: ISSHExecStream) => void): void;
 	shell(window: ISSHShellWindow, callback: (err: Error | undefined, stream: ISSHShellStream) => void): void;
+	forwardIn(bindAddr: string, bindPort: number, callback: (err: Error | undefined, port: number) => void): void;
+	unforwardIn(bindAddr: string, bindPort: number, callback: (err: Error | undefined) => void): void;
 	end(): void;
+}
+
+interface ISSHForwardedTcpDetails {
+	readonly destIP: string;
+	readonly destPort: number;
+	readonly srcIP: string;
+	readonly srcPort: number;
 }
 
 interface ISSHExecStream {
@@ -90,13 +103,12 @@ interface ISFTPWrapper {
 	fastGet(remotePath: string, localPath: string, callback: (err: Error | undefined) => void): void;
 	fastPut(localPath: string, remotePath: string, options: ISFTPTransferOptions, callback: (err: Error | undefined) => void): void;
 	fastPut(localPath: string, remotePath: string, callback: (err: Error | undefined) => void): void;
-	createReadStream(path: string, options?: { highWaterMark?: number }): ISFTPReadableStream;
-	createWriteStream(path: string, options?: { highWaterMark?: number }): ISFTPWritableStream;
+	open(path: string, flags: string, callback: (err: Error | undefined, handle: Buffer) => void): void;
+	read(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (err: Error | undefined, bytesRead: number, buffer: Buffer, position: number) => void): void;
+	write(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (err: Error | undefined) => void): void;
+	close(handle: Buffer, callback: (err: Error | undefined) => void): void;
 	end(): void;
 }
-
-type ISFTPReadableStream = NodeJS.ReadableStream & { destroy(error?: Error): void };
-type ISFTPWritableStream = NodeJS.WritableStream & { destroy(error?: Error): void };
 
 interface ISFTPTransferOptions {
 	readonly step?: (totalTransferred: number, chunk: number, total: number) => void;
@@ -401,10 +413,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 
+			const tunneledRsyncResult = await this.tryTunneledRsyncRelayTransfer(request, startedAt);
+			this.throwIfTransferCanceled(request.progressId);
+			if (tunneledRsyncResult?.ok) {
+				this.fireTransferProgress(request, tunneledRsyncResult.bytes, tunneledRsyncResult.bytes, 'complete', 'Rsync relay completed.', true);
+				this.clearRemoteDirectoryListingCache(request.target);
+				return tunneledRsyncResult;
+			}
+
 			const streamRelayResult = await this.tryStreamRelayTransfer(request, startedAt);
 			this.throwIfTransferCanceled(request.progressId);
 			if (streamRelayResult?.ok) {
-				this.fireTransferProgress(request, streamRelayResult.bytes * 2, streamRelayResult.bytes * 2, 'complete', 'SFTP stream relay completed.', true);
+				this.fireTransferProgress(request, streamRelayResult.bytes * 2, streamRelayResult.bytes * 2, 'complete', 'SFTP parallel relay completed.', true);
 				this.clearRemoteDirectoryListingCache(request.target);
 				return streamRelayResult;
 			}
@@ -1105,6 +1125,147 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async tryTunneledRsyncRelayTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
+			return undefined;
+		}
+		if (request.source.supportsRsync !== true || request.target.supportsRsync !== true || request.strategyHint === 'direct') {
+			return undefined;
+		}
+		if (!request.target.connection.password || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+
+		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
+		if (!sourceConfigResult.ok) {
+			return undefined;
+		}
+
+		const client = await this.connect(sourceConfigResult.config);
+		const forwardedSockets = new Set<Socket>();
+		let forwardedPort: number | undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
+			for (const socket of forwardedSockets) {
+				socket.destroy();
+			}
+			client.end();
+		});
+		const onForwardedConnection = (_details: ISSHForwardedTcpDetails, accept: () => NodeJS.ReadWriteStream, reject: () => void): void => {
+			if (this.isTransferCanceled(request.progressId)) {
+				reject();
+				return;
+			}
+			const channel = accept() as NodeJS.ReadWriteStream & { destroy(error?: Error): void };
+			const socket = connectTcp(request.target.connection!.port || 22, request.target.connection!.host);
+			forwardedSockets.add(socket);
+			socket.on('close', () => forwardedSockets.delete(socket));
+			socket.on('error', () => channel.destroy());
+			channel.on('error', () => socket.destroy());
+			channel.on('close', () => socket.destroy());
+			socket.pipe(channel);
+			channel.pipe(socket);
+		};
+		client.on('tcp connection', onForwardedConnection);
+
+		try {
+			this.throwIfTransferCanceled(request.progressId);
+			const canUseLocalRsync = await this.canUseLocalRsync(client);
+			if (!canUseLocalRsync) {
+				return undefined;
+			}
+
+			forwardedPort = await this.forwardIn(client, RSYNC_RELAY_BIND_HOST, 0);
+			const target = request.target.connection;
+			const targetUserHost = `${target.username}@${RSYNC_RELAY_BIND_HOST}`;
+			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true);
+			const sshpassPrefix = buildSshpassPrefix(target.password);
+			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			const sourceIsDirectory = sourceType === 'directory';
+			let bytes = Math.max(0, request.expectedBytes ?? 0);
+			if (!sourceIsDirectory || bytes === 0) {
+				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => bytes);
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing rsync relay transfer.', true);
+			const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
+			const mkdirCommand = `${sshpassPrefix}${buildCompatibleSshCommand(forwardedPort, true)} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(remoteTargetPath)}`)}`;
+			const canUseTargetRsync = await this.canUseTargetRsyncThroughRelay(client, targetUserHost, forwardedPort, sshpassPrefix);
+			if (!canUseTargetRsync) {
+				return undefined;
+			}
+			await this.execRemote(client, mkdirCommand);
+
+			const rsyncOptions = [
+				'-a',
+				'--inplace',
+				'--whole-file',
+				'--no-compress',
+				'--numeric-ids',
+				'--timeout=600',
+				'-s',
+				'--no-perms',
+				'--no-owner',
+				'--no-group',
+				'--omit-dir-times',
+				'--info=progress2'
+			].join(' ');
+			const rsyncSourcePath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path;
+			const rsyncTargetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
+			const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
+			let lastRsyncBytes = 0;
+			let rsyncProgressBuffer = '';
+			const handleRsyncOutput = (chunk: string): void => {
+				rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+				const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
+				if (transferredBytes === undefined || transferredBytes < lastRsyncBytes) {
+					return;
+				}
+				lastRsyncBytes = transferredBytes;
+				const totalBytes = bytes > 0 ? bytes : transferredBytes;
+				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'relay-upload', 'Rsync relay transfer in progress.');
+			};
+
+			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
+			this.throwIfTransferCanceled(request.progressId);
+			if (bytes === 0 && lastRsyncBytes > 0) {
+				bytes = lastRsyncBytes;
+			}
+			return this.createTransferResult(true, 'rsync-relay', bytes, 'Rsync relay completed.', startedAt);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			return undefined;
+		} finally {
+			unregisterCancel();
+			if (forwardedPort !== undefined) {
+				await this.unforwardIn(client, RSYNC_RELAY_BIND_HOST, forwardedPort).catch(() => undefined);
+			}
+			for (const socket of forwardedSockets) {
+				socket.destroy();
+			}
+			client.end();
+		}
+	}
+
+	private async canUseLocalRsync(client: ISSHClient): Promise<boolean> {
+		try {
+			await this.execRemote(client, 'command -v rsync >/dev/null 2>&1 && command -v sshpass >/dev/null 2>&1');
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async canUseTargetRsyncThroughRelay(client: ISSHClient, targetUserHost: string, forwardedPort: number, sshpassPrefix: string): Promise<boolean> {
+		try {
+			await this.execRemote(client, `${sshpassPrefix}${buildCompatibleSshCommand(forwardedPort, true)} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg('command -v rsync >/dev/null 2>&1')}`);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	private async tryStreamRelayTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
 			return undefined;
@@ -1135,35 +1296,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const sourceStat = await this.remoteStat(sourceSftp, request.source.path);
 			const bytes = sourceStat.size;
 			const totalBytes = bytes * 2;
-			this.fireTransferProgress(request, 0, totalBytes, 'prepare', 'Preparing SFTP stream relay.', true);
+			this.fireTransferProgress(request, 0, totalBytes, 'prepare', 'Preparing SFTP parallel relay.', true);
 			await this.ensureRemoteDirectory(targetSftp, getRemoteParentPath(request.target.path));
-
-			const readStream = sourceSftp.createReadStream(request.source.path, { highWaterMark: SFTP_STREAM_RELAY_HIGH_WATER_MARK });
-			const writeStream = targetSftp.createWriteStream(request.target.path, { highWaterMark: SFTP_STREAM_RELAY_HIGH_WATER_MARK });
 			const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
-				const error = new TurboFileTransferCanceledError();
-				readStream.destroy?.(error);
-				writeStream.destroy?.(error);
+				sourceSftp?.end();
+				targetSftp?.end();
+				sourceClient?.end();
+				targetClient?.end();
 			});
 			let streamedBytes = 0;
-			readStream.on('data', chunk => {
-				try {
-					this.throwIfTransferCanceled(request.progressId);
-				} catch (error) {
-					readStream.destroy?.(error instanceof Error ? error : new TurboFileTransferCanceledError());
-					writeStream.destroy?.(error instanceof Error ? error : new TurboFileTransferCanceledError());
-					return;
-				}
-				streamedBytes += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.byteLength;
-				this.fireTransferProgress(request, Math.min(streamedBytes * 2, totalBytes), totalBytes, 'relay-upload', 'Streaming between SFTP endpoints.');
-			});
 			try {
-				await pipeline(readStream, writeStream);
+				await this.relayRemoteFileInParallel(sourceSftp, targetSftp, request.source.path, request.target.path, bytes, delta => {
+					streamedBytes += delta;
+					this.fireTransferProgress(request, Math.min(streamedBytes * 2, totalBytes), totalBytes, 'relay-upload', 'Parallel SFTP relay in progress.');
+				}, request.progressId);
 			} finally {
 				unregisterCancel();
 			}
 			this.throwIfTransferCanceled(request.progressId);
-			return this.createTransferResult(true, 'sftp-relay', bytes, 'SFTP stream relay completed.', startedAt);
+			return this.createTransferResult(true, 'sftp-relay', bytes, 'SFTP parallel relay completed.', startedAt);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw error;
@@ -1418,6 +1569,113 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				resolve(sftp);
 			});
 		});
+	}
+
+	private forwardIn(client: ISSHClient, bindAddr: string, bindPort: number): Promise<number> {
+		return new Promise((resolve, reject) => {
+			client.forwardIn(bindAddr, bindPort, (error, port) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(port);
+			});
+		});
+	}
+
+	private unforwardIn(client: ISSHClient, bindAddr: string, bindPort: number): Promise<void> {
+		return new Promise((resolve, reject) => {
+			client.unforwardIn(bindAddr, bindPort, error => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve();
+			});
+		});
+	}
+
+	private openRemoteFile(sftp: ISFTPWrapper, remotePath: string, flags: string): Promise<Buffer> {
+		return new Promise((resolve, reject) => {
+			sftp.open(remotePath, flags, (error, handle) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(handle);
+			});
+		});
+	}
+
+	private readRemoteFileChunk(sftp: ISFTPWrapper, handle: Buffer, buffer: Buffer, length: number, position: number): Promise<number> {
+		return new Promise((resolve, reject) => {
+			sftp.read(handle, buffer, 0, length, position, (error, bytesRead) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(bytesRead);
+			});
+		});
+	}
+
+	private writeRemoteFileChunk(sftp: ISFTPWrapper, handle: Buffer, buffer: Buffer, length: number, position: number): Promise<void> {
+		return new Promise((resolve, reject) => {
+			sftp.write(handle, buffer, 0, length, position, error => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve();
+			});
+		});
+	}
+
+	private closeRemoteFile(sftp: ISFTPWrapper, handle: Buffer): Promise<void> {
+		return new Promise(resolve => {
+			sftp.close(handle, () => resolve());
+		});
+	}
+
+	private async relayRemoteFileInParallel(
+		sourceSftp: ISFTPWrapper,
+		targetSftp: ISFTPWrapper,
+		sourcePath: string,
+		targetPath: string,
+		bytes: number,
+		onDelta?: (delta: number) => void,
+		progressId?: string
+	): Promise<void> {
+		if (bytes <= 0) {
+			const targetHandle = await this.openRemoteFile(targetSftp, targetPath, 'w');
+			await this.closeRemoteFile(targetSftp, targetHandle);
+			return;
+		}
+
+		const sourceHandle = await this.openRemoteFile(sourceSftp, sourcePath, 'r');
+		let targetHandle: Buffer | undefined;
+		try {
+			targetHandle = await this.openRemoteFile(targetSftp, targetPath, 'w');
+			const chunks = Math.ceil(bytes / SFTP_RELAY_CHUNK_SIZE);
+			await mapLimit(Array.from({ length: chunks }, (_, index) => index), SFTP_RELAY_CONCURRENCY, async index => {
+				this.throwIfTransferCanceled(progressId);
+				const position = index * SFTP_RELAY_CHUNK_SIZE;
+				const length = Math.min(SFTP_RELAY_CHUNK_SIZE, bytes - position);
+				const buffer = Buffer.allocUnsafe(length);
+				const bytesRead = await this.readRemoteFileChunk(sourceSftp, sourceHandle, buffer, length, position);
+				this.throwIfTransferCanceled(progressId);
+				if (bytesRead <= 0) {
+					return;
+				}
+				await this.writeRemoteFileChunk(targetSftp, targetHandle!, buffer, bytesRead, position);
+				onDelta?.(bytesRead);
+			});
+		} finally {
+			if (targetHandle) {
+				await this.closeRemoteFile(targetSftp, targetHandle).catch(() => undefined);
+			}
+			await this.closeRemoteFile(sourceSftp, sourceHandle).catch(() => undefined);
+		}
 	}
 
 	private openShell(client: ISSHClient, cols: number, rows: number): Promise<ISSHShellStream> {
