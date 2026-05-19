@@ -3755,8 +3755,10 @@ export class TurboFileEditor extends EditorPane {
 		const canvasRect = render.canvas.getBoundingClientRect();
 		const stageRect = stage.getBoundingClientRect();
 		const scale = Math.max(IMAGE_PREVIEW_ZOOM_MIN, this.imageGridState?.previewZoom ?? 1);
-		const imageX = (event.clientX - canvasRect.left - (this.imageGridState?.previewPanX ?? 0)) / scale;
-		const imageY = (event.clientY - canvasRect.top - (this.imageGridState?.previewPanY ?? 0)) / scale;
+		const drawX = Math.trunc(this.imageGridState?.previewPanX ?? 0);
+		const drawY = Math.trunc(this.imageGridState?.previewPanY ?? 0);
+		const imageX = (event.clientX - canvasRect.left - drawX) / scale;
+		const imageY = (event.clientY - canvasRect.top - drawY) / scale;
 		const x = Math.max(0, Math.min(Math.max(0, analysis.width - 1), Math.floor(imageX)));
 		const y = Math.max(0, Math.min(Math.max(0, analysis.height - 1), Math.floor(imageY)));
 		tooltip.style.left = `${event.clientX - stageRect.left + 12}px`;
@@ -3852,9 +3854,7 @@ export class TurboFileEditor extends EditorPane {
 		const red = new Uint32Array(256);
 		const green = new Uint32Array(256);
 		const blue = new Uint32Array(256);
-		const sampleStep = Math.max(1, Math.floor((analysis.width * analysis.height) / 260000));
-		for (let pixelIndex = 0; pixelIndex < analysis.width * analysis.height; pixelIndex += sampleStep) {
-			const offset = pixelIndex * 4;
+		for (let offset = 0; offset < data.length; offset += 4) {
 			red[data[offset]]++;
 			green[data[offset + 1]]++;
 			blue[data[offset + 2]]++;
