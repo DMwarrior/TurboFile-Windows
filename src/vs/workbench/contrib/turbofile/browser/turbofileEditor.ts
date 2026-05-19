@@ -122,6 +122,13 @@ interface TurboFileImageGridImage {
 }
 
 type TurboFileImageGridColumns = 4 | 6 | 8 | 10 | 12;
+type TurboFileImageGridViewKind = 'large' | 'medium' | 'compact';
+
+interface TurboFileImageGridViewOption {
+	readonly columns: TurboFileImageGridColumns;
+	readonly kind: TurboFileImageGridViewKind;
+	readonly label: string;
+}
 
 interface TurboFileImageGridState {
 	readonly side: 'left' | 'right';
@@ -353,7 +360,11 @@ interface TurboFileIconPath {
 	readonly d: string;
 	readonly fillRule?: 'evenodd';
 }
-const IMAGE_GRID_COLUMN_OPTIONS: TurboFileImageGridColumns[] = [4, 6, 8, 10, 12];
+const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
+	{ columns: 4, kind: 'large', label: '大图网格' },
+	{ columns: 8, kind: 'medium', label: '标准网格' },
+	{ columns: 12, kind: 'compact', label: '紧凑列表' }
+];
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 16;
@@ -3166,7 +3177,7 @@ export class TurboFileEditor extends EditorPane {
 		const label = $('span.turbofile-image-page-columns-label');
 		label.textContent = '列数';
 		columns.appendChild(label);
-		for (const option of IMAGE_GRID_COLUMN_OPTIONS) {
+		for (const option of [] as TurboFileImageGridColumns[]) {
 			const button = $('button.turbofile-image-page-columns-button') as HTMLButtonElement;
 			button.type = 'button';
 			button.textContent = String(option);
@@ -3180,6 +3191,16 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(headerLeft);
 
 		const actions = $('.turbofile-image-page-actions');
+		for (const option of IMAGE_GRID_VIEW_OPTIONS) {
+			actions.appendChild(this.renderImageGridViewButton(state, option));
+		}
+		const closeIcon = $('button.turbofile-image-page-action.is-close') as HTMLButtonElement;
+		closeIcon.type = 'button';
+		closeIcon.title = '关闭';
+		closeIcon.setAttribute('aria-label', '关闭图片网格');
+		closeIcon.appendChild(renderIcon(Codicon.close));
+		closeIcon.addEventListener('click', () => this.closeImageGridPage());
+		actions.appendChild(closeIcon);
 		const close = this.createButton('关闭', 'turbofile-secondary-button');
 		close.element.addEventListener('click', () => this.closeImageGridPage());
 		actions.appendChild(close.element);
@@ -3203,6 +3224,30 @@ export class TurboFileEditor extends EditorPane {
 			});
 		}
 		return page;
+	}
+
+	private renderImageGridViewButton(state: TurboFileImageGridState, option: TurboFileImageGridViewOption): HTMLButtonElement {
+		const button = $('button.turbofile-image-page-action') as HTMLButtonElement;
+		button.type = 'button';
+		button.title = option.label;
+		button.setAttribute('aria-label', option.label);
+		button.setAttribute('aria-pressed', String(state.columns === option.columns));
+		if (state.columns === option.columns) {
+			button.classList.add('is-active');
+		}
+		button.appendChild(this.renderImageGridViewIcon(option.kind));
+		button.addEventListener('click', () => this.setImageGridColumns(option.columns));
+		return button;
+	}
+
+	private renderImageGridViewIcon(kind: TurboFileImageGridViewKind): HTMLElement {
+		const icon = $('span.turbofile-image-page-view-icon') as HTMLElement;
+		icon.classList.add(`is-${kind}`);
+		const cellCount = kind === 'large' ? 4 : kind === 'medium' ? 9 : 3;
+		for (let index = 0; index < cellCount; index++) {
+			icon.appendChild($('span'));
+		}
+		return icon;
 	}
 
 	private renderImageGridSlice(grid: HTMLElement, state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
