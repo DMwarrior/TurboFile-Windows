@@ -130,6 +130,15 @@ body.turbofile-shell .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-and-actions-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions {
+	background-color: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background))) !important;
+}
+
 body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
 	display: none !important;
 	height: 0 !important;
@@ -1556,7 +1565,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-height: 0;
 	min-width: 0;
 	display: grid;
-	grid-template-rows: auto auto minmax(0, 1fr);
+	grid-template-rows: auto minmax(0, 1fr);
 	border: 1px solid var(--turbofile-pane-border);
 	border-radius: 4px 4px 0 0;
 	overflow: hidden;

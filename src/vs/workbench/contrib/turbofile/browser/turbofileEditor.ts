@@ -1703,18 +1703,7 @@ export class TurboFileEditor extends EditorPane {
 		const device = this.getPaneDevice(side);
 		const pane = $('.turbofile-pane');
 		pane.dataset.turbofileSide = side;
-		const title = side === 'left' ? '左侧服务器' : '右侧服务器';
 		const browserTitle = side === 'left' ? '左侧文件浏览' : '右侧文件浏览';
-
-		const header = $('.turbofile-pane-header');
-		const titleRow = $('.turbofile-pane-title');
-		titleRow.appendChild(renderTurboFileIcon(side === 'left' ? 'hdd-network-fill' : 'cloud-upload-fill', side === 'left' ? 'primary' : 'success'));
-		titleRow.append(title);
-
-		const deviceSelect = this.renderDeviceSelect(side, device);
-
-		header.appendChild(titleRow);
-		header.appendChild(deviceSelect);
 
 		const browserHeader = $('.turbofile-browser-header');
 		const toolbar = $('.turbofile-browser-toolbar');
@@ -1824,103 +1813,9 @@ export class TurboFileEditor extends EditorPane {
 
 		this.renderFileList(side, list);
 
-		pane.appendChild(header);
 		pane.appendChild(browserHeader);
 		pane.appendChild(list);
 		return pane;
-	}
-
-	private renderDeviceSelect(side: 'left' | 'right', currentDevice: TurboFileDevice | undefined): HTMLElement {
-		const select = $('.turbofile-device-select');
-		const button = $('button.turbofile-device-select-button') as HTMLButtonElement;
-		const menu = $('.turbofile-device-select-menu');
-		const devices = this.getAllDevices();
-		button.type = 'button';
-		button.title = '选择设备';
-		button.setAttribute('aria-haspopup', 'listbox');
-		button.setAttribute('aria-expanded', 'false');
-		button.setAttribute('aria-label', `${this.getSideLabel(side)}设备选择`);
-		button.appendChild($('span.turbofile-device-select-icon', undefined, currentDevice ? this.getDeviceOptionIcon(currentDevice) : '🖥️'));
-		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows (localhost)'));
-		button.appendChild(renderIcon(Codicon.chevronDown));
-
-		menu.setAttribute('role', 'listbox');
-		menu.setAttribute('aria-label', `${this.getSideLabel(side)}设备列表`);
-		for (const device of devices) {
-			const option = $('button.turbofile-device-select-option') as HTMLButtonElement;
-			option.type = 'button';
-			option.setAttribute('role', 'option');
-			option.setAttribute('aria-selected', device.id === currentDevice?.id ? 'true' : 'false');
-			option.dataset.deviceId = device.id;
-			if (device.id === currentDevice?.id) {
-				option.classList.add('is-selected');
-			}
-			option.appendChild($('span.turbofile-device-select-icon', undefined, this.getDeviceOptionIcon(device)));
-			option.appendChild($('span.turbofile-device-select-label', undefined, this.getDeviceDisplayLabel(device)));
-			option.addEventListener('pointerenter', () => this.prefetchPaneDeviceDefaultDirectory(side, device));
-			option.addEventListener('focus', () => this.prefetchPaneDeviceDefaultDirectory(side, device));
-			option.addEventListener('click', event => {
-				event.preventDefault();
-				event.stopPropagation();
-				this.setPaneDevice(side, device);
-			});
-			menu.appendChild(option);
-		}
-
-		const closeMenu = () => {
-			select.classList.remove('is-open');
-			button.setAttribute('aria-expanded', 'false');
-		};
-		const toggleMenu = (event: MouseEvent | KeyboardEvent) => {
-			event.preventDefault();
-			event.stopPropagation();
-			const nextOpen = !select.classList.contains('is-open');
-			for (const opened of Array.from(this.container?.querySelectorAll('.turbofile-device-select.is-open') ?? [])) {
-				opened.classList.remove('is-open');
-				opened.querySelector('.turbofile-device-select-button')?.setAttribute('aria-expanded', 'false');
-			}
-			select.classList.toggle('is-open', nextOpen);
-			button.setAttribute('aria-expanded', String(nextOpen));
-			if (nextOpen) {
-				const selected = menu.querySelector<HTMLElement>('.turbofile-device-select-option.is-selected') ?? menu.querySelector<HTMLElement>('.turbofile-device-select-option');
-				selected?.focus();
-			}
-		};
-
-		button.addEventListener('click', toggleMenu);
-		button.addEventListener('keydown', event => {
-			if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
-				toggleMenu(event);
-			}
-		});
-		select.addEventListener('keydown', event => {
-			if (event.key === 'Escape') {
-				event.preventDefault();
-				closeMenu();
-				button.focus();
-			}
-		});
-		const window = getWindow(select);
-		const handleWindowClick = (event: MouseEvent) => {
-			if (!select.contains(event.target as Node | null)) {
-				closeMenu();
-			}
-		};
-		const handleWindowKeydown = (event: KeyboardEvent) => {
-			if (event.key === 'Escape' && select.classList.contains('is-open')) {
-				event.preventDefault();
-				closeMenu();
-				button.focus();
-			}
-		};
-		window.addEventListener('click', handleWindowClick);
-		window.addEventListener('keydown', handleWindowKeydown);
-		this.renderDisposables.add({ dispose: () => window.removeEventListener('click', handleWindowClick) });
-		this.renderDisposables.add({ dispose: () => window.removeEventListener('keydown', handleWindowKeydown) });
-
-		select.appendChild(button);
-		select.appendChild(menu);
-		return select;
 	}
 
 	private renderPanePathbar(side: 'left' | 'right', device: TurboFileDevice | undefined, state: TurboFilePaneState, toolbarAccent: TurboFileIconColor): HTMLElement {
@@ -7739,10 +7634,6 @@ export class TurboFileEditor extends EditorPane {
 		return `${device.name} (${host})`;
 	}
 
-	private getDeviceOptionIcon(_device: TurboFileDevice): string {
-		return '🖥️';
-	}
-
 	private formatPanePathForDisplay(path: string, windowsPath: boolean): string {
 		if (!windowsPath) {
 			return path || '/';
@@ -7802,54 +7693,6 @@ export class TurboFileEditor extends EditorPane {
 			scrollTop: state.scrollTop,
 			expiresAt: Date.now() + PANE_DEVICE_SNAPSHOT_TTL_MS
 		});
-	}
-
-	private getPaneDeviceSnapshot(side: 'left' | 'right', device: TurboFileDevice): TurboFilePaneDeviceSnapshot | undefined {
-		const key = this.getPaneDeviceMemoryKey(side, device);
-		const snapshot = this.paneDeviceSnapshots.get(key);
-		if (!snapshot) {
-			return undefined;
-		}
-		if (snapshot.expiresAt <= Date.now()) {
-			this.paneDeviceSnapshots.delete(key);
-			return undefined;
-		}
-		return snapshot;
-	}
-
-	private setPaneDevice(side: 'left' | 'right', device: TurboFileDevice): void {
-		const state = this.paneStates[side];
-		if (side === 'right') {
-			this.hasAppliedInitialRightPaneDefault = true;
-		}
-		if (state.deviceId === device.id) {
-			state.error = undefined;
-			this.clearPaneSelection(side);
-			this.render();
-			void this.refreshPane(side, { path: state.path || this.getDefaultPaneDevicePath(device), force: true, silent: true });
-			return;
-		}
-		this.rememberPaneDeviceSnapshot(side);
-		state.deviceId = device.id;
-		const targetPath = this.getRememberedPaneDevicePath(side, device) ?? this.getDefaultPaneDevicePath(device);
-		const snapshot = this.getPaneDeviceSnapshot(side, device);
-		const cached = this.getCachedPaneDirectory(device, targetPath);
-		state.path = targetPath;
-		state.items = snapshot?.path === targetPath ? snapshot.items : cached?.items ?? [];
-		state.error = undefined;
-		this.resetPaneScroll(side);
-		if (snapshot?.path === targetPath) {
-			state.scrollTop = snapshot.scrollTop;
-		}
-		this.clearPaneSelection(side);
-		this.statusMessage = `已在${this.getSideLabel(side)}打开设备：${device.name}`;
-		this.render();
-		if (cached) {
-			this.applyPaneDirectoryEntry(side, device, cached);
-			this.render();
-			return;
-		}
-		void this.refreshPane(side, { path: targetPath, silent: true });
 	}
 
 	private ensurePaneDeviceSelection(options: { preferFirstSshOnRight?: boolean } = {}): void {
