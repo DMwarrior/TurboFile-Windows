@@ -145,6 +145,7 @@ interface TurboFileImageGridState {
 	histogramVisible: boolean;
 	histogramX: number;
 	histogramY: number;
+	fileListScrollTop: number;
 	scrollTop: number;
 	viewportHeight: number;
 }
@@ -2158,6 +2159,7 @@ export class TurboFileEditor extends EditorPane {
 	private renderFileList(side: 'left' | 'right', list: HTMLElement): void {
 		const state = this.paneStates[side];
 		state.viewportHeight = list.clientHeight || state.viewportHeight || FILE_LIST_DEFAULT_VIEWPORT_HEIGHT;
+		this.clampFileListScrollTop(side);
 		if (state.error) {
 			this.fileListRenderedRange[side] = undefined;
 			list.appendChild(this.renderFileRow(side, { name: state.error, size: '', rawSize: 0, modified: '', rawModified: 0, type: 'unknown' }, false));
@@ -2213,6 +2215,19 @@ export class TurboFileEditor extends EditorPane {
 			topSpacerHeight: startIndex * FILE_LIST_ROW_HEIGHT,
 			bottomSpacerHeight: Math.max(0, (total - endIndex) * FILE_LIST_ROW_HEIGHT)
 		};
+	}
+
+	private clampFileListScrollTop(side: 'left' | 'right'): void {
+		const state = this.paneStates[side];
+		const viewportHeight = state.viewportHeight > 0 ? state.viewportHeight : FILE_LIST_DEFAULT_VIEWPORT_HEIGHT;
+		const totalHeight = this.getVisibleFileItems(state).length * FILE_LIST_ROW_HEIGHT;
+		const maxScrollTop = Math.max(0, totalHeight - viewportHeight);
+		const nextScrollTop = Math.max(0, Math.min(state.scrollTop, maxScrollTop));
+		if (nextScrollTop === state.scrollTop) {
+			return;
+		}
+		state.scrollTop = nextScrollTop;
+		this.fileListRenderedRange[side] = undefined;
 	}
 
 	private getVisibleFileItems(state: TurboFilePaneState): TurboFileFileItem[] {
@@ -5819,6 +5834,7 @@ export class TurboFileEditor extends EditorPane {
 			histogramVisible: false,
 			histogramX: 104,
 			histogramY: 72,
+			fileListScrollTop: state.scrollTop,
 			scrollTop: 0,
 			viewportHeight: this.getImageGridDefaultViewportHeight()
 		};
@@ -5835,6 +5851,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private closeImageGridPage(): void {
+		const state = this.imageGridState;
 		this.disposeImageGridObserver();
 		this.clearImageGridScrollTimer();
 		this.clearImageGridScrollRaf();
@@ -5845,10 +5862,20 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImagePreviewRender();
 		this.imageGridRenderedRange = undefined;
 		this.imageGridState = undefined;
+		if (state) {
+			this.restoreFileListScrollAfterImageGrid(state.side, state.fileListScrollTop);
+		}
 		this.activePage = 'transfer';
 		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
 		this.render();
+	}
+
+	private restoreFileListScrollAfterImageGrid(side: 'left' | 'right', scrollTop: number): void {
+		const state = this.paneStates[side];
+		state.scrollTop = Math.max(0, scrollTop);
+		this.fileListRenderedRange[side] = undefined;
+		this.clearFileListScrollRaf(side);
 	}
 
 	private selectImageGridItem(index: number): void {
