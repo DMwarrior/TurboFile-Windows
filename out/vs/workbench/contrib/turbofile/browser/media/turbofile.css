@@ -3081,8 +3081,8 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-action.is-active {
-	color: #042aff;
-	background: rgba(225, 255, 37, 0.92);
+	color: var(--tf-image-control-text);
+	background: var(--tf-image-control-bg);
 }
 
 .turbofile-image-page-action .codicon {
