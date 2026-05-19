@@ -1565,7 +1565,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-height: 0;
 	min-width: 0;
 	display: grid;
-	grid-template-rows: auto minmax(0, 1fr);
+	grid-template-rows: auto auto minmax(0, 1fr);
 	border: 1px solid var(--turbofile-pane-border);
 	border-radius: 4px 4px 0 0;
 	overflow: hidden;
@@ -1583,11 +1583,11 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-pane-header {
-	height: 64px;
+	height: 42px;
 	padding: 6px 8px;
 	display: grid;
-	grid-template-rows: 20px 30px;
-	gap: 4px;
+	grid-template-rows: 30px;
+	gap: 0;
 	border-top: 1px solid var(--turbofile-pane-border);
 	border-bottom: 1px solid var(--turbofile-pane-border);
 	position: relative;
