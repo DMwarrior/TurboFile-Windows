@@ -107,6 +107,12 @@ interface TurboFilePaneDeviceSnapshot {
 	readonly expiresAt: number;
 }
 
+interface TurboFilePaneDoubleClickState {
+	lastPath?: string;
+	lastAt: number;
+	suppressNativePath?: string;
+}
+
 interface TurboFileImageGridImage {
 	readonly item: TurboFileFileItem;
 	thumbnailContent: string;
@@ -345,6 +351,7 @@ const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
 const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
+const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
 const TURBOFILE_BROWSER_FONT_FAMILY_STORAGE_KEY = 'turbofile.browser.fontFamily';
 const TURBOFILE_UI_FONT_SIZE_STORAGE_KEY = 'turbofile.ui.fontSize';
@@ -568,6 +575,10 @@ export class TurboFileEditor extends EditorPane {
 	private readonly localWindowsDevice: TurboFileDevice;
 	private readonly paneStates: Record<'left' | 'right', TurboFilePaneState>;
 	private readonly paneRequestSeq: Record<'left' | 'right', number> = { left: 0, right: 0 };
+	private readonly paneDoubleClickState: Record<'left' | 'right', TurboFilePaneDoubleClickState> = {
+		left: { lastAt: 0 },
+		right: { lastAt: 0 }
+	};
 	private isDeviceFormVisible = false;
 	private hasAppliedInitialRightPaneDefault = false;
 	private editingDeviceId: string | undefined;
@@ -2332,10 +2343,16 @@ export class TurboFileEditor extends EditorPane {
 		});
 		if ((item.directory || item.parent) && item.path) {
 			row.addEventListener('pointerenter', () => this.prefetchPaneDirectory(side, item.path));
-			row.addEventListener('pointerdown', () => this.prefetchPaneDirectory(side, item.path));
+			row.addEventListener('pointerdown', event => {
+				this.prefetchPaneDirectory(side, item.path);
+				this.maybeOpenPaneDirectoryOnFastDoubleClick(side, item, event, renaming);
+			});
 		}
 		row.addEventListener('dblclick', () => {
 			if (renaming) {
+				return;
+			}
+			if ((item.directory || item.parent) && this.consumeSuppressedNativeDirectoryDoubleClick(side, item.path)) {
 				return;
 			}
 			if (item.directory || item.parent) {
@@ -2367,6 +2384,36 @@ export class TurboFileEditor extends EditorPane {
 		row.appendChild(size);
 		row.appendChild(modified);
 		return row;
+	}
+
+	private maybeOpenPaneDirectoryOnFastDoubleClick(side: 'left' | 'right', item: TurboFileFileItem, event: PointerEvent, renaming: boolean): void {
+		if (renaming || event.button !== 0 || !item.path || (!item.directory && !item.parent)) {
+			return;
+		}
+
+		const state = this.paneDoubleClickState[side];
+		const now = Date.now();
+		const isDoubleClick = state.lastPath === item.path && now - state.lastAt <= PANE_FAST_DOUBLE_CLICK_MS;
+		state.lastPath = item.path;
+		state.lastAt = now;
+		if (!isDoubleClick) {
+			return;
+		}
+
+		state.suppressNativePath = item.path;
+		void this.openItem(side, item);
+	}
+
+	private consumeSuppressedNativeDirectoryDoubleClick(side: 'left' | 'right', path: string | undefined): boolean {
+		if (!path) {
+			return false;
+		}
+		const state = this.paneDoubleClickState[side];
+		if (state.suppressNativePath !== path) {
+			return false;
+		}
+		state.suppressNativePath = undefined;
+		return true;
 	}
 
 	private renderInlineRenameInput(side: 'left' | 'right', item: TurboFileFileItem, container: HTMLElement): void {
