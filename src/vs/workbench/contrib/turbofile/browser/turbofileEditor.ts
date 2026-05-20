@@ -145,6 +145,7 @@ interface TurboFileImageGridState {
 	selectedIndex: number;
 	columns: TurboFileImageGridColumns;
 	previewVisible: boolean;
+	previewOrigin: 'file-list' | 'grid';
 	previewZoom: number;
 	previewPanX: number;
 	previewPanY: number;
@@ -6040,7 +6041,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		this.openImageGrid(side, item.path, true);
+		this.openImageGrid(side, item.path, true, 'file-list');
 		/*
 
 		this.previewState = {
@@ -6075,7 +6076,7 @@ export class TurboFileEditor extends EditorPane {
 		*/
 	}
 
-	private openImageGrid(side: 'left' | 'right', selectedPath?: string, previewVisible: boolean = false): void {
+	private openImageGrid(side: 'left' | 'right', selectedPath?: string, previewVisible: boolean = false, previewOrigin: 'file-list' | 'grid' = 'grid'): void {
 		const state = this.paneStates[side];
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
@@ -6112,6 +6113,7 @@ export class TurboFileEditor extends EditorPane {
 			selectedIndex,
 			columns: 8,
 			previewVisible,
+			previewOrigin,
 			previewZoom: 1,
 			previewPanX: 0,
 			previewPanY: 0,
@@ -6201,6 +6203,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.selectedIndex = index;
+		state.previewOrigin = 'grid';
 		state.previewVisible = true;
 		state.previewZoom = 1;
 		state.previewPanX = 0;
@@ -6217,19 +6220,24 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private closeImageGridPreview(): void {
-		if (!this.imageGridState) {
+		const state = this.imageGridState;
+		if (!state) {
+			return;
+		}
+		if (state.previewOrigin === 'file-list') {
+			this.closeImageGridPage();
 			return;
 		}
 		this.imageGridPreviewRequestSeq++;
 		this.clearImageGridPreviewPrefetchTimer();
-		this.imageGridState.previewVisible = false;
-		this.imageGridState.previewZoom = 1;
-		this.imageGridState.previewPanX = 0;
-		this.imageGridState.previewPanY = 0;
-		this.imageGridState.previewFitPending = true;
+		state.previewVisible = false;
+		state.previewZoom = 1;
+		state.previewPanX = 0;
+		state.previewPanY = 0;
+		state.previewFitPending = true;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
-		this.releaseImageGridImagesOutsideRange(this.imageGridState, this.getImageGridVirtualRange(this.imageGridState));
+		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
 	}
 
