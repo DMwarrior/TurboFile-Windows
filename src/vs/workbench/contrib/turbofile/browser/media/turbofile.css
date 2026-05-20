@@ -5220,13 +5220,21 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 
 .vs .turbofile-workbench,
 .turbofile-workbench.is-turbofile-light {
-	--tf-preview-side-fill: #0f1f8f;
+	--tf-preview-side-fill: rgba(255, 255, 255, 0.94);
+	--tf-preview-side-hover: #ffffff;
+	--tf-preview-side-image-bg: #f3f4f6;
+	--tf-preview-side-icon-bg: rgba(17, 24, 39, 0.68);
+	--tf-preview-side-icon-hover: rgba(17, 24, 39, 0.82);
 }
 
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench,
 .turbofile-workbench.is-turbofile-dark {
-	--tf-preview-side-fill: #101d78;
+	--tf-preview-side-fill: rgba(15, 16, 19, 0.94);
+	--tf-preview-side-hover: rgba(21, 23, 27, 0.96);
+	--tf-preview-side-image-bg: #0b0c0f;
+	--tf-preview-side-icon-bg: rgba(0, 0, 0, 0.56);
+	--tf-preview-side-icon-hover: rgba(0, 0, 0, 0.7);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-overlay,
@@ -5504,18 +5512,18 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side {
 	top: auto;
-	bottom: 32px;
-	width: 80px;
-	height: 80px;
-	padding: 6px;
-	border: 0;
-	border-radius: 10px;
+	bottom: 28px;
+	width: 156px;
+	height: 96px;
+	padding: 10px;
+	border: 1px solid var(--tf-preview-border-ring);
+	border-radius: 13px;
 	background: var(--tf-preview-side-fill);
-	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
+	box-shadow: var(--tf-preview-elevated-shadow);
 	transform: none;
 	overflow: hidden;
 	z-index: 30;
-	backdrop-filter: blur(8px) saturate(1.2) brightness(1.01);
+	backdrop-filter: blur(10px) saturate(1.05);
 	transition: transform 200ms ease, box-shadow 200ms ease, background 200ms ease;
 }
 
@@ -5524,7 +5532,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side.is-left,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-left,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-left {
-	left: 8px;
+	left: 12px;
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side.is-right,
@@ -5532,7 +5540,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side.is-right,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-right,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-right {
-	right: 8px;
+	right: 12px;
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side:hover,
@@ -5540,9 +5548,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side:hover,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover {
-	background: var(--tf-preview-side-fill);
+	background: var(--tf-preview-side-hover);
 	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
-	transform: scale(1.05);
+	transform: translateY(-1px);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side img,
@@ -5552,9 +5560,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side img {
 	width: 100%;
 	height: 100%;
-	border-radius: 0;
+	border-radius: 7px;
 	object-fit: contain;
-	background: var(--tf-preview-side-fill);
+	background: var(--tf-preview-side-image-bg);
 	box-sizing: border-box;
 }
 
@@ -5563,8 +5571,15 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side-icon {
+	inset: auto;
+	top: 50%;
+	left: 50%;
+	width: 34px;
+	height: 34px;
+	border-radius: 999px;
 	color: #ffffff;
-	background: rgba(0, 0, 0, 0.4);
+	background: var(--tf-preview-side-icon-bg);
+	transform: translate(-50%, -50%);
 	transition: background 200ms ease;
 }
 
@@ -5573,7 +5588,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon {
-	background: rgba(0, 0, 0, 0.2);
+	background: var(--tf-preview-side-icon-hover);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-navigation,

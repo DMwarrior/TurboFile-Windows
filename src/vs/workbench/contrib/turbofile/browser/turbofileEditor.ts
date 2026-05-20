@@ -125,6 +125,10 @@ interface TurboFileImageGridImage {
 	previewMime: string;
 	previewLoading: boolean;
 	previewError?: string;
+	previewImage?: HTMLImageElement;
+	previewImageKey?: string;
+	previewImageLoading?: Promise<HTMLImageElement>;
+	previewImageLoadingKey?: string;
 	width?: number;
 	height?: number;
 }
@@ -150,6 +154,8 @@ interface TurboFileImageGridState {
 	previewPanX: number;
 	previewPanY: number;
 	previewFitPending: boolean;
+	previewPendingIndex?: number;
+	previewPendingRequestSeq?: number;
 	pixelInspectorVisible: boolean;
 	histogramVisible: boolean;
 	histogramX: number;
@@ -3215,6 +3221,10 @@ export class TurboFileEditor extends EditorPane {
 				return '同机复制';
 			case 'local-copy':
 				return '本地复制';
+			case 'remote-move':
+				return '????';
+			case 'local-move':
+				return '????';
 			default:
 				return strategy;
 		}
@@ -3879,7 +3889,7 @@ export class TurboFileEditor extends EditorPane {
 		const image = state.images[targetIndex];
 		button.disabled = !image;
 		if (image) {
-			const src = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '') || image.previewUrl || (image.previewContent ? `data:${image.previewMime};base64,${image.previewContent}` : '');
+			const src = this.getImagePreviewThumbnailSource(image);
 			if (src) {
 				const thumb = document.createElement('img');
 				thumb.src = src;
@@ -3898,7 +3908,7 @@ export class TurboFileEditor extends EditorPane {
 		clearNode(stage);
 		const selected = state.images[state.selectedIndex];
 		const previewSrc = this.getImagePreviewSource(selected);
-		if (selected && previewSrc) {
+		if (selected && previewSrc && this.isImagePreviewDecoded(selected, previewSrc)) {
 			const figure = $('.turbofile-image-preview-figure');
 			figure.setAttribute('role', 'img');
 			figure.setAttribute('aria-label', selected.item.name);
@@ -3911,19 +3921,36 @@ export class TurboFileEditor extends EditorPane {
 				this.attachImagePreviewPixelInspector(stage, figure, selected, previewSrc);
 			}
 			stage.appendChild(figure);
+			this.renderImagePreviewCanvas();
 			return;
 		}
 		const placeholder = $('.turbofile-image-preview-placeholder');
 		placeholder.appendChild(renderIcon(Codicon.fileMedia));
-		placeholder.append(selected?.previewError ?? (selected?.previewLoading ? 'Loading image...' : 'Preparing image...'));
+		placeholder.append(selected?.previewError ?? (selected?.previewLoading || previewSrc ? 'Loading image...' : 'Preparing image...'));
 		stage.appendChild(placeholder);
 	}
 
 	private getImagePreviewSource(image: TurboFileImageGridImage | undefined): string {
+		return this.getImagePreviewFullSource(image);
+	}
+
+	private getImagePreviewFullSource(image: TurboFileImageGridImage | undefined): string {
 		return image?.previewUrl
-			|| (image?.previewContent ? `data:${image.previewMime};base64,${image.previewContent}` : '')
-			|| image?.thumbnailUrl
-			|| (image?.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
+			|| (image?.previewContent ? `data:${image.previewMime};base64,${image.previewContent}` : '');
+	}
+
+	private getImagePreviewThumbnailSource(image: TurboFileImageGridImage | undefined): string {
+		return image?.thumbnailUrl
+			|| (image?.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '')
+			|| this.getImagePreviewFullSource(image);
+	}
+
+	private getImagePreviewKey(image: TurboFileImageGridImage, src: string): string {
+		return `${image.item.path ?? image.item.name}|${src}`;
+	}
+
+	private isImagePreviewDecoded(image: TurboFileImageGridImage, src: string): boolean {
+		return !!image.previewImage && image.previewImageKey === this.getImagePreviewKey(image, src);
 	}
 
 	private appendImagePreviewCanvas(figure: HTMLElement, image: TurboFileImageGridImage, src: string, state: TurboFileImageGridState): void {
@@ -3941,7 +3968,7 @@ export class TurboFileEditor extends EditorPane {
 			return undefined;
 		}
 
-		const key = `${image.item.path ?? image.item.name}|${src}`;
+		const key = this.getImagePreviewKey(image, src);
 		const current = this.imagePreviewRender;
 		if (current?.key === key) {
 			current.canvas = canvas;
@@ -3951,19 +3978,24 @@ export class TurboFileEditor extends EditorPane {
 			return current;
 		}
 
+		const decodedImage = image.previewImageKey === key ? image.previewImage : undefined;
 		state.previewFitPending = true;
 		const render: TurboFileImagePreviewRender = {
 			key,
 			canvas,
 			context,
-			width: Math.max(1, image.width ?? 1),
-			height: Math.max(1, image.height ?? 1),
-			ready: false,
+			image: decodedImage,
+			width: Math.max(1, decodedImage?.naturalWidth || image.width || 1),
+			height: Math.max(1, decodedImage?.naturalHeight || image.height || 1),
+			ready: !!decodedImage,
 			requestSeq: ++this.imagePreviewRenderSeq
 		};
 		this.imagePreviewRender = render;
 		this.observeImagePreviewCanvas(canvas);
 		this.queueImagePreviewCanvasRender();
+		if (decodedImage) {
+			return render;
+		}
 
 		const loader = new Image();
 		loader.decoding = 'async';
@@ -3975,6 +4007,10 @@ export class TurboFileEditor extends EditorPane {
 			render.width = Math.max(1, loader.naturalWidth || image.width || 1);
 			render.height = Math.max(1, loader.naturalHeight || image.height || 1);
 			render.ready = true;
+			image.previewImage = loader;
+			image.previewImageKey = key;
+			image.width = render.width;
+			image.height = render.height;
 			this.renderImagePreviewCanvas();
 		};
 		loader.onerror = () => {
@@ -3985,6 +4021,68 @@ export class TurboFileEditor extends EditorPane {
 		};
 		loader.src = src;
 		return render;
+	}
+
+	private async ensureImagePreviewElementLoaded(state: TurboFileImageGridState, index: number): Promise<boolean> {
+		const image = state.images[index];
+		const src = this.getImagePreviewSource(image);
+		if (!image || !src) {
+			return false;
+		}
+
+		const key = this.getImagePreviewKey(image, src);
+		if (this.isImagePreviewDecoded(image, src)) {
+			return true;
+		}
+
+		if (!image.previewImageLoading || image.previewImageLoadingKey !== key) {
+			const loader = new Image();
+			loader.decoding = 'async';
+			image.previewImageLoadingKey = key;
+			image.previewImageLoading = this.loadImagePreviewElement(loader, src);
+		}
+
+		const loading = image.previewImageLoading;
+		if (!loading) {
+			return false;
+		}
+
+		try {
+			const loader = await loading;
+			if (this.imageGridState !== state || image.previewImageLoadingKey !== key || !this.shouldKeepImageGridPreview(state, index)) {
+				return false;
+			}
+			image.previewImage = loader;
+			image.previewImageKey = key;
+			image.width = Math.max(1, loader.naturalWidth || image.width || 1);
+			image.height = Math.max(1, loader.naturalHeight || image.height || 1);
+			return true;
+		} catch (error) {
+			if (this.imageGridState === state && this.shouldKeepImageGridPreview(state, index)) {
+				image.previewError = error instanceof Error ? error.message : String(error);
+			}
+			return false;
+		} finally {
+			if (image.previewImageLoadingKey === key) {
+				image.previewImageLoading = undefined;
+				image.previewImageLoadingKey = undefined;
+			}
+		}
+	}
+
+	private loadImagePreviewElement(loader: HTMLImageElement, src: string): Promise<HTMLImageElement> {
+		return new Promise((resolve, reject) => {
+			loader.onload = async () => {
+				try {
+					await loader.decode?.();
+				} catch {
+					// Some formats resolve onload but reject decode; the loaded element can still be drawn.
+				}
+				resolve(loader);
+			};
+			loader.onerror = () => reject(new Error('Failed to load image'));
+			loader.src = src;
+		});
 	}
 
 	private observeImagePreviewCanvas(canvas: HTMLCanvasElement): void {
@@ -4166,7 +4264,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private prepareImagePreviewAnalysis(image: TurboFileImageGridImage, src: string): TurboFileImagePreviewAnalysis | undefined {
 		const ownerDocument = this.container?.ownerDocument ?? document;
-		const key = `${image.item.path ?? image.item.name}|${src}`;
+		const key = this.getImagePreviewKey(image, src);
 		if (this.imagePreviewAnalysis?.key === key) {
 			return this.imagePreviewAnalysis;
 		}
@@ -4266,7 +4364,11 @@ export class TurboFileEditor extends EditorPane {
 	private updateImagePreviewHistogramCanvas(): void {
 		const canvas = this.container?.querySelector<HTMLCanvasElement>('.turbofile-image-preview-histogram-canvas');
 		if (canvas) {
-			this.drawImagePreviewHistogram(canvas, this.imagePreviewAnalysis);
+			const state = this.imageGridState;
+			const selected = state?.images[state.selectedIndex];
+			const src = this.getImagePreviewSource(selected);
+			const analysis = selected && src ? this.prepareImagePreviewAnalysis(selected, src) : undefined;
+			this.drawImagePreviewHistogram(canvas, analysis);
 		}
 	}
 
@@ -4319,6 +4421,22 @@ export class TurboFileEditor extends EditorPane {
 		if (zoomValue) {
 			zoomValue.textContent = this.getImagePreviewZoomLabel(state);
 		}
+		if (state.histogramVisible) {
+			this.updateImagePreviewHistogramCanvas();
+		}
+		this.updateImagePreviewSideButtons(state);
+	}
+
+	private updateImagePreviewSideButtons(state: TurboFileImageGridState): void {
+		const overlay = this.container?.querySelector<HTMLElement>('.turbofile-image-preview-overlay');
+		if (!overlay || this.imageGridState !== state || !state.previewVisible) {
+			return;
+		}
+		for (const button of Array.from(overlay.querySelectorAll('.turbofile-image-preview-side'))) {
+			button.remove();
+		}
+		overlay.appendChild(this.renderImagePreviewSideButton(state, -1));
+		overlay.appendChild(this.renderImagePreviewSideButton(state, 1));
 	}
 
 	private renderSyncPreviewOverlay(): HTMLElement {
@@ -6185,7 +6303,7 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 		if (previewVisible && this.imageGridState) {
 			this.imageGridPreviewRequestSeq++;
-			this.scheduleImageGridPreviewLoaded(this.imageGridState, selectedIndex, this.imageGridPreviewRequestSeq);
+			void this.ensureImageGridPreviewLoaded(this.imageGridState, selectedIndex, this.imageGridPreviewRequestSeq);
 			this.scheduleImageGridPreviewNeighborsLoaded(this.imageGridState, selectedIndex);
 		}
 	}
@@ -6234,8 +6352,35 @@ export class TurboFileEditor extends EditorPane {
 		if (!state?.images.length) {
 			return;
 		}
-		const nextIndex = (state.selectedIndex + delta + state.images.length) % state.images.length;
-		state.selectedIndex = nextIndex;
+		const baseIndex = state.previewPendingIndex ?? state.selectedIndex;
+		const nextIndex = (baseIndex + delta + state.images.length) % state.images.length;
+		if (nextIndex === state.selectedIndex) {
+			this.imageGridPreviewRequestSeq++;
+			state.previewPendingIndex = undefined;
+			state.previewPendingRequestSeq = undefined;
+			this.scheduleImageGridPreviewNeighborsLoaded(state, state.selectedIndex);
+			return;
+		}
+		this.imageGridPreviewRequestSeq++;
+		const requestSeq = this.imageGridPreviewRequestSeq;
+		state.previewPendingIndex = nextIndex;
+		state.previewPendingRequestSeq = requestSeq;
+		void this.ensureImageGridPreviewLoaded(state, nextIndex, requestSeq);
+		this.scheduleImageGridPreviewNeighborsLoaded(state, nextIndex);
+		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(nextIndex, state.images.length));
+		this.commitImageGridPreviewIndexIfReady(state, nextIndex, requestSeq);
+	}
+
+	private commitImageGridPreviewIndexIfReady(state: TurboFileImageGridState, index: number, requestSeq: number): boolean {
+		if (this.imageGridState !== state || !state.previewVisible || state.previewPendingIndex !== index || state.previewPendingRequestSeq !== requestSeq) {
+			return false;
+		}
+		const image = state.images[index];
+		const src = this.getImagePreviewSource(image);
+		if (!image || (src ? !this.isImagePreviewDecoded(image, src) : !image.previewError)) {
+			return false;
+		}
+		state.selectedIndex = index;
 		state.previewZoom = 1;
 		state.previewPanX = 0;
 		state.previewPanY = 0;
@@ -6244,10 +6389,8 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImagePreviewRender();
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
-		this.render();
-		this.scheduleImageGridPreviewLoaded(state, nextIndex, this.imageGridPreviewRequestSeq);
-		this.scheduleImageGridPreviewNeighborsLoaded(state, nextIndex);
-		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(nextIndex, state.images.length));
+		this.updateImagePreviewOverlay();
+		return true;
 	}
 
 	private openImageGridPreview(index: number): void {
@@ -6267,7 +6410,7 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.render();
-		this.scheduleImageGridPreviewLoaded(state, index, this.imageGridPreviewRequestSeq);
+		void this.ensureImageGridPreviewLoaded(state, index, this.imageGridPreviewRequestSeq);
 		this.scheduleImageGridPreviewNeighborsLoaded(state, index);
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(index, state.images.length));
 	}
@@ -6414,6 +6557,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (!await this.showDialogConfirm('Delete image', `Delete ${image.item.name}?`, undefined, true)) {
 			return;
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		}
 
 		const deleteIndex = state.selectedIndex;
@@ -6425,7 +6570,6 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanY = 0;
 		state.previewFitPending = true;
 		state.previewVisible = state.images.length > 0;
-		this.imageGridPreviewRequestSeq++;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
@@ -6436,8 +6580,10 @@ export class TurboFileEditor extends EditorPane {
 
 		const task = this.beginTask('delete', `Delete ${image.item.name}`, device.name);
 		this.render();
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		if (state.previewVisible) {
-			this.scheduleImageGridPreviewLoaded(state, state.selectedIndex, this.imageGridPreviewRequestSeq);
+			void this.ensureImageGridPreviewLoaded(state, state.selectedIndex, this.imageGridPreviewRequestSeq);
 			this.scheduleImageGridPreviewNeighborsLoaded(state, state.selectedIndex);
 			this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(state.selectedIndex, state.images.length));
 		}
@@ -6462,6 +6608,8 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.imageGridState.columns = columns;
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.render();
@@ -6497,20 +6645,6 @@ export class TurboFileEditor extends EditorPane {
 			ownerWindow.setTimeout(() => {
 				if (this.imageGridState === state && this.activePage === 'images') {
 					this.queueImageGridThumbnailLoads(state, indexes, true);
-				}
-			}, 0);
-		});
-	}
-
-	private scheduleImageGridPreviewLoaded(state: TurboFileImageGridState, index: number, requestSeq?: number): void {
-		if (!this.container) {
-			return;
-		}
-		const ownerWindow = getWindow(this.container);
-		ownerWindow.requestAnimationFrame(() => {
-			ownerWindow.setTimeout(() => {
-				if (this.imageGridState === state && this.activePage === 'images') {
-					void this.ensureImageGridPreviewLoaded(state, index, requestSeq);
 				}
 			}, 0);
 		});
@@ -6754,7 +6888,12 @@ export class TurboFileEditor extends EditorPane {
 		if (!image?.item.path || !device || this.imageGridState !== state) {
 			return;
 		}
-		if (image.previewUrl || image.previewContent || image.previewLoading) {
+		if (this.getImagePreviewSource(image)) {
+			await this.ensureImagePreviewElementLoaded(state, index);
+			this.finishImageGridPreviewLoad(state, index, requestSeq, silent);
+			return;
+		}
+		if (image.previewLoading) {
 			return;
 		}
 		if (!this.shouldKeepImageGridPreview(state, index)) {
@@ -6800,10 +6939,7 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			if (this.imageGridState === state) {
 				image.previewLoading = false;
-				if (state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
-					this.updateImagePreviewOverlay();
-					this.scheduleImageGridPreviewNeighborsLoaded(state, index);
-				}
+				this.finishImageGridPreviewLoad(state, index, requestSeq, silent);
 			}
 		}
 	}
@@ -6966,6 +7102,7 @@ export class TurboFileEditor extends EditorPane {
 			height: clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
 			quality: IMAGE_PREVIEW_QUALITY
 		};
+				await this.ensureImagePreviewElementLoaded(state, index);
 	}
 
 	private getImageGridThumbnailParallelLimit(state: TurboFileImageGridState): number {
@@ -6982,6 +7119,20 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.scrollTop = body.scrollTop;
+	private finishImageGridPreviewLoad(state: TurboFileImageGridState, index: number, requestSeq?: number, silent: boolean = false): void {
+		if (this.imageGridState !== state) {
+			return;
+		}
+		if (state.previewPendingIndex === index && state.previewPendingRequestSeq !== undefined && this.commitImageGridPreviewIndexIfReady(state, index, state.previewPendingRequestSeq)) {
+			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
+			return;
+		}
+		if (!silent && state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
+			this.updateImagePreviewOverlay();
+			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
+		}
+	}
+
 		state.viewportHeight = body.clientHeight || state.viewportHeight;
 		this.trimImageGridThumbnailQueue(state);
 		if (this.imageGridScrollRaf || !this.container) {
@@ -7108,7 +7259,7 @@ export class TurboFileEditor extends EditorPane {
 				this.imageGridLoadedPreviewIndexes.delete(index);
 				continue;
 			}
-			const keepPreview = state.previewVisible && this.getImageGridCircularDistance(state, index, state.selectedIndex) <= IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT;
+			const keepPreview = this.shouldKeepImageGridPreview(state, index);
 			if (!keepPreview && (image.previewUrl || image.previewContent || image.previewError)) {
 				this.releaseImageBlobUrl(image.previewUrl);
 				image.previewUrl = undefined;
@@ -7150,7 +7301,13 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private shouldKeepImageGridPreview(state: TurboFileImageGridState, index: number): boolean {
-		return this.imageGridState === state && state.previewVisible && this.getImageGridCircularDistance(state, index, state.selectedIndex) <= IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT;
+		if (this.imageGridState !== state || !state.previewVisible) {
+			return false;
+		}
+		if (this.getImageGridCircularDistance(state, index, state.selectedIndex) <= IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT) {
+			return true;
+		}
+		return state.previewPendingIndex !== undefined && this.getImageGridCircularDistance(state, index, state.previewPendingIndex) <= IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT;
 	}
 
 	private getImageGridQueueKey(state: TurboFileImageGridState, index: number): string {
@@ -7288,6 +7445,10 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			await this.refreshPane(side, { force: true });
 		}
+				image.previewImage = undefined;
+				image.previewImageKey = undefined;
+				image.previewImageLoading = undefined;
+				image.previewImageLoadingKey = undefined;
 	}
 
 	private async extractSelected(side: 'left' | 'right'): Promise<void> {
@@ -7304,6 +7465,10 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return;
 		}
+		image.previewImage = undefined;
+		image.previewImageKey = undefined;
+		image.previewImageLoading = undefined;
+		image.previewImageLoadingKey = undefined;
 		if (!await this.showDialogConfirm('解压确认', `确定解压 ${item.name} 吗？`, '解压进度会显示在底部任务区域。')) {
 			return;
 		}
