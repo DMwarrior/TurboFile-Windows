@@ -19,6 +19,9 @@ import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperatio
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
+const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
+const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
+const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
@@ -69,6 +72,8 @@ interface ISSHForwardedTcpDetails {
 interface ISSHExecStream {
 	on(event: 'close', listener: (code: number | null, signal: string | null) => void): ISSHExecStream;
 	on(event: 'data', listener: (data: Buffer | string) => void): ISSHExecStream;
+	close?(): void;
+	destroy?(): void;
 	stderr: {
 		on(event: 'data', listener: (data: Buffer | string) => void): void;
 	};
@@ -162,6 +167,7 @@ interface ITransferProgressSnapshot {
 interface IRemoteExecOptions {
 	readonly onStdout?: (chunk: string) => void;
 	readonly onStderr?: (chunk: string) => void;
+	readonly timeoutMs?: number;
 }
 
 interface IImageSize {
@@ -190,6 +196,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly directorySftpIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
+	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 
 	onDynamicSshTerminalData(sessionId: string): Event<string> {
 		const session = this.terminalSessions.get(sessionId);
@@ -1987,11 +1994,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async readRemoteFileBuffer(endpoint: ITurboFileTransferEndpoint, maxBytes: number): Promise<Buffer> {
-		const tempRoot = join(tmpdir(), `turbofile-read-${randomUUID()}`);
-		const tempPath = join(tempRoot, basename(endpoint.path) || 'content');
+		let tempRoot: string | undefined;
 		try {
-			await fsp.mkdir(tempRoot, { recursive: true });
-			await this.withDirectorySftp(endpoint, async sftp => {
+			return await this.withDirectorySftp(endpoint, async sftp => {
 				const stat = await this.remoteStat(sftp, endpoint.path);
 				if (stat.isDirectory()) {
 					throw new Error('Cannot preview a directory.');
@@ -1999,11 +2004,43 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (stat.size > maxBytes) {
 					throw new Error(`File is too large to preview (${formatBytes(stat.size)}).`);
 				}
+				if (stat.size <= REMOTE_DIRECT_READ_MAX_BYTES) {
+					return this.readRemoteFileBufferDirect(sftp, endpoint.path, stat.size);
+				}
+
+				tempRoot = join(tmpdir(), `turbofile-read-${randomUUID()}`);
+				const tempPath = join(tempRoot, basename(endpoint.path) || 'content');
+				await fsp.mkdir(tempRoot, { recursive: true });
 				await this.fastGet(sftp, endpoint.path, tempPath);
+				return await fsp.readFile(tempPath);
 			});
-			return await fsp.readFile(tempPath);
 		} finally {
-			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+			if (tempRoot) {
+				await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+			}
+		}
+	}
+
+	private async readRemoteFileBufferDirect(sftp: ISFTPWrapper, remotePath: string, size: number): Promise<Buffer> {
+		if (size <= 0) {
+			return Buffer.alloc(0);
+		}
+
+		const handle = await this.openRemoteFile(sftp, remotePath, 'r');
+		try {
+			const buffer = Buffer.alloc(size);
+			let position = 0;
+			while (position < size) {
+				const length = Math.min(REMOTE_DIRECT_READ_CHUNK_BYTES, size - position);
+				const bytesRead = await this.readRemoteFileChunk(sftp, handle, buffer.subarray(position, position + length), length, position);
+				if (bytesRead <= 0) {
+					break;
+				}
+				position += bytesRead;
+			}
+			return position === size ? buffer : buffer.subarray(0, position);
+		} finally {
+			await this.closeRemoteFile(sftp, handle);
 		}
 	}
 
@@ -2096,7 +2133,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const command = `${tool} ${source}${thumbnail}${filter} -strip${qualityOption} ${outputFormat}`;
 
 		try {
-			const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command));
+			const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
 			assertImageBuffer(buffer, mime);
 			const size = getImageSize(buffer);
 			return {
@@ -2109,7 +2146,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (format === 'webp') {
 				try {
 					const jpegCommand = `${tool} ${source}${thumbnail}${filter} -strip${qualityOption} jpg:-`;
-					const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, jpegCommand));
+					const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, jpegCommand, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
 					assertImageBuffer(buffer, 'image/jpeg');
 					const size = getImageSize(buffer);
 					return {
@@ -2139,7 +2176,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (cached && (now - cached.checkedAt) < REMOTE_IMAGE_TOOL_CACHE_TTL_MS) {
 			return cached.tool;
 		}
+		const pending = this.remoteImageToolPending.get(cacheKey);
+		if (pending) {
+			return pending;
+		}
 
+		const probe = this.resolveRemoteImageTool(endpoint, cacheKey, now);
+		this.remoteImageToolPending.set(cacheKey, probe);
+		try {
+			return await probe;
+		} finally {
+			if (this.remoteImageToolPending.get(cacheKey) === probe) {
+				this.remoteImageToolPending.delete(cacheKey);
+			}
+		}
+	}
+
+	private async resolveRemoteImageTool(endpoint: ITurboFileTransferEndpoint, cacheKey: string, checkedAt: number): Promise<'magick' | 'convert' | undefined> {
 		let output = '';
 		try {
 			await this.withDirectorySshClient(endpoint, client => this.execRemote(client, `command -v magick >/dev/null 2>&1 && printf magick || (command -v convert >/dev/null 2>&1 && printf convert)`, {
@@ -2148,10 +2201,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}));
 			const normalized = output.trim() === 'convert' ? 'convert' : output.trim() === 'magick' ? 'magick' : undefined;
-			this.remoteImageToolCache.set(cacheKey, { checkedAt: now, tool: normalized });
+			this.remoteImageToolCache.set(cacheKey, { checkedAt, tool: normalized });
 			return normalized;
 		} catch {
-			this.remoteImageToolCache.set(cacheKey, { checkedAt: now, tool: undefined });
+			this.remoteImageToolCache.set(cacheKey, { checkedAt, tool: undefined });
 			return undefined;
 		}
 	}
@@ -2243,16 +2296,44 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private execRemoteBytes(client: ISSHClient, command: string): Promise<Buffer> {
+	private execRemoteBytes(client: ISSHClient, command: string, options: IRemoteExecOptions = {}): Promise<Buffer> {
 		return new Promise((resolve, reject) => {
+			let settled = false;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			const finish = (callback: () => void) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (timeout) {
+					clearTimeout(timeout);
+					timeout = undefined;
+				}
+				callback();
+			};
 			client.exec(command, (error, stream) => {
 				if (error) {
-					reject(error);
+					finish(() => reject(error));
 					return;
 				}
 
 				const chunks: Buffer[] = [];
 				let stderr = '';
+				if (options.timeoutMs && options.timeoutMs > 0) {
+					timeout = setTimeout(() => {
+						try {
+							stream.close?.();
+						} catch {
+							// Best-effort: older ssh2 channel typings may not expose close.
+						}
+						try {
+							stream.destroy?.();
+						} catch {
+							// Best-effort cleanup only.
+						}
+						finish(() => reject(new Error(`Remote command timed out after ${options.timeoutMs} ms.`)));
+					}, options.timeoutMs);
+				}
 				stream.on('data', data => {
 					chunks.push(typeof data === 'string' ? Buffer.from(data) : data);
 				});
@@ -2261,10 +2342,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 				stream.on('close', code => {
 					if (code === 0) {
-						resolve(Buffer.concat(chunks));
+						finish(() => resolve(Buffer.concat(chunks)));
 						return;
 					}
-					reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`));
+					finish(() => reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`)));
 				});
 			});
 		});
