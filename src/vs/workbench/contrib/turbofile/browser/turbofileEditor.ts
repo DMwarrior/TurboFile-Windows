@@ -1754,6 +1754,9 @@ export class TurboFileEditor extends EditorPane {
 		const toolbarTitle = $('.turbofile-browser-toolbar-title');
 		toolbarTitle.appendChild(renderTurboFileIcon(side === 'left' ? 'files' : 'folder-check', side === 'left' ? 'info' : 'success'));
 		toolbarTitle.append(browserTitle);
+		const itemCount = $('.turbofile-browser-item-count');
+		this.updatePaneItemCountElement(side, itemCount);
+		toolbarTitle.appendChild(itemCount);
 		toolbar.appendChild(toolbarTitle);
 		const toolbarAccent: TurboFileIconColor = side === 'left' ? 'primary' : 'success';
 		const gridAccent: TurboFileIconColor = side === 'left' ? 'info' : 'success';
@@ -5033,11 +5036,31 @@ export class TurboFileEditor extends EditorPane {
 			const path = row.dataset.turbofilePath;
 			row.classList.toggle('is-selected', !!path && state.selectedPaths.has(path));
 		}
+		const count = pane.querySelector<HTMLElement>('.turbofile-browser-item-count');
+		if (count) {
+			this.updatePaneItemCountElement(side, count);
+		}
 
 		const meta = this.container?.querySelector<HTMLElement>('.turbofile-task-meta');
 		if (meta && !this.tasks[0]) {
 			meta.textContent = this.statusMessage;
 		}
+	}
+
+	private updatePaneItemCountElement(side: 'left' | 'right', element: HTMLElement): void {
+		const selected = this.getPaneSelectedItemCount(side);
+		const total = this.getPaneItemCount(side);
+		element.textContent = `${selected} / ${total}`;
+		element.title = `已选择 ${selected} / 共 ${total} 项`;
+	}
+
+	private getPaneSelectedItemCount(side: 'left' | 'right'): number {
+		return Math.min(this.paneStates[side].selectedPaths.size, this.getPaneItemCount(side));
+	}
+
+	private getPaneItemCount(side: 'left' | 'right'): number {
+		const items = this.paneStates[side].items;
+		return Math.max(0, items.length - (items[0]?.parent ? 1 : 0));
 	}
 
 	private async openItem(side: 'left' | 'right', item: TurboFileFileItem): Promise<void> {

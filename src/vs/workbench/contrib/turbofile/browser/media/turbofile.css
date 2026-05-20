@@ -1791,6 +1791,18 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	margin-right: auto;
 }
 
+.turbofile-browser-item-count {
+	flex: 0 0 auto;
+	margin-left: 4px;
+	padding-left: 9px;
+	border-left: 1px solid color-mix(in srgb, var(--turbofile-browser-font-color, var(--vscode-foreground)) 18%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-size: calc(var(--turbofile-browser-font-size, 14px) * 0.92);
+	font-weight: 500;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
 .turbofile-toolbar-button,
 .turbofile-rail-button,
 .turbofile-primary-button,
