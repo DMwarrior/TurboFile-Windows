@@ -3240,7 +3240,7 @@ export class TurboFileEditor extends EditorPane {
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
 			return 'sftp-download';
 		}
-		if (sourceDevice.id === targetDevice.id) {
+		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			return 'remote-copy';
 		}
 		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice) && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync) {
@@ -5586,7 +5586,7 @@ export class TurboFileEditor extends EditorPane {
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
 
-		if (clipboard.operation === 'move' && sourceDevice.id === targetDevice.id) {
+		if (clipboard.operation === 'move' && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			const moved = await this.moveInternalItemsNatively(task, sourceDevice, clipboard.sourceSide, targetSide, sourceItems);
 			if (moved) {
 				this.internalTransferClipboard = undefined;
@@ -5698,13 +5698,25 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private isSameTransferTarget(sourceDevice: TurboFileDevice, sourcePath: string | undefined, targetDevice: TurboFileDevice, targetPath: string): boolean {
-		if (!sourcePath || sourceDevice.id !== targetDevice.id) {
+		if (!sourcePath || !this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			return false;
 		}
 		if (this.isWindowsDevice(sourceDevice)) {
 			return isSameWindowsPath(sourcePath, targetPath);
 		}
 		return trimTrailingSlash(sourcePath) === trimTrailingSlash(targetPath);
+	}
+
+	private isSameDeviceForNativeOperation(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice): boolean {
+		if (sourceDevice.id === targetDevice.id) {
+			return true;
+		}
+		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID || targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return false;
+		}
+		return sourceDevice.host === targetDevice.host
+			&& (sourceDevice.port || 22) === (targetDevice.port || 22)
+			&& sourceDevice.username === targetDevice.username;
 	}
 
 	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {
@@ -6118,7 +6130,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		if (device.id === targetDevice.id) {
+		if (this.isSameDeviceForNativeOperation(device, targetDevice)) {
 			const batch = items.length > 1;
 			const task = this.beginTask('rename', batch ? `剪切移动 ${items.length} 项` : `剪切移动 ${items[0].name}`, `${device.name} -> ${targetDevice.name}`);
 			task.progress = 0;

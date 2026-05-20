@@ -587,7 +587,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await this.moveLocalPathNative(endpoint.path, targetPath);
 			} else {
-				await this.withSftp(endpoint, sftp => this.renameRemote(sftp, endpoint.path, targetPath));
+				await this.moveRemotePathNative(endpoint, targetPath);
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			this.clearRemoteDirectoryListingCache(endpoint, targetPath);
@@ -1869,6 +1869,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		await runLocalCommand('mv', ['-f', sourcePath, targetPath]);
 	}
 
+	private async moveRemotePathNative(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<void> {
+		const command = looksLikeWindowsPath(endpoint.path) || looksLikeWindowsPath(targetPath)
+			? buildWindowsMoveCommand(endpoint.path, targetPath)
+			: `mkdir -p ${quotePosixShellArg(getRemoteParentPath(targetPath))} && mv -f ${quotePosixShellArg(endpoint.path)} ${quotePosixShellArg(targetPath)}`;
+		await this.withSshClient(endpoint, client => this.execRemote(client, command));
+	}
+
 	private async copyLocalFileWithProgress(sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
 		const source = createReadStream(sourcePath);
 		const target = createWriteStream(targetPath);
@@ -2754,18 +2761,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private renameRemote(sftp: ISFTPWrapper, sourcePath: string, targetPath: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			sftp.rename(sourcePath, targetPath, error => {
-				if (error) {
-					reject(error);
-					return;
-				}
-				resolve();
-			});
-		});
-	}
-
 	private fastGet(sftp: ISFTPWrapper, remotePath: string, localPath: string, options?: ISFTPTransferOptions): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const callback = (error: Error | undefined): void => {
@@ -3238,6 +3233,12 @@ function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
 	return `powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse"`;
+}
+
+function buildWindowsMoveCommand(sourcePath: string, targetPath: string): string {
+	const source = quotePowerShellLiteral(sourcePath);
+	const target = quotePowerShellLiteral(targetPath);
+	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force"`;
 }
 
 function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
