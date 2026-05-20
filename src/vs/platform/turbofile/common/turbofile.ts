@@ -139,6 +139,8 @@ export interface ITurboFileReadImageOptions extends ITurboFileReadFileOptions {
 	readonly format?: 'jpeg' | 'png' | 'webp';
 	readonly interpolation?: 'area' | 'lanczos';
 	readonly forceOriginal?: boolean;
+	readonly sourceSize?: number;
+	readonly sourceModified?: number;
 }
 
 export interface ITurboFileReadFileResult {

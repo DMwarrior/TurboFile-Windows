@@ -7,12 +7,12 @@ import type { ConnectConfig } from 'ssh2';
 import { createReadStream, createWriteStream, promises as fsp } from 'fs';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
-import { clipboard, nativeImage } from 'electron';
+import { app, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
 
@@ -24,6 +24,9 @@ const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
+const IMAGE_THUMBNAIL_CACHE_VERSION = 1;
+const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
+const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
 const REMOTE_DIRECTORY_SFTP_IDLE_MS = 5 * 60 * 1000;
 const REMOTE_DIRECTORY_LISTING_CACHE_TTL_MS = 2000;
@@ -182,6 +185,20 @@ interface IImageBufferResult {
 	readonly height?: number;
 }
 
+interface IImageSourceFingerprint {
+	readonly size: number;
+	readonly modified: number;
+}
+
+interface IImageThumbnailCacheMetadata {
+	readonly version: number;
+	readonly mime: string;
+	readonly size: number;
+	readonly width?: number;
+	readonly height?: number;
+	readonly createdAt: number;
+}
+
 export class TurboFileSshMainService implements ITurboFileSshService {
 	declare readonly _serviceBrand: undefined;
 
@@ -197,6 +214,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
+	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 
 	onDynamicSshTerminalData(sessionId: string): Event<string> {
 		const session = this.terminalSessions.get(sessionId);
@@ -2054,25 +2072,52 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const sourceMaxBytes = Math.max(options.maxBytes ?? DEFAULT_READ_LIMIT, DEFAULT_IMAGE_SOURCE_LIMIT);
 
 		if (forceOriginal) {
-			const buffer = endpoint.kind === 'local'
-				? await this.readLocalFileBuffer(endpoint.path, sourceMaxBytes)
-				: await this.readRemoteFileBuffer(endpoint, sourceMaxBytes);
-			if (getMimeType(endpoint.path) === 'image/bmp') {
-				const bmp = tryCreateBmpPngVariant(buffer, 0, 0);
-				if (bmp) {
-					return bmp;
-				}
-			}
-			const size = getImageSize(buffer);
-			return {
-				buffer,
-				mime: getMimeType(endpoint.path),
-				width: size?.width,
-				height: size?.height
-			};
+			return this.readOriginalImageBuffer(endpoint, sourceMaxBytes);
 		}
 
-		if (endpoint.kind === 'ssh' && !looksLikeWindowsPath(endpoint.path)) {
+		const sourceFingerprint = this.getImageSourceFingerprintFromOptions(options)
+			?? await this.getImageSourceFingerprint(endpoint).catch(() => undefined);
+		const thumbnailCacheKey = sourceFingerprint
+			? this.getImageThumbnailCacheKey(endpoint, sourceFingerprint, targetWidth, targetHeight, quality, format, interpolation)
+			: undefined;
+		if (thumbnailCacheKey) {
+			const cached = await this.readCachedImageThumbnail(thumbnailCacheKey);
+			if (cached) {
+				return cached;
+			}
+		}
+
+		const result = await this.readScaledImageBuffer(endpoint, sourceMaxBytes, targetWidth, targetHeight, quality, format, interpolation, sourceFingerprint);
+		if (thumbnailCacheKey) {
+			void this.writeCachedImageThumbnail(thumbnailCacheKey, result);
+		}
+		return result;
+	}
+
+	private async readOriginalImageBuffer(endpoint: ITurboFileTransferEndpoint, sourceMaxBytes: number): Promise<IImageBufferResult> {
+		const buffer = endpoint.kind === 'local'
+			? await this.readLocalFileBuffer(endpoint.path, sourceMaxBytes)
+			: await this.readRemoteFileBuffer(endpoint, sourceMaxBytes);
+		if (getMimeType(endpoint.path) === 'image/bmp') {
+			const bmp = tryCreateBmpPngVariant(buffer, 0, 0);
+			if (bmp) {
+				return bmp;
+			}
+		}
+		const size = getImageSize(buffer);
+		return {
+			buffer,
+			mime: getMimeType(endpoint.path),
+			width: size?.width,
+			height: size?.height
+		};
+	}
+
+	private async readScaledImageBuffer(endpoint: ITurboFileTransferEndpoint, sourceMaxBytes: number, targetWidth: number, targetHeight: number, quality: number, format: 'jpeg' | 'png' | 'webp', interpolation: 'area' | 'lanczos', sourceFingerprint: IImageSourceFingerprint | undefined): Promise<IImageBufferResult> {
+		const shouldTryRemoteTransform = endpoint.kind === 'ssh'
+			&& !looksLikeWindowsPath(endpoint.path)
+			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
+		if (shouldTryRemoteTransform) {
 			const thumbnail = await this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation);
 			if (thumbnail) {
 				return thumbnail;
@@ -2106,7 +2151,202 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				height: sourceSize.height
 			};
 		}
-		return this.transformImageBuffer(sourceBuffer, endpoint.path, targetWidth, targetHeight, quality, format);
+		try {
+			return this.transformImageBuffer(sourceBuffer, endpoint.path, targetWidth, targetHeight, quality, format);
+		} catch (error) {
+			if (sourceMime.startsWith('image/')) {
+				return {
+					buffer: sourceBuffer,
+					mime: sourceMime,
+					width: sourceSize?.width,
+					height: sourceSize?.height
+				};
+			}
+			throw error;
+		}
+	}
+
+	private getImageSourceFingerprintFromOptions(options: ITurboFileReadImageOptions): IImageSourceFingerprint | undefined {
+		const size = Number(options.sourceSize);
+		const modified = Number(options.sourceModified);
+		if (!Number.isFinite(size) || size < 0 || !Number.isFinite(modified) || modified <= 0) {
+			return undefined;
+		}
+		return { size, modified };
+	}
+
+	private async getImageSourceFingerprint(endpoint: ITurboFileTransferEndpoint): Promise<IImageSourceFingerprint | undefined> {
+		if (endpoint.kind === 'local') {
+			const stat = await fsp.stat(endpoint.path);
+			if (!stat.isFile()) {
+				return undefined;
+			}
+			return {
+				size: stat.size,
+				modified: Math.round(stat.mtimeMs)
+			};
+		}
+
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const stat = await this.remoteStat(sftp, endpoint.path);
+			if (!stat.isFile()) {
+				return undefined;
+			}
+			return {
+				size: stat.size,
+				modified: stat.mtime * 1000
+			};
+		});
+	}
+
+	private getImageThumbnailCacheKey(endpoint: ITurboFileTransferEndpoint, sourceFingerprint: IImageSourceFingerprint, width: number, height: number, quality: number, format: 'jpeg' | 'png' | 'webp', interpolation: 'area' | 'lanczos'): string {
+		const endpointKey = endpoint.kind === 'local'
+			? { kind: endpoint.kind, path: endpoint.path }
+			: {
+				kind: endpoint.kind,
+				host: endpoint.connection?.host ?? '',
+				port: endpoint.connection?.port || 22,
+				username: endpoint.connection?.username ?? '',
+				path: endpoint.path
+			};
+		return createHash('sha256').update(JSON.stringify({
+			version: IMAGE_THUMBNAIL_CACHE_VERSION,
+			endpoint: endpointKey,
+			source: sourceFingerprint,
+			width,
+			height,
+			quality,
+			format,
+			interpolation
+		})).digest('hex');
+	}
+
+	private async readCachedImageThumbnail(cacheKey: string): Promise<IImageBufferResult | undefined> {
+		const paths = this.getImageThumbnailCachePaths(cacheKey);
+		try {
+			const [metadataContent, buffer] = await Promise.all([
+				fsp.readFile(paths.metadataPath, 'utf8'),
+				fsp.readFile(paths.dataPath)
+			]);
+			const metadata = JSON.parse(metadataContent) as Partial<IImageThumbnailCacheMetadata>;
+			if (metadata.version !== IMAGE_THUMBNAIL_CACHE_VERSION || metadata.size !== buffer.byteLength || typeof metadata.mime !== 'string') {
+				return undefined;
+			}
+			const now = new Date();
+			void fsp.utimes(paths.dataPath, now, now).catch(() => undefined);
+			return {
+				buffer,
+				mime: metadata.mime,
+				width: typeof metadata.width === 'number' ? metadata.width : undefined,
+				height: typeof metadata.height === 'number' ? metadata.height : undefined
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async writeCachedImageThumbnail(cacheKey: string, result: IImageBufferResult): Promise<void> {
+		if (!result.buffer.byteLength || result.buffer.byteLength > IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES) {
+			return;
+		}
+
+		const paths = this.getImageThumbnailCachePaths(cacheKey);
+		const metadata: IImageThumbnailCacheMetadata = {
+			version: IMAGE_THUMBNAIL_CACHE_VERSION,
+			mime: result.mime,
+			size: result.buffer.byteLength,
+			width: result.width,
+			height: result.height,
+			createdAt: Date.now()
+		};
+		try {
+			await fsp.mkdir(dirname(paths.dataPath), { recursive: true });
+			await Promise.all([
+				fsp.writeFile(paths.dataPath, result.buffer),
+				fsp.writeFile(paths.metadataPath, JSON.stringify(metadata))
+			]);
+			this.scheduleTrimImageThumbnailCache();
+		} catch {
+			// Thumbnail cache is purely an acceleration layer; failed writes must never block image loading.
+		}
+	}
+
+	private getImageThumbnailCachePaths(cacheKey: string): { readonly dataPath: string; readonly metadataPath: string } {
+		const bucket = cacheKey.slice(0, 2) || '00';
+		const root = this.getImageThumbnailCacheRoot();
+		return {
+			dataPath: join(root, bucket, `${cacheKey}.bin`),
+			metadataPath: join(root, bucket, `${cacheKey}.json`)
+		};
+	}
+
+	private getImageThumbnailCacheRoot(): string {
+		try {
+			return join(app.getPath('userData'), 'turbofile-image-cache', `v${IMAGE_THUMBNAIL_CACHE_VERSION}`);
+		} catch {
+			return join(tmpdir(), 'turbofile-image-cache', `v${IMAGE_THUMBNAIL_CACHE_VERSION}`);
+		}
+	}
+
+	private scheduleTrimImageThumbnailCache(): void {
+		if (this.imageThumbnailCacheTrimPromise) {
+			return;
+		}
+		this.imageThumbnailCacheTrimPromise = this.trimImageThumbnailCache()
+			.finally(() => {
+				this.imageThumbnailCacheTrimPromise = undefined;
+			});
+	}
+
+	private async trimImageThumbnailCache(): Promise<void> {
+		const root = this.getImageThumbnailCacheRoot();
+		const entries: Array<{ readonly dataPath: string; readonly metadataPath: string; readonly size: number; readonly mtimeMs: number }> = [];
+		const visit = async (directory: string): Promise<void> => {
+			let children: Array<{ readonly name: string; isDirectory(): boolean; isFile(): boolean }>;
+			try {
+				children = await fsp.readdir(directory, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const child of children) {
+				const childPath = join(directory, child.name);
+				if (child.isDirectory()) {
+					await visit(childPath);
+					continue;
+				}
+				if (!child.isFile() || !child.name.endsWith('.bin')) {
+					continue;
+				}
+				const stat = await fsp.stat(childPath).catch(() => undefined);
+				if (!stat) {
+					continue;
+				}
+				entries.push({
+					dataPath: childPath,
+					metadataPath: join(directory, `${child.name.slice(0, -4)}.json`),
+					size: stat.size,
+					mtimeMs: stat.mtimeMs
+				});
+			}
+		};
+
+		await visit(root);
+		let totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+		if (totalBytes <= IMAGE_THUMBNAIL_CACHE_MAX_BYTES) {
+			return;
+		}
+
+		entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+		for (const entry of entries) {
+			if (totalBytes <= IMAGE_THUMBNAIL_CACHE_MAX_BYTES) {
+				break;
+			}
+			await Promise.all([
+				fsp.rm(entry.dataPath, { force: true }).catch(() => undefined),
+				fsp.rm(entry.metadataPath, { force: true }).catch(() => undefined)
+			]);
+			totalBytes -= entry.size;
+		}
 	}
 
 	private async tryReadRemoteThumbnailViaImageMagick(endpoint: ITurboFileTransferEndpoint, width: number, height: number, quality: number, format: 'jpeg' | 'png' | 'webp', interpolation: 'area' | 'lanczos'): Promise<IImageBufferResult | undefined> {
@@ -2160,7 +2400,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 			const cacheKey = this.getRemoteImageToolCacheKey(endpoint.connection);
-			this.remoteImageToolCache.delete(cacheKey);
+			this.remoteImageToolCache.set(cacheKey, { checkedAt: Date.now(), tool: undefined });
 			return undefined;
 		}
 	}

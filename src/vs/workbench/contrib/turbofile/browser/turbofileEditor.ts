@@ -398,7 +398,6 @@ const IMAGE_GRID_THUMB_QUALITY = 72;
 const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
 const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
 const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
-const IMAGE_GRID_REMOTE_ORIGINAL_THUMB_MAX_BYTES = 2 * 1024 * 1024;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -6603,7 +6602,9 @@ export class TurboFileEditor extends EditorPane {
 			height: options.height || 0,
 			quality: options.quality || 0,
 			format: options.format || '',
-			forceOriginal: !!options.forceOriginal
+			forceOriginal: !!options.forceOriginal,
+			sourceSize: options.sourceSize || 0,
+			sourceModified: options.sourceModified || 0
 		});
 	}
 
@@ -6650,22 +6651,15 @@ export class TurboFileEditor extends EditorPane {
 
 		try {
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
-			const useOriginalRemoteThumbnail = device.id !== LOCAL_WINDOWS_DEVICE_ID
-				&& image.item.rawSize > 0
-				&& image.item.rawSize <= IMAGE_GRID_REMOTE_ORIGINAL_THUMB_MAX_BYTES;
-			const result = await this.readImageGridImage(device, image.item.path, useOriginalRemoteThumbnail
-				? {
-					encoding: 'base64',
-					forceOriginal: true,
-					maxBytes: IMAGE_GRID_REMOTE_ORIGINAL_THUMB_MAX_BYTES
-				}
-				: {
-					encoding: 'base64',
-					width: requestWidth,
-					quality: IMAGE_GRID_THUMB_QUALITY,
-					format: 'webp',
-					interpolation: 'lanczos'
-				});
+			const result = await this.readImageGridImage(device, image.item.path, {
+				encoding: 'base64',
+				width: requestWidth,
+				quality: IMAGE_GRID_THUMB_QUALITY,
+				format: 'webp',
+				interpolation: 'lanczos',
+				sourceSize: image.item.rawSize,
+				sourceModified: image.item.rawModified
+			});
 			if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
 				return;
 			}
@@ -6720,7 +6714,9 @@ export class TurboFileEditor extends EditorPane {
 				format: 'jpeg',
 				interpolation: 'lanczos',
 				forceOriginal: true,
-				maxBytes: 128 * 1024 * 1024
+				maxBytes: 128 * 1024 * 1024,
+				sourceSize: image.item.rawSize,
+				sourceModified: image.item.rawModified
 			});
 			if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
 				return;
