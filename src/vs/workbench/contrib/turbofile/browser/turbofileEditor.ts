@@ -3222,9 +3222,9 @@ export class TurboFileEditor extends EditorPane {
 			case 'local-copy':
 				return '本地复制';
 			case 'remote-move':
-				return '????';
+				return '同机移动';
 			case 'local-move':
-				return '????';
+				return '本机移动';
 			default:
 				return strategy;
 		}
@@ -5414,6 +5414,10 @@ export class TurboFileEditor extends EditorPane {
 			};
 		}
 
+		if (operation === 'move' && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return this.moveExternalWindowsItemsNatively(targetSide, task, sourceItems);
+		}
+
 		let completed = 0;
 		let failed = 0;
 		let totalBytes = 0;
@@ -5582,6 +5586,14 @@ export class TurboFileEditor extends EditorPane {
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
 
+		if (clipboard.operation === 'move' && sourceDevice.id === targetDevice.id) {
+			const moved = await this.moveInternalItemsNatively(task, sourceDevice, clipboard.sourceSide, targetSide, sourceItems);
+			if (moved) {
+				this.internalTransferClipboard = undefined;
+			}
+			return moved;
+		}
+
 		let completed = 0;
 		let failed = 0;
 		let totalBytes = 0;
@@ -5693,6 +5705,156 @@ export class TurboFileEditor extends EditorPane {
 			return isSameWindowsPath(sourcePath, targetPath);
 		}
 		return trimTrailingSlash(sourcePath) === trimTrailingSlash(targetPath);
+	}
+
+	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {
+		const batch = sourceItems.length > 1;
+		const failures: string[] = [];
+		const strategy = this.isWindowsDevice(device) ? 'local-move' : 'remote-move';
+		let completed = 0;
+		let totalBytes = 0;
+
+		this.removePaneItems(sourceSide, sourceItems.filter(item => !!item.path));
+		for (const [index, sourceItem] of sourceItems.entries()) {
+			const transferItem = task.transferItems?.[index];
+			task.activeTransferItemIndex = index;
+			if (transferItem) {
+				transferItem.status = 'running';
+				transferItem.startedAt = Date.now();
+				transferItem.progress = 0;
+				transferItem.error = undefined;
+				transferItem.speedBytesPerSecond = 0;
+				transferItem.lastSampleAt = undefined;
+				transferItem.lastSampleBytes = undefined;
+				transferItem.speedSamples = [];
+				transferItem.strategy = strategy;
+			}
+
+			if (!sourceItem.path) {
+				failures.push(`${sourceItem.name}: path missing`);
+				continue;
+			}
+
+			const itemBytes = Math.max(sourceItem.rawSize, transferItem?.totalBytes ?? 0, 0);
+			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(device));
+			if (this.isSameTransferTarget(device, sourceItem.path, device, targetPath)) {
+				if (transferItem) {
+					transferItem.status = 'error';
+					transferItem.error = '源路径和目标路径相同，已跳过。';
+					transferItem.endedAt = Date.now();
+				}
+				failures.push(`${sourceItem.name}: 源路径和目标路径相同`);
+				continue;
+			}
+
+			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
+			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path), targetPath);
+			if (result.ok) {
+				completed++;
+				totalBytes += itemBytes;
+				if (transferItem) {
+					transferItem.status = 'success';
+					transferItem.progress = 100;
+					transferItem.transferredBytes = itemBytes;
+					transferItem.totalBytes = Math.max(itemBytes, transferItem.totalBytes);
+					transferItem.strategy = strategy;
+					transferItem.endedAt = Date.now();
+				}
+			} else {
+				if (transferItem) {
+					transferItem.status = 'error';
+					transferItem.error = result.message;
+					transferItem.endedAt = Date.now();
+				}
+				failures.push(`${sourceItem.name}: ${result.message}`);
+			}
+		}
+
+		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
+		await Promise.all([...new Set([sourceSide, targetSide])].map(side => this.refreshPane(side, { force: true })));
+		if (failures.length) {
+			this.finishTask(task, 'error', batch ? `同设备移动完成 ${completed} 项，失败 ${failures.length} 项。` : `同设备移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			return false;
+		}
+
+		this.finishTask(task, 'success', batch ? `同设备移动完成：${completed} 项。` : `同设备移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy });
+		return true;
+	}
+
+	private async moveExternalWindowsItemsNatively(targetSide: 'left' | 'right', task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {
+		const batch = sourceItems.length > 1;
+		const failures: string[] = [];
+		const strategy = 'local-move';
+		let completed = 0;
+		let totalBytes = 0;
+
+		for (const [index, sourceItem] of sourceItems.entries()) {
+			const transferItem = task.transferItems?.[index];
+			task.activeTransferItemIndex = index;
+			if (transferItem) {
+				transferItem.status = 'running';
+				transferItem.startedAt = Date.now();
+				transferItem.progress = 0;
+				transferItem.error = undefined;
+				transferItem.speedBytesPerSecond = 0;
+				transferItem.lastSampleAt = undefined;
+				transferItem.lastSampleBytes = undefined;
+				transferItem.speedSamples = [];
+				transferItem.strategy = strategy;
+			}
+
+			if (!sourceItem.path) {
+				failures.push(`${sourceItem.name}: path missing`);
+				continue;
+			}
+
+			const itemBytes = Math.max(sourceItem.rawSize, transferItem?.totalBytes ?? 0, 0);
+			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, true);
+			if (this.isSameTransferTarget(this.localWindowsDevice, sourceItem.path, this.localWindowsDevice, targetPath)) {
+				if (transferItem) {
+					transferItem.status = 'error';
+					transferItem.error = '源路径和目标路径相同，已跳过。';
+					transferItem.endedAt = Date.now();
+				}
+				failures.push(`${sourceItem.name}: 源路径和目标路径相同`);
+				continue;
+			}
+
+			this.updateTask(task, batch ? `正在本机移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在本机移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
+			const result = await this.sshService.renamePath(await this.toTransferEndpoint(this.localWindowsDevice, sourceItem.path), targetPath);
+			if (result.ok) {
+				completed++;
+				totalBytes += itemBytes;
+				if (transferItem) {
+					transferItem.status = 'success';
+					transferItem.progress = 100;
+					transferItem.transferredBytes = itemBytes;
+					transferItem.totalBytes = Math.max(itemBytes, transferItem.totalBytes);
+					transferItem.strategy = strategy;
+					transferItem.endedAt = Date.now();
+				}
+			} else {
+				if (transferItem) {
+					transferItem.status = 'error';
+					transferItem.error = result.message;
+					transferItem.endedAt = Date.now();
+				}
+				failures.push(`${sourceItem.name}: ${result.message}`);
+			}
+		}
+
+		this.updateTask(task, '正在刷新本机目录', 92);
+		await Promise.all([
+			this.refreshPane(targetSide, { force: true }),
+			this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean))
+		]);
+		if (failures.length) {
+			this.finishTask(task, 'error', batch ? `本机移动完成 ${completed} 项，失败 ${failures.length} 项。` : `本机移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			return false;
+		}
+
+		this.finishTask(task, 'success', batch ? `本机移动完成：${completed} 项。` : `本机移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy });
+		return true;
 	}
 
 	private async deleteInternalClipboardSources(task: TurboFileTask, sourceDevice: TurboFileDevice, sourceSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
@@ -5949,9 +6111,21 @@ export class TurboFileEditor extends EditorPane {
 	private async moveSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): Promise<void> {
 		const items = this.getSelectedTransferItems(sourceSide);
 		const device = this.getPaneDevice(sourceSide);
-		if (!items.length || !device) {
+		const targetDevice = this.getPaneDevice(targetSide);
+		if (!items.length || !device || !targetDevice) {
 			this.statusMessage = '请先选择要剪切的文件或目录。';
 			this.render();
+			return;
+		}
+
+		if (device.id === targetDevice.id) {
+			const batch = items.length > 1;
+			const task = this.beginTask('rename', batch ? `剪切移动 ${items.length} 项` : `剪切移动 ${items[0].name}`, `${device.name} -> ${targetDevice.name}`);
+			task.progress = 0;
+			task.cancelRequested = false;
+			task.transferItems = items.map(item => this.createTransferTaskItem(item));
+			task.speedSamples = [];
+			await this.moveInternalItemsNatively(task, device, sourceSide, targetSide, items);
 			return;
 		}
 
