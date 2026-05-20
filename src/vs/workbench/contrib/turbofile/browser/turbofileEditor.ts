@@ -567,6 +567,7 @@ export class TurboFileEditor extends EditorPane {
 	private imagePreviewResizeObserver: ResizeObserver | undefined;
 	private readonly imageReadCache = new Map<string, TurboFileCachedImageReadResult>();
 	private readonly fileListScrollRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
+	private readonly fileListRestoreRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRenderedRange: Record<'left' | 'right', { startIndex: number; endIndex: number; total: number } | undefined> = { left: undefined, right: undefined };
 	private readonly paneDirectoryCache = new Map<string, TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryInflight = new Map<string, Promise<TurboFileDirectoryCacheEntry>>();
@@ -769,12 +770,18 @@ export class TurboFileEditor extends EditorPane {
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
 		this.clearFileListScrollRaf('right');
+		this.clearFileListRestoreRaf('left');
+		this.clearFileListRestoreRaf('right');
+		this.releaseImageGridStateImages(this.imageGridState);
 		this.disposeImageGridObserver();
 		this.clearImageGridScrollTimer();
 		this.clearImageGridScrollRaf();
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
 		this.clearImageGridLoadedImageIndexes();
+		this.imagePreviewAnalysis = undefined;
+		this.clearImagePreviewRender();
+		this.imageGridRenderedRange = undefined;
 		super.dispose();
 	}
 
@@ -1577,12 +1584,17 @@ export class TurboFileEditor extends EditorPane {
 
 	private setActivePage(page: TurboFileWorkbenchPage): void {
 		if (page !== 'images' && this.activePage === 'images') {
+			this.releaseImageGridStateImages(this.imageGridState);
 			this.imageGridState = undefined;
 			this.disposeImageGridObserver();
 			this.clearImageGridScrollTimer();
 			this.clearImageGridScrollRaf();
 			this.clearImageGridThumbnailQueue();
 			this.clearImageGridPreviewPrefetchTimer();
+			this.clearImageGridLoadedImageIndexes();
+			this.imagePreviewAnalysis = undefined;
+			this.clearImagePreviewRender();
+			this.imageGridRenderedRange = undefined;
 		}
 		this.activePage = page;
 		if (page !== 'transfer') {
@@ -2200,6 +2212,7 @@ export class TurboFileEditor extends EditorPane {
 		const range = this.getFileListRange(state);
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = state.scrollTop;
+		this.restoreRenderedFileListScroll(side, list);
 	}
 
 	private renderFileListSlice(side: 'left' | 'right', list: HTMLElement, range: TurboFileFileListRange): void {
@@ -2302,6 +2315,7 @@ export class TurboFileEditor extends EditorPane {
 		state.viewportHeight = 0;
 		this.fileListRenderedRange[side] = undefined;
 		this.clearFileListScrollRaf(side);
+		this.clearFileListRestoreRaf(side);
 	}
 
 	private clearFileListScrollRaf(side: 'left' | 'right'): void {
@@ -2311,6 +2325,44 @@ export class TurboFileEditor extends EditorPane {
 		}
 		getWindow(this.container).cancelAnimationFrame(this.fileListScrollRaf[side]);
 		this.fileListScrollRaf[side] = 0;
+	}
+
+	private restoreRenderedFileListScroll(side: 'left' | 'right', list: HTMLElement): void {
+		if (!this.container) {
+			return;
+		}
+		this.clearFileListRestoreRaf(side);
+		this.fileListRestoreRaf[side] = getWindow(this.container).requestAnimationFrame(() => {
+			this.fileListRestoreRaf[side] = 0;
+			const currentList = this.container?.querySelector<HTMLElement>(`.turbofile-pane[data-turbofile-side="${side}"] .turbofile-file-list`);
+			if (!currentList || currentList !== list || !list.isConnected) {
+				return;
+			}
+
+			const state = this.paneStates[side];
+			state.viewportHeight = list.clientHeight || state.viewportHeight || FILE_LIST_DEFAULT_VIEWPORT_HEIGHT;
+			this.clampFileListScrollTop(side);
+			if (list.scrollTop !== state.scrollTop) {
+				list.scrollTop = state.scrollTop;
+			}
+
+			state.scrollTop = list.scrollTop;
+			const range = this.getFileListRange(state);
+			const rendered = this.fileListRenderedRange[side];
+			if (!rendered || rendered.startIndex !== range.startIndex || rendered.endIndex !== range.endIndex || rendered.total !== this.getVisibleFileItems(state).length) {
+				this.renderFileListSlice(side, list, range);
+				list.scrollTop = state.scrollTop;
+			}
+		});
+	}
+
+	private clearFileListRestoreRaf(side: 'left' | 'right'): void {
+		if (!this.fileListRestoreRaf[side] || !this.container) {
+			this.fileListRestoreRaf[side] = 0;
+			return;
+		}
+		getWindow(this.container).cancelAnimationFrame(this.fileListRestoreRaf[side]);
+		this.fileListRestoreRaf[side] = 0;
 	}
 
 	private renderFileRow(side: 'left' | 'right', item: TurboFileFileItem, selected: boolean): HTMLElement {
@@ -6145,6 +6197,7 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridScrollRaf();
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
+		this.releaseImageGridStateImages(state);
 		this.clearImageGridLoadedImageIndexes();
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
@@ -7071,10 +7124,21 @@ export class TurboFileEditor extends EditorPane {
 		this.releaseImageBlobUrl(image.previewUrl);
 		image.thumbnailUrl = undefined;
 		image.thumbnailContent = '';
+		image.thumbnailLoading = false;
 		image.thumbnailError = undefined;
 		image.previewUrl = undefined;
 		image.previewContent = '';
+		image.previewLoading = false;
 		image.previewError = undefined;
+	}
+
+	private releaseImageGridStateImages(state: TurboFileImageGridState | undefined): void {
+		if (!state) {
+			return;
+		}
+		for (const image of state.images) {
+			this.releaseImageGridImage(image);
+		}
 	}
 
 	private getImageGridCircularDistance(state: TurboFileImageGridState, index: number, selectedIndex: number): number {
