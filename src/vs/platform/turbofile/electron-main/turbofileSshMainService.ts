@@ -40,6 +40,8 @@ const SFTP_RELAY_CHUNK_SIZE = 512 * 1024;
 const SFTP_RELAY_CONCURRENCY = 64;
 const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 8;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
+const LOCAL_COPY_DIRECTORY_CONCURRENCY = 16;
+const LOCAL_COPY_FILE_HIGH_WATER_MARK = 1024 * 1024;
 const RSYNC_DIRECTORY_PARALLEL_WORKERS = 4;
 const BATCH_TRANSFER_WORKERS = 8;
 const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
@@ -345,13 +347,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			if (request.source.kind === 'local' && request.target.kind === 'local') {
+				this.fireTransferProgress(request, 0, Math.max(0, request.expectedBytes ?? 0), 'prepare', 'Preparing local copy.', true);
 				const totalBytes = await getLocalPathTransferSize(request.source.path, request.expectedBytes);
-				this.fireTransferProgress(request, 0, totalBytes, 'prepare', 'Preparing local copy.', true);
 				this.fireTransferProgress(request, 0, totalBytes, 'transfer', 'Copying locally.', true);
-				await this.copyLocalPathNative(request.source.path, request.target.path, request.progressId);
+				let transferredBytes = 0;
+				const onDelta = (delta: number): void => {
+					this.throwIfTransferCanceled(request.progressId);
+					transferredBytes += delta;
+					this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'transfer', 'Copying locally.');
+				};
+				await this.copyLocalPath(request.source.path, request.target.path, onDelta, request.progressId);
 				this.throwIfTransferCanceled(request.progressId);
-				this.fireTransferProgress(request, totalBytes, totalBytes, 'complete', 'Local copy completed.', true);
-				return this.createTransferResult(true, strategy, totalBytes, 'Local copy completed.', startedAt);
+				const bytes = Math.max(totalBytes, transferredBytes);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local copy completed.', true);
+				return this.createTransferResult(true, strategy, bytes, 'Local copy completed.', startedAt);
 			}
 
 			if (request.source.kind === 'local' && request.target.kind === 'ssh') {
@@ -618,25 +627,61 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async runLocalNativeBatchTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult> {
-		this.fireTransferProgress(request, 0, expectedBytes, 'transfer', operation === 'move' ? 'Moving locally.' : 'Copying locally.', true, {
+		const totalBytes = operation === 'copy' ? await this.getLocalBatchTransferSize(items, expectedBytes) : expectedBytes;
+		this.fireTransferProgress(request, 0, totalBytes, 'transfer', operation === 'move' ? 'Moving locally.' : 'Copying locally.', true, {
 			completedItems: 0,
 			totalItems: items.length,
 			currentName: items[0]?.displayName ?? items[0]?.targetName
 		});
 		const sources = items.map(item => item.sourcePath);
-		await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
-		if (platform() === 'win32' || looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
+		if (operation === 'copy') {
+			await fsp.mkdir(request.targetDirectory.path, { recursive: true });
+			let transferredBytes = 0;
+			for (const [index, item] of items.entries()) {
+				this.throwIfTransferCanceled(request.progressId);
+				const currentName = item.displayName ?? item.targetName;
+				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'transfer', 'Copying locally.', true, {
+					completedItems: index,
+					totalItems: items.length,
+					currentName
+				});
+				await this.copyLocalPath(item.sourcePath, this.joinBatchTargetPath(request.targetDirectory, item.targetName), delta => {
+					this.throwIfTransferCanceled(request.progressId);
+					transferredBytes += delta;
+					this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'transfer', 'Copying locally.', false, {
+						completedItems: index,
+						totalItems: items.length,
+						currentName
+					});
+				}, request.progressId);
+				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'transfer', 'Copying locally.', true, {
+					completedItems: index + 1,
+					totalItems: items.length,
+					currentName
+				});
+			}
+		} else if (platform() === 'win32' || looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
+			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
 			await runLocalPowerShellScript(buildLocalWindowsBatchScript(sources, request.targetDirectory.path, operation));
 		} else {
+			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
 			await fsp.mkdir(request.targetDirectory.path, { recursive: true });
-			await runLocalCommand(operation === 'move' ? 'mv' : 'cp', operation === 'move' ? ['-f', ...sources, request.targetDirectory.path] : ['-a', ...sources, request.targetDirectory.path]);
+			await runLocalCommand('mv', ['-f', ...sources, request.targetDirectory.path]);
 		}
 		this.throwIfTransferCanceled(request.progressId);
-		this.fireTransferProgress(request, expectedBytes, expectedBytes, 'complete', 'Batch local transfer completed.', true, {
+		this.fireTransferProgress(request, totalBytes, totalBytes, 'complete', 'Batch local transfer completed.', true, {
 			completedItems: items.length,
 			totalItems: items.length
 		});
-		return this.createBatchTransferResult(true, operation === 'move' ? 'local-copy' : 'local-copy', expectedBytes, 'Batch local transfer completed.', items.length, 0, [], startedAt);
+		return this.createBatchTransferResult(true, operation === 'move' ? 'local-copy' : 'local-copy', totalBytes, 'Batch local transfer completed.', items.length, 0, [], startedAt);
+	}
+
+	private async getLocalBatchTransferSize(items: readonly ITurboFileBatchTransferItem[], expectedBytes: number): Promise<number> {
+		if (expectedBytes > 0) {
+			return expectedBytes;
+		}
+		const sizes = await mapLimit(items, BATCH_TRANSFER_DIRECTORY_WORKERS, item => getLocalPathTransferSize(item.sourcePath, item.expectedBytes));
+		return sizes.reduce((total, size) => total + size, 0);
 	}
 
 	private async runSameRemoteNativeBatchTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult> {
@@ -2303,7 +2348,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (stat.isDirectory()) {
 			await fsp.mkdir(targetPath, { recursive: true });
 			const children = await fsp.readdir(sourcePath, { withFileTypes: true });
-			await mapLimit(children, SFTP_DIRECTORY_ENTRY_CONCURRENCY, async child => {
+			await mapLimit(children, LOCAL_COPY_DIRECTORY_CONCURRENCY, async child => {
 				this.throwIfTransferCanceled(progressId);
 				await this.copyLocalPath(join(sourcePath, child.name), join(targetPath, child.name), onDelta, progressId);
 			});
@@ -2312,18 +2357,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		await fsp.mkdir(dirname(targetPath), { recursive: true });
 		await this.copyLocalFileWithProgress(sourcePath, targetPath, onDelta, progressId);
-	}
-
-	private async copyLocalPathNative(sourcePath: string, targetPath: string, progressId?: string): Promise<void> {
-		this.throwIfTransferCanceled(progressId);
-		if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
-			await ensureLocalParentDirectory(targetPath);
-			await runLocalPowerShellScript(buildLocalWindowsCopyScript(sourcePath, targetPath));
-		} else {
-			await ensureLocalParentDirectory(targetPath);
-			await runLocalCommand('cp', ['-a', sourcePath, targetPath]);
-		}
-		this.throwIfTransferCanceled(progressId);
 	}
 
 	private async moveLocalPathNative(sourcePath: string, targetPath: string): Promise<void> {
@@ -2373,8 +2406,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async copyLocalFileWithProgress(sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
-		const source = createReadStream(sourcePath);
-		const target = createWriteStream(targetPath);
+		const source = createReadStream(sourcePath, { highWaterMark: LOCAL_COPY_FILE_HIGH_WATER_MARK });
+		const target = createWriteStream(targetPath, { highWaterMark: LOCAL_COPY_FILE_HIGH_WATER_MARK });
 		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
 			const error = new TurboFileTransferCanceledError();
 			source.destroy(error);
@@ -3741,12 +3774,6 @@ function withPowerShellDefaults(script: string): string {
 	return `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; ${script}`;
 }
 
-function buildLocalWindowsCopyScript(sourcePath: string, targetPath: string): string {
-	const source = quotePowerShellLiteral(sourcePath);
-	const target = quotePowerShellLiteral(targetPath);
-	return withPowerShellDefaults(`$src=${source}; $dst=${target}; if (Test-Path -LiteralPath $src -PathType Container) { if (Test-Path -LiteralPath $dst) { Get-ChildItem -LiteralPath $src -Force | Copy-Item -Destination $dst -Force -Recurse } else { Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }`);
-}
-
 function buildLocalWindowsMoveScript(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
@@ -4271,8 +4298,7 @@ async function getLocalPathTransferSize(path: string, expectedBytes?: number): P
 	if (expectedBytes && expectedBytes > 0) {
 		return expectedBytes;
 	}
-	const stat = await fsp.stat(path);
-	return stat.isDirectory() ? 0 : stat.size;
+	return getLocalPathSize(path);
 }
 
 function compareFileEntries(a: ITurboFileFileEntry, b: ITurboFileFileEntry): number {
