@@ -2690,9 +2690,7 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(summary);
 
 		const list = $('.turbofile-live-transfer-list');
-		for (const { task, item } of transferItems) {
-			list.appendChild(this.renderLiveTransferFileCard(task, item, false));
-		}
+		list.appendChild(this.renderLiveTransferFileCard(tasks[0], this.createAggregateTransferItem(tasks, transferItems, aggregate), false));
 
 		const footer = $('.turbofile-live-transfer-footer');
 		footer.textContent = `${transferItems.filter(({ item }) => item.status === 'running').length || transferItems.filter(({ item }) => item.status === 'waiting').length} 个任务正在传输中`;
@@ -2834,11 +2832,36 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
+	private createAggregateTransferItem(tasks: TurboFileTask[], transferItems: Array<{ task: TurboFileTask; item: TurboFileTaskTransferItem }>, aggregate: { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number }): TurboFileTaskTransferItem {
+		const running = transferItems.find(({ item }) => item.status === 'running') ?? transferItems.find(({ item }) => item.status === 'waiting') ?? transferItems[0];
+		const runningTask = tasks.find(task => task.status === 'running') ?? tasks[0];
+		return {
+			name: running?.item.status === 'running' ? `正在传输：${running.item.name}` : `多文件传输 ${transferItems.length} 项`,
+			type: running?.item.type ?? 'file',
+			displaySize: `${transferItems.length} 项`,
+			rawSize: aggregate.totalBytes,
+			status: runningTask.status === 'running' ? 'running' : runningTask.status,
+			progress: aggregate.totalBytes > 0 ? Math.round((aggregate.transferredBytes / aggregate.totalBytes) * 100) : runningTask.progress,
+			transferredBytes: aggregate.transferredBytes,
+			totalBytes: aggregate.totalBytes,
+			speedBytesPerSecond: aggregate.speedBytesPerSecond,
+			remainingMs: aggregate.remainingMs,
+			strategy: running?.item.strategy ?? runningTask.strategy,
+			speedSamples: runningTask.speedSamples ?? []
+		};
+	}
+
 	private getLiveTransferAggregate(tasks: TurboFileTask[]): { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number } {
 		let transferredBytes = 0;
 		let totalBytes = 0;
 		let speedBytesPerSecond = 0;
 		for (const task of tasks) {
+			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
+				transferredBytes += task.transferredBytes ?? 0;
+				totalBytes += task.totalBytes ?? 0;
+				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
+				continue;
+			}
 			const items = this.getLiveTransferItems(task);
 			for (const item of items) {
 				transferredBytes += item.transferredBytes;
@@ -3120,7 +3143,12 @@ export class TurboFileEditor extends EditorPane {
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
 			: event.phase === 'complete' ? 100 : Math.max(8, task.progress);
-		const detail = this.formatTransferProgressDetail(event.phase, transferredBytes, totalBytes);
+		let detail = this.formatTransferProgressDetail(event.phase, transferredBytes, totalBytes);
+		if (event.totalItems && event.totalItems > 1) {
+			const completedItems = Math.max(0, Math.min(event.completedItems ?? 0, event.totalItems));
+			const currentName = event.currentName ? `：${event.currentName}` : '';
+			detail = `${detail} · ${completedItems}/${event.totalItems}${currentName}`;
+		}
 		const now = Date.now();
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
@@ -5436,6 +5464,14 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		if (sourceItems.length > 1) {
+			const transferred = await this.transferItemsBatch(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceItems, operation);
+			if (operation === 'move') {
+				await this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean));
+			}
+			return transferred;
+		}
+
 		const batch = sourceItems.length > 1;
 		const actionLabel = operation === 'move' ? '剪切粘贴' : '本地复制';
 		const label = batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`;
@@ -5620,6 +5656,13 @@ export class TurboFileEditor extends EditorPane {
 
 		const sourceDevice = clipboard.sourceDevice;
 		const sourceItems = clipboard.items.map(item => ({ ...item }));
+		if (sourceItems.length > 1) {
+			const transferred = await this.transferItemsBatch(clipboard.sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, clipboard.operation);
+			if (transferred && clipboard.operation === 'move') {
+				this.internalTransferClipboard = undefined;
+			}
+			return transferred;
+		}
 		const batch = sourceItems.length > 1;
 		const actionLabel = clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴';
 		const task = this.beginTask('transfer', batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`, `${sourceDevice.name} -> ${targetDevice.name}`);
@@ -6013,6 +6056,10 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		if (sourceItems.length > 1) {
+			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, 'copy');
+		}
+
 		const batch = sourceItems.length > 1;
 		const label = batch ? `复制 ${sourceItems.length} 项` : `复制 ${sourceItems[0].name}`;
 		const task = this.beginTask('transfer', label, `${sourceDevice.name} -> ${targetDevice.name}`);
@@ -6166,6 +6213,98 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move'): Promise<boolean> {
+		const items = sourceItems.filter(item => !!item.path && !item.parent);
+		if (!items.length) {
+			return false;
+		}
+
+		const actionLabel = operation === 'move' ? '剪切传输' : '批量传输';
+		const task = this.beginTask('transfer', `${actionLabel} ${items.length} 项`, `${sourceDevice.name} -> ${targetDevice.name}`);
+		task.progress = 0;
+		task.cancelRequested = false;
+		task.transferItems = items.map(item => this.createTransferTaskItem(item));
+		task.speedSamples = [];
+		const progressId = `turbofile-batch-${task.id}-${Date.now()}`;
+		task.progressId = progressId;
+		for (const transferItem of task.transferItems) {
+			transferItem.progressId = progressId;
+			transferItem.status = 'running';
+			transferItem.startedAt = Date.now();
+		}
+
+		const progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
+		try {
+			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path!);
+			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
+			const expectedBytes = items.reduce((sum, item) => sum + Math.max(0, item.rawSize), 0);
+			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, items[0]);
+			task.strategy = plannedStrategy;
+			for (const transferItem of task.transferItems) {
+				transferItem.strategy = plannedStrategy;
+			}
+			this.updateTask(task, `正在批量传输 0/${items.length}`, 8);
+			const result = await this.sshService.transferBatch({
+				source: sourceEndpoint,
+				targetDirectory: targetDirectoryEndpoint,
+				items: items.map(item => ({
+					sourcePath: item.path!,
+					targetName: item.name,
+					displayName: item.name,
+					sourceType: item.type,
+					expectedBytes: Math.max(0, item.rawSize)
+				})),
+				operation,
+				progressId,
+				expectedBytes,
+				strategyHint: 'auto'
+			});
+
+			const failedPaths = new Set(result.failures.map(failure => failure.path));
+			for (const [index, item] of items.entries()) {
+				const transferItem = task.transferItems[index];
+				if (!transferItem) {
+					continue;
+				}
+				transferItem.strategy = result.strategy ?? transferItem.strategy;
+				transferItem.endedAt = Date.now();
+				if (result.canceled) {
+					transferItem.status = 'canceled';
+				} else if (failedPaths.has(item.path!)) {
+					transferItem.status = 'error';
+					transferItem.error = result.failures.find(failure => failure.path === item.path)?.message;
+				} else {
+					transferItem.status = 'success';
+					transferItem.progress = 100;
+					transferItem.transferredBytes = Math.max(transferItem.transferredBytes, transferItem.totalBytes, item.rawSize, 0);
+				}
+			}
+
+			this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
+			await Promise.all([
+				this.refreshPane(sourceSide, { force: true }),
+				this.refreshPane(targetSide, { force: true })
+			]);
+
+			if (result.canceled) {
+				this.finishTask(task, 'canceled', `已取消批量传输：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy });
+				return false;
+			}
+			if (!result.ok) {
+				this.finishTask(task, 'error', `批量传输完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message });
+				return false;
+			}
+			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy });
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', `批量传输失败：${message}`, { error: message });
+			return false;
+		} finally {
+			progressDisposable.dispose();
+		}
+	}
+
 	private async moveSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): Promise<void> {
 		const items = this.getSelectedTransferItems(sourceSide);
 		const device = this.getPaneDevice(sourceSide);
@@ -6173,6 +6312,11 @@ export class TurboFileEditor extends EditorPane {
 		if (!items.length || !device || !targetDevice) {
 			this.statusMessage = '请先选择要剪切的文件或目录。';
 			this.render();
+			return;
+		}
+
+		if (items.length > 1) {
+			await this.transferItemsBatch(sourceSide, targetSide, device, targetDevice, items, 'move');
 			return;
 		}
 

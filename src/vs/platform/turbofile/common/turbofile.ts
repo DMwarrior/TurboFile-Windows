@@ -17,6 +17,7 @@ export interface ITurboFileSshService {
 	listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
 	listLocalDirectory(path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
 	transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult>;
+	transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult>;
 	cancelTransfer(progressId: string): Promise<ITurboFileFileOperationResult>;
 	createDirectory(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult>;
 	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
@@ -92,11 +93,48 @@ export interface ITurboFileTransferRequest {
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
 }
 
+export interface ITurboFileBatchTransferItem {
+	readonly sourcePath: string;
+	readonly targetName: string;
+	readonly displayName?: string;
+	readonly sourceType?: TurboFileFileType;
+	readonly expectedBytes?: number;
+}
+
+export interface ITurboFileBatchTransferRequest {
+	readonly source: ITurboFileTransferEndpoint;
+	readonly targetDirectory: ITurboFileTransferEndpoint;
+	readonly items: ITurboFileBatchTransferItem[];
+	readonly operation?: 'copy' | 'move';
+	readonly progressId?: string;
+	readonly expectedBytes?: number;
+	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+}
+
 export interface ITurboFileTransferResult {
 	readonly ok: boolean;
 	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel' | 'rsync-relay';
 	readonly bytes: number;
 	readonly message: string;
+	readonly canceled?: boolean;
+	readonly durationMs?: number;
+	readonly averageBytesPerSecond?: number;
+}
+
+export interface ITurboFileBatchTransferFailure {
+	readonly name: string;
+	readonly path: string;
+	readonly message: string;
+}
+
+export interface ITurboFileBatchTransferResult {
+	readonly ok: boolean;
+	readonly strategy: ITurboFileTransferResult['strategy'];
+	readonly bytes: number;
+	readonly message: string;
+	readonly completed: number;
+	readonly failed: number;
+	readonly failures: ITurboFileBatchTransferFailure[];
 	readonly canceled?: boolean;
 	readonly durationMs?: number;
 	readonly averageBytesPerSecond?: number;
@@ -108,6 +146,9 @@ export interface ITurboFileTransferProgressEvent {
 	readonly totalBytes: number;
 	readonly phase: 'prepare' | 'transfer' | 'relay-download' | 'relay-upload' | 'rsync-direct' | 'complete';
 	readonly detail?: string;
+	readonly completedItems?: number;
+	readonly totalItems?: number;
+	readonly currentName?: string;
 }
 
 export interface ITurboFileFileOperationResult {
