@@ -2346,6 +2346,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(progressId);
 		const stat = await fsp.stat(sourcePath);
 		if (stat.isDirectory()) {
+			if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
+				await this.copyLocalDirectoryNativeWithProgress(sourcePath, targetPath, onDelta, progressId);
+				return;
+			}
 			await ensureLocalDirectory(targetPath);
 			const children = await fsp.readdir(sourcePath, { withFileTypes: true });
 			await mapLimit(children, LOCAL_COPY_DIRECTORY_CONCURRENCY, async child => {
@@ -2357,6 +2361,49 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		await ensureLocalParentDirectory(targetPath);
 		await this.copyLocalFileWithProgress(sourcePath, targetPath, onDelta, progressId);
+	}
+
+	private async copyLocalDirectoryNativeWithProgress(sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
+		await ensureLocalDirectory(targetPath);
+		let previousBytes = await getLocalPathSize(targetPath).catch(() => 0);
+		let completed = false;
+		const copy = runLocalRobocopyCommand([
+			sourcePath,
+			targetPath,
+			'/E',
+			'/MT:32',
+			'/R:0',
+			'/W:0',
+			'/NFL',
+			'/NDL',
+			'/NJH',
+			'/NJS',
+			'/NP',
+			'/NC',
+			'/NS'
+		]).finally(() => {
+			completed = true;
+		});
+
+		try {
+			while (!completed) {
+				await delay(500);
+				this.throwIfTransferCanceled(progressId);
+				const currentBytes = await getLocalPathSize(targetPath).catch(() => previousBytes);
+				if (currentBytes > previousBytes) {
+					onDelta?.(currentBytes - previousBytes);
+					previousBytes = currentBytes;
+				}
+			}
+		} finally {
+			await copy;
+		}
+
+		const finalBytes = await getLocalPathSize(targetPath).catch(() => previousBytes);
+		if (finalBytes > previousBytes) {
+			onDelta?.(finalBytes - previousBytes);
+		}
+		this.throwIfTransferCanceled(progressId);
 	}
 
 	private async moveLocalPathNative(sourcePath: string, targetPath: string): Promise<void> {
@@ -3661,6 +3708,24 @@ function formatLocalCommandError(stderr: string | undefined, fallback: string): 
 
 function runLocalPowerShellScript(script: string): Promise<void> {
 	return runLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)]);
+}
+
+function runLocalRobocopyCommand(args: string[]): Promise<void> {
+	return new Promise((resolve, reject) => {
+		execFile('robocopy.exe', args, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
+			if (!error) {
+				resolve();
+				return;
+			}
+
+			const exitCode = typeof error.code === 'number' ? error.code : Number.NaN;
+			if (Number.isFinite(exitCode) && exitCode <= 7) {
+				resolve();
+				return;
+			}
+			reject(new Error(formatLocalCommandError(stderr, error.message)));
+		});
+	});
 }
 
 async function ensureLocalParentDirectory(path: string): Promise<void> {
