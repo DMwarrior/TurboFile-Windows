@@ -2514,7 +2514,7 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-live-transfer-metrics {
 	display: grid;
-	grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(150px, 0.9fr);
+	grid-template-columns: repeat(5, minmax(110px, 1fr)) minmax(150px, 0.9fr);
 	gap: 8px;
 	align-items: center;
 }

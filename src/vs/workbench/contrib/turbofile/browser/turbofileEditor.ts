@@ -377,7 +377,7 @@ const TURBOFILE_UI_FONT_FAMILIES = [
 	['Arial, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', 'Arial']
 ] as const;
 const TURBOFILE_BROWSER_FONT_FAMILIES = TURBOFILE_UI_FONT_FAMILIES;
-type TurboFileBootstrapIcon = 'archive' | 'arrow-clockwise' | 'arrow-up-circle' | 'cloud-upload-fill' | 'eye' | 'file-earmark' | 'file-earmark-zip' | 'files' | 'folder-check' | 'folder-fill' | 'folder-plus' | 'geo-alt-fill' | 'grid-3x3-gap' | 'hdd-network-fill' | 'lightning-charge-fill' | 'pencil-square' | 'scissors' | 'search' | 'terminal' | 'trash';
+type TurboFileBootstrapIcon = 'archive' | 'arrow-clockwise' | 'arrow-up-circle' | 'clock' | 'cloud-upload-fill' | 'eye' | 'file-earmark' | 'file-earmark-zip' | 'files' | 'folder-check' | 'folder-fill' | 'folder-plus' | 'geo-alt-fill' | 'grid-3x3-gap' | 'hdd-network-fill' | 'lightning-charge-fill' | 'pencil-square' | 'scissors' | 'search' | 'terminal' | 'trash';
 type TurboFileIconColor = 'primary' | 'success' | 'warning' | 'info' | 'danger' | 'secondary';
 type TurboFileAppearanceIcon = 'moon' | 'sun' | 'system';
 interface TurboFileIconPath {
@@ -2676,6 +2676,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const summary = $('.turbofile-live-transfer-summary');
 		summary.appendChild(this.renderLiveTransferMetric('lightning-charge-fill', this.formatSpeed(aggregate.speedBytesPerSecond), '当前速度', 'success'));
+		summary.appendChild(this.renderLiveTransferMetric('clock', this.formatElapsed(this.getElapsedSince(aggregate.startedAt)), '已耗时', 'info'));
 		summary.appendChild(this.renderLiveTransferMetric('arrow-clockwise', this.formatRemaining(aggregate.remainingMs), '剩余时间', 'primary'));
 		summary.appendChild(this.renderLiveTransferMetric('archive', `${formatSize(aggregate.transferredBytes)} / ${formatSize(aggregate.totalBytes)}`, '已传输', 'info'));
 
@@ -2742,6 +2743,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const metrics = $('.turbofile-live-transfer-metrics');
 		metrics.appendChild(this.renderLiveTransferMetric('lightning-charge-fill', this.formatSpeed(item.speedBytesPerSecond), '当前速度', 'success'));
+		metrics.appendChild(this.renderLiveTransferMetric('clock', this.formatElapsed(this.getLiveTransferElapsedMs(task, item)), '已耗时', 'info'));
 		metrics.appendChild(this.renderLiveTransferMetric('arrow-clockwise', this.formatRemaining(item.remainingMs), '剩余时间', 'primary'));
 		metrics.appendChild(this.renderLiveTransferMetric('archive', `${formatSize(item.transferredBytes)} / ${formatSize(this.getLiveTransferItemTotal(item))}`, '已传输', 'info'));
 		metrics.appendChild(this.renderLiveTransferMetric('terminal', this.getTransferProtocolLabel(item.strategy ?? task.strategy) ?? '识别中', '传输协议', 'primary'));
@@ -2832,7 +2834,7 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
-	private createAggregateTransferItem(tasks: TurboFileTask[], transferItems: Array<{ task: TurboFileTask; item: TurboFileTaskTransferItem }>, aggregate: { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number }): TurboFileTaskTransferItem {
+	private createAggregateTransferItem(tasks: TurboFileTask[], transferItems: Array<{ task: TurboFileTask; item: TurboFileTaskTransferItem }>, aggregate: { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number }): TurboFileTaskTransferItem {
 		const running = transferItems.find(({ item }) => item.status === 'running') ?? transferItems.find(({ item }) => item.status === 'waiting') ?? transferItems[0];
 		const runningTask = tasks.find(task => task.status === 'running') ?? tasks[0];
 		return {
@@ -2846,16 +2848,19 @@ export class TurboFileEditor extends EditorPane {
 			totalBytes: aggregate.totalBytes,
 			speedBytesPerSecond: aggregate.speedBytesPerSecond,
 			remainingMs: aggregate.remainingMs,
+			startedAt: aggregate.startedAt,
 			strategy: running?.item.strategy ?? runningTask.strategy,
 			speedSamples: runningTask.speedSamples ?? []
 		};
 	}
 
-	private getLiveTransferAggregate(tasks: TurboFileTask[]): { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number } {
+	private getLiveTransferAggregate(tasks: TurboFileTask[]): { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number } {
 		let transferredBytes = 0;
 		let totalBytes = 0;
 		let speedBytesPerSecond = 0;
+		let startedAt: number | undefined;
 		for (const task of tasks) {
+			startedAt = startedAt === undefined ? task.startedAt : Math.min(startedAt, task.startedAt);
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
 				totalBytes += task.totalBytes ?? 0;
@@ -2874,7 +2879,8 @@ export class TurboFileEditor extends EditorPane {
 			transferredBytes,
 			totalBytes,
 			speedBytesPerSecond,
-			remainingMs: speedBytesPerSecond > 0 ? (remainingBytes / speedBytesPerSecond) * 1000 : undefined
+			remainingMs: speedBytesPerSecond > 0 ? (remainingBytes / speedBytesPerSecond) * 1000 : undefined,
+			startedAt
 		};
 	}
 
@@ -2899,6 +2905,21 @@ export class TurboFileEditor extends EditorPane {
 
 	private formatRemaining(milliseconds: number | undefined): string {
 		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
+	}
+
+	private formatElapsed(milliseconds: number | undefined): string {
+		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
+	}
+
+	private getLiveTransferElapsedMs(task: TurboFileTask, item: TurboFileTaskTransferItem): number | undefined {
+		return this.getElapsedSince(item.startedAt ?? task.startedAt, item.endedAt ?? task.endedAt);
+	}
+
+	private getElapsedSince(startedAt: number | undefined, endedAt?: number): number | undefined {
+		if (startedAt === undefined) {
+			return undefined;
+		}
+		return Math.max(0, (endedAt ?? Date.now()) - startedAt);
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
@@ -3153,6 +3174,7 @@ export class TurboFileEditor extends EditorPane {
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
 		if (activeItem) {
+			activeItem.startedAt ??= task.startedAt;
 			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
 			activeItem.transferredBytes = transferredBytes;
 			activeItem.totalBytes = totalBytes;
@@ -3160,6 +3182,9 @@ export class TurboFileEditor extends EditorPane {
 			activeItem.speedBytesPerSecond = speed;
 			activeItem.remainingMs = speed > 0 && totalBytes > transferredBytes ? ((totalBytes - transferredBytes) / speed) * 1000 : undefined;
 			activeItem.strategy = strategy;
+			if (event.phase === 'complete') {
+				activeItem.endedAt = now;
+			}
 			this.appendTransferSpeedSample(activeItem.speedSamples, speed);
 		}
 		const aggregate = this.getLiveTransferAggregate([task]);
@@ -9470,6 +9495,11 @@ function getTurboFileIconPaths(icon: TurboFileBootstrapIcon): TurboFileIconPath[
 		case 'arrow-up-circle':
 			return [
 				{ d: 'M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8zm15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-7.5 3.5a.5.5 0 0 1-1 0V5.707L5.354 7.854a.5.5 0 1 1-.708-.708l3-3a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 5.707V11.5z', fillRule: 'evenodd' }
+			];
+		case 'clock':
+			return [
+				{ d: 'M8 3.5a.5.5 0 0 1 .5.5v3.25l2.15 1.29a.5.5 0 0 1-.514.858l-2.4-1.44A.5.5 0 0 1 7.5 7.53V4a.5.5 0 0 1 .5-.5z' },
+				{ d: 'M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm0-1A7 7 0 1 1 8 1a7 7 0 0 1 0 14z' }
 			];
 		case 'cloud-upload-fill':
 			return [
