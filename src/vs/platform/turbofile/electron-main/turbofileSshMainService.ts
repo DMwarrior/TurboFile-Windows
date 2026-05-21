@@ -635,7 +635,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const sources = items.map(item => item.sourcePath);
 		if (operation === 'copy') {
-			await fsp.mkdir(request.targetDirectory.path, { recursive: true });
+			await ensureLocalDirectory(request.targetDirectory.path);
 			let transferredBytes = 0;
 			for (const [index, item] of items.entries()) {
 				this.throwIfTransferCanceled(request.progressId);
@@ -665,7 +665,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await runLocalPowerShellScript(buildLocalWindowsBatchScript(sources, request.targetDirectory.path, operation));
 		} else {
 			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
-			await fsp.mkdir(request.targetDirectory.path, { recursive: true });
+			await ensureLocalDirectory(request.targetDirectory.path);
 			await runLocalCommand('mv', ['-f', ...sources, request.targetDirectory.path]);
 		}
 		this.throwIfTransferCanceled(request.progressId);
@@ -2346,7 +2346,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(progressId);
 		const stat = await fsp.stat(sourcePath);
 		if (stat.isDirectory()) {
-			await fsp.mkdir(targetPath, { recursive: true });
+			await ensureLocalDirectory(targetPath);
 			const children = await fsp.readdir(sourcePath, { withFileTypes: true });
 			await mapLimit(children, LOCAL_COPY_DIRECTORY_CONCURRENCY, async child => {
 				this.throwIfTransferCanceled(progressId);
@@ -2355,7 +2355,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 
-		await fsp.mkdir(dirname(targetPath), { recursive: true });
+		await ensureLocalParentDirectory(targetPath);
 		await this.copyLocalFileWithProgress(sourcePath, targetPath, onDelta, progressId);
 	}
 
@@ -3665,10 +3665,14 @@ function runLocalPowerShellScript(script: string): Promise<void> {
 
 async function ensureLocalParentDirectory(path: string): Promise<void> {
 	const parent = dirname(path);
-	if (!parent || parent === path || isLocalFilesystemRoot(parent)) {
+	await ensureLocalDirectory(parent);
+}
+
+async function ensureLocalDirectory(path: string): Promise<void> {
+	if (!path || isLocalFilesystemRoot(path)) {
 		return;
 	}
-	await fsp.mkdir(parent, { recursive: true });
+	await fsp.mkdir(path, { recursive: true });
 }
 
 function isLocalFilesystemRoot(path: string): boolean {
