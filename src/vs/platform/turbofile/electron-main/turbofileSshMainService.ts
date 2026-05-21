@@ -1364,7 +1364,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 		const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
 		let bytes = expectedBytes;
-		if (bytes <= 0 && sourceType !== 'directory') {
+		if (sourceType === 'directory') {
+			bytes = bytes > 64 * 1024 ? bytes : await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
+		} else if (bytes <= 0) {
 			bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
 		}
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
@@ -2430,20 +2432,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				completed = true;
 			});
 
-		if (sourceType === 'directory' || bytes <= 0) {
+		if (bytes <= 0) {
 			await copy;
 			return;
 		}
 
+		const progressPollInterval = sourceType === 'directory' ? 1500 : 500;
+		let lastCopiedBytes = 0;
 		try {
 			while (!completed) {
-				await delay(500);
+				await delay(progressPollInterval);
 				if (completed) {
 					break;
 				}
 				this.throwIfTransferCanceled(request.progressId);
 				const copiedBytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
-				if (copiedBytes > 0) {
+				if (copiedBytes > 0 && copiedBytes !== lastCopiedBytes) {
+					lastCopiedBytes = copiedBytes;
 					this.fireTransferProgress(request, Math.min(copiedBytes, bytes), bytes, 'transfer', 'Remote copy in progress.');
 				}
 			}
