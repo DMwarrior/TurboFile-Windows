@@ -345,6 +345,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (request.source.kind === 'local' && request.target.kind === 'local') {
 				const totalBytes = await getLocalPathTransferSize(request.source.path, request.expectedBytes);
 				this.fireTransferProgress(request, 0, totalBytes, 'prepare', 'Preparing local copy.', true);
+				this.fireTransferProgress(request, 0, totalBytes, 'transfer', 'Copying locally.', true);
 				await this.copyLocalPathNative(request.source.path, request.target.path, request.progressId);
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, totalBytes, totalBytes, 'complete', 'Local copy completed.', true);
@@ -379,7 +380,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			if (request.source.kind === 'ssh' && request.target.kind === 'local') {
 				this.throwIfTransferCanceled(request.progressId);
-				await fsp.mkdir(dirname(request.target.path), { recursive: true });
+				await ensureLocalParentDirectory(request.target.path);
 				let bytes = 0;
 				const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
@@ -857,14 +858,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(request.progressId);
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 		const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
-		let bytes = sourceType === 'directory' ? expectedBytes : await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
+		let bytes = expectedBytes;
+		if (bytes <= 0 && sourceType !== 'directory') {
+			bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
+		}
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
 
 		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
 			? buildWindowsCopyCommand(request.source.path, request.target.path)
-			: `mkdir -p ${quotePosixShellArg(getRemoteParentPath(request.target.path))} && cp -a ${quotePosixShellArg(request.source.path)} ${quotePosixShellArg(request.target.path)}`;
+			: buildPosixCopyCommand(request.source.path, request.target.path);
 
-		await this.withDirectorySshClient(request.source, client => this.execRemote(client, command));
+		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true);
+		await this.execRemoteCopyWithProgress(request, command, bytes, sourceType);
 		this.throwIfTransferCanceled(request.progressId);
 		if (bytes === 0 && expectedBytes === 0) {
 			bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
@@ -1852,6 +1857,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private async copyLocalPathNative(sourcePath: string, targetPath: string, progressId?: string): Promise<void> {
 		this.throwIfTransferCanceled(progressId);
 		if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
+			await ensureLocalParentDirectory(targetPath);
 			await runLocalPowerShellScript(buildLocalWindowsCopyScript(sourcePath, targetPath));
 		} else {
 			await ensureLocalParentDirectory(targetPath);
@@ -1862,6 +1868,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async moveLocalPathNative(sourcePath: string, targetPath: string): Promise<void> {
 		if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
+			await ensureLocalParentDirectory(targetPath);
 			await runLocalPowerShellScript(buildLocalWindowsMoveScript(sourcePath, targetPath));
 			return;
 		}
@@ -1874,6 +1881,35 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? buildWindowsMoveCommand(endpoint.path, targetPath)
 			: `mkdir -p ${quotePosixShellArg(getRemoteParentPath(targetPath))} && mv -f ${quotePosixShellArg(endpoint.path)} ${quotePosixShellArg(targetPath)}`;
 		await this.withSshClient(endpoint, client => this.execRemote(client, command));
+	}
+
+	private async execRemoteCopyWithProgress(request: ITurboFileTransferRequest, command: string, bytes: number, sourceType: TurboFileFileType): Promise<void> {
+		let completed = false;
+		const copy = this.withDirectorySshClient(request.source, client => this.execRemote(client, command))
+			.finally(() => {
+				completed = true;
+			});
+
+		if (sourceType === 'directory' || bytes <= 0) {
+			await copy;
+			return;
+		}
+
+		try {
+			while (!completed) {
+				await delay(500);
+				if (completed) {
+					break;
+				}
+				this.throwIfTransferCanceled(request.progressId);
+				const copiedBytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
+				if (copiedBytes > 0) {
+					this.fireTransferProgress(request, Math.min(copiedBytes, bytes), bytes, 'transfer', 'Remote copy in progress.');
+				}
+			}
+		} finally {
+			await copy;
+		}
 	}
 
 	private async copyLocalFileWithProgress(sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
@@ -3119,7 +3155,7 @@ function runLocalCommand(command: string, args: string[]): Promise<void> {
 }
 
 function runLocalPowerShellScript(script: string): Promise<void> {
-	return runLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
+	return runLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)]);
 }
 
 async function ensureLocalParentDirectory(path: string): Promise<void> {
@@ -3132,7 +3168,11 @@ async function ensureLocalParentDirectory(path: string): Promise<void> {
 
 function isLocalFilesystemRoot(path: string): boolean {
 	const normalized = path.replace(/[\\/]+$/, '');
-	return !normalized || normalized === '/' || normalized === '\\' || /^[A-Za-z]:$/.test(normalized);
+	return !normalized || normalized === '/' || normalized === '\\' || /^[A-Za-z]:$/.test(normalized) || /^\\\\[^\\]+\\[^\\]+$/.test(normalized);
+}
+
+function delay(milliseconds: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 function isSameSshConnection(left: ITurboFileSshConnectionOptions, right: ITurboFileSshConnectionOptions): boolean {
@@ -3217,28 +3257,43 @@ function quotePowerShellLiteral(value: string): string {
 	return `'${value.replace(/'/g, "''")}'`;
 }
 
+function encodePowerShellCommand(script: string): string {
+	return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+function buildPowerShellCommand(script: string): string {
+	return `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`;
+}
+
 function buildLocalWindowsCopyScript(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; if (Test-Path -LiteralPath $src -PathType Container) { if (Test-Path -LiteralPath $dst) { Get-ChildItem -LiteralPath $src -Force | Copy-Item -Destination $dst -Force -Recurse } else { Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }`;
+	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; if (Test-Path -LiteralPath $src -PathType Container) { if (Test-Path -LiteralPath $dst) { Get-ChildItem -LiteralPath $src -Force | Copy-Item -Destination $dst -Force -Recurse } else { Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }`;
 }
 
 function buildLocalWindowsMoveScript(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`;
+	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; Move-Item -LiteralPath $src -Destination $dst -Force`;
 }
 
 function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse"`;
+	return buildPowerShellCommand(`$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse`);
 }
 
 function buildWindowsMoveCommand(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=Split-Path -LiteralPath $dst -Parent; if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force"`;
+	return buildPowerShellCommand(`$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`);
+}
+
+function buildPosixCopyCommand(sourcePath: string, targetPath: string): string {
+	const source = quotePosixShellArg(sourcePath);
+	const target = quotePosixShellArg(targetPath);
+	const parent = quotePosixShellArg(getRemoteParentPath(targetPath));
+	return `mkdir -p ${parent} && (cp -a --reflink=auto --sparse=always ${source} ${target} 2>/dev/null || cp -a ${source} ${target})`;
 }
 
 function buildWindowsDeleteCommand(path: string, recursive: boolean): string {

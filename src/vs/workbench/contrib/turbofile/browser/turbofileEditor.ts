@@ -5264,7 +5264,7 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
-	private async ensureTransferItemSize(device: TurboFileDevice, sourceItem: TurboFileFileItem, transferItem: TurboFileTaskTransferItem, task: TurboFileTask): Promise<void> {
+	private async ensureTransferItemSize(device: TurboFileDevice, sourceItem: TurboFileFileItem, transferItem: TurboFileTaskTransferItem, task: TurboFileTask, options: { skipDirectorySize?: boolean } = {}): Promise<void> {
 		if (!sourceItem.path || sourceItem.parent) {
 			return;
 		}
@@ -5280,6 +5280,12 @@ export class TurboFileEditor extends EditorPane {
 		if (transferItem.rawSize > 0) {
 			transferItem.displaySize = formatSize(transferItem.rawSize);
 			transferItem.totalBytes = Math.max(transferItem.totalBytes, transferItem.rawSize);
+			return;
+		}
+
+		if (options.skipDirectorySize) {
+			transferItem.displaySize = '';
+			transferItem.totalBytes = Math.max(transferItem.totalBytes, 0);
 			return;
 		}
 
@@ -5445,7 +5451,9 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleAt = undefined;
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
-			await this.ensureTransferItemSize(this.localWindowsDevice, sourceItem, transferItem, task);
+			await this.ensureTransferItemSize(this.localWindowsDevice, sourceItem, transferItem, task, {
+				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(this.localWindowsDevice, targetDevice)
+			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(targetSide, targetSide, sourceItem, {
 				refreshTarget: false,
@@ -5621,7 +5629,9 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
 			const progress = Math.min(88, 12 + Math.round((index / sourceItems.length) * 70));
-			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task);
+			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
+				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)
+			});
 			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(targetDevice));
 			if (this.isSameTransferTarget(sourceDevice, sourceItem.path, targetDevice, targetPath)) {
 				failed++;
@@ -6006,7 +6016,9 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleAt = undefined;
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
-			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task);
+			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
+				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)
+			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task });
 			if (result.ok) {
