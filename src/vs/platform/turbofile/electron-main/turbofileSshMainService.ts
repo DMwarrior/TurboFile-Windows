@@ -3146,12 +3146,23 @@ function runLocalCommand(command: string, args: string[]): Promise<void> {
 	return new Promise((resolve, reject) => {
 		execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (error, _stdout, stderr) => {
 			if (error) {
-				reject(new Error(stderr?.trim() || error.message));
+				reject(new Error(formatLocalCommandError(stderr, error.message)));
 				return;
 			}
 			resolve();
 		});
 	});
+}
+
+function formatLocalCommandError(stderr: string | undefined, fallback: string): string {
+	const message = (stderr ?? '').trim();
+	if (!message) {
+		return fallback;
+	}
+	if (message.startsWith('#< CLIXML') && message.includes('System.Management.Automation.PSCustomObject')) {
+		return fallback;
+	}
+	return message;
 }
 
 function runLocalPowerShellScript(script: string): Promise<void> {
@@ -3265,28 +3276,32 @@ function buildPowerShellCommand(script: string): string {
 	return `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`;
 }
 
+function withPowerShellDefaults(script: string): string {
+	return `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; ${script}`;
+}
+
 function buildLocalWindowsCopyScript(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; if (Test-Path -LiteralPath $src -PathType Container) { if (Test-Path -LiteralPath $dst) { Get-ChildItem -LiteralPath $src -Force | Copy-Item -Destination $dst -Force -Recurse } else { Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }`;
+	return withPowerShellDefaults(`$src=${source}; $dst=${target}; if (Test-Path -LiteralPath $src -PathType Container) { if (Test-Path -LiteralPath $dst) { Get-ChildItem -LiteralPath $src -Force | Copy-Item -Destination $dst -Force -Recurse } else { Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }`);
 }
 
 function buildLocalWindowsMoveScript(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return `$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; Move-Item -LiteralPath $src -Destination $dst -Force`;
+	return withPowerShellDefaults(`$src=${source}; $dst=${target}; Move-Item -LiteralPath $src -Destination $dst -Force`);
 }
 
 function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return buildPowerShellCommand(`$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse`);
+	return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse`));
 }
 
 function buildWindowsMoveCommand(sourcePath: string, targetPath: string): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
-	return buildPowerShellCommand(`$ErrorActionPreference='Stop'; $src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`);
+	return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`));
 }
 
 function buildPosixCopyCommand(sourcePath: string, targetPath: string): string {

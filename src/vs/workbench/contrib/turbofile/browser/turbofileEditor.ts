@@ -1841,7 +1841,7 @@ export class TurboFileEditor extends EditorPane {
 			if (sourceSide && sourceSide !== side) {
 				event.preventDefault();
 				if (event.dataTransfer) {
-					event.dataTransfer.dropEffect = 'copy';
+					event.dataTransfer.dropEffect = this.getDropTransferOperation(event);
 				}
 				this.setExternalDropTargetSide(undefined);
 				return;
@@ -1850,7 +1850,7 @@ export class TurboFileEditor extends EditorPane {
 			if (this.hasExternalDropData(event)) {
 				event.preventDefault();
 				if (event.dataTransfer) {
-					event.dataTransfer.dropEffect = 'copy';
+					event.dataTransfer.dropEffect = this.getDropTransferOperation(event);
 				}
 				this.setExternalDropTargetSide(side);
 				return;
@@ -1870,13 +1870,17 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== side) {
-				void this.transferSelected(sourceSide, side);
+				if (this.getDropTransferOperation(event) === 'move') {
+					void this.moveSelected(sourceSide, side);
+				} else {
+					void this.transferSelected(sourceSide, side);
+				}
 				return;
 			}
 
 			const externalPaths = this.extractExternalDropPaths(event);
 			if (externalPaths.length) {
-				void this.transferExternalPaths(side, externalPaths);
+				void this.transferExternalPaths(side, externalPaths, this.getDropTransferOperation(event));
 			}
 		});
 		list.addEventListener('contextmenu', event => this.showPaneContextMenu(side, event));
@@ -2388,7 +2392,13 @@ export class TurboFileEditor extends EditorPane {
 			row.draggable = true;
 			row.addEventListener('dragstart', event => {
 				this.ensureItemInSelection(side, item);
+				const operation = this.getInternalDragOperation(side, item, event);
+				if (event.dataTransfer) {
+					event.dataTransfer.effectAllowed = 'copyMove';
+					event.dataTransfer.dropEffect = operation;
+				}
 				event.dataTransfer?.setData('application/x-turbofile-side', side);
+				event.dataTransfer?.setData('application/x-turbofile-operation', operation);
 				event.dataTransfer?.setData('text/plain', item.path ?? '');
 			});
 		}
@@ -5328,6 +5338,30 @@ export class TurboFileEditor extends EditorPane {
 			|| !!dataTransfer.getData(DataTransfers.RESOURCES)
 			|| types.includes(DataTransfers.FILES)
 			|| dataTransfer.files.length > 0;
+	}
+
+	private getInternalDragOperation(side: 'left' | 'right', item: TurboFileFileItem, event: DragEvent): 'copy' | 'move' {
+		if (this.internalTransferClipboard?.operation === 'move'
+			&& this.internalTransferClipboard.sourceSide === side
+			&& this.internalTransferClipboard.items.some(candidate => candidate.path === item.path)) {
+			return 'move';
+		}
+		return this.getDropTransferOperation(event);
+	}
+
+	private getDropTransferOperation(event: DragEvent): 'copy' | 'move' {
+		const dataTransfer = event.dataTransfer;
+		const explicitOperation = dataTransfer?.getData('application/x-turbofile-operation');
+		if (explicitOperation === 'move') {
+			return 'move';
+		}
+		if (explicitOperation === 'copy') {
+			return 'copy';
+		}
+		if (event.shiftKey || dataTransfer?.effectAllowed?.toLowerCase() === 'move') {
+			return 'move';
+		}
+		return 'copy';
 	}
 
 	private extractExternalDropPaths(event: DragEvent): string[] {
