@@ -45,6 +45,7 @@ const LOCAL_COPY_FILE_HIGH_WATER_MARK = 1024 * 1024;
 const RSYNC_DIRECTORY_PARALLEL_WORKERS = 4;
 const BATCH_TRANSFER_WORKERS = 8;
 const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
+const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 
@@ -2437,15 +2438,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 
-		const progressPollInterval = sourceType === 'directory' ? 1500 : 500;
+		const startedAt = Date.now();
+		const estimateDirectoryProgress = sourceType === 'directory';
 		let lastCopiedBytes = 0;
 		try {
 			while (!completed) {
-				await delay(progressPollInterval);
+				await delay(500);
 				if (completed) {
 					break;
 				}
 				this.throwIfTransferCanceled(request.progressId);
+				if (estimateDirectoryProgress) {
+					const elapsedSeconds = Math.max(0, (Date.now() - startedAt) / 1000);
+					const estimatedBytes = Math.min(bytes * 0.95, elapsedSeconds * REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND);
+					const copiedBytes = Math.max(0, Math.floor(estimatedBytes));
+					if (copiedBytes > lastCopiedBytes) {
+						lastCopiedBytes = copiedBytes;
+						this.fireTransferProgress(request, copiedBytes, bytes, 'transfer', 'Remote copy in progress.');
+					}
+					continue;
+				}
 				const copiedBytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
 				if (copiedBytes > 0 && copiedBytes !== lastCopiedBytes) {
 					lastCopiedBytes = copiedBytes;
