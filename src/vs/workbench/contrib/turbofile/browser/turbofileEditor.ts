@@ -5329,11 +5329,32 @@ export class TurboFileEditor extends EditorPane {
 		if (count) {
 			this.updatePaneItemCountElement(side, count);
 		}
+		this.updatePaneSelectionBadge(side, pane);
 
 		const meta = this.container?.querySelector<HTMLElement>('.turbofile-task-meta');
 		if (meta && !this.tasks[0]) {
 			meta.textContent = this.statusMessage;
 		}
+	}
+
+	private updatePaneSelectionBadge(side: 'left' | 'right', pane: HTMLElement): void {
+		const pathbar = pane.querySelector<HTMLElement>('.turbofile-pathbar');
+		if (!pathbar) {
+			return;
+		}
+
+		const selectedCount = this.getSelectedTransferItems(side).length;
+		let selectionCount = pathbar.querySelector<HTMLElement>('.turbofile-selection-count');
+		if (selectedCount <= 1) {
+			selectionCount?.remove();
+			return;
+		}
+
+		if (!selectionCount) {
+			selectionCount = $('.turbofile-selection-count');
+			pathbar.appendChild(selectionCount);
+		}
+		selectionCount.textContent = `已选 ${selectedCount} 项`;
 	}
 
 	private updatePaneItemCountElement(side: 'left' | 'right', element: HTMLElement): void {
