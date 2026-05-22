@@ -1801,8 +1801,11 @@ export class TurboFileEditor extends EditorPane {
 		list.classList.toggle('is-external-drop-target', this.externalDropTargetSide === side);
 		list.classList.add('show-file-icons');
 		list.tabIndex = 0;
-		list.addEventListener('pointerdown', () => {
+		list.addEventListener('pointerdown', event => {
 			this.lastActiveSide = side;
+			if ((event.target as HTMLElement | null)?.closest('.turbofile-inline-rename')) {
+				return;
+			}
 			list.focus({ preventScroll: true });
 		});
 		list.addEventListener('click', event => {
@@ -2566,6 +2569,13 @@ export class TurboFileEditor extends EditorPane {
 		}));
 
 		const handleKeydown = (event: KeyboardEvent) => {
+			if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+				const key = event.key.toLowerCase();
+				if (key === 'a' || key === 'c' || key === 'v' || key === 'x' || key === 'y' || key === 'z') {
+					event.stopPropagation();
+					return;
+				}
+			}
 			if (event.key === 'Enter') {
 				event.preventDefault();
 				event.stopPropagation();
@@ -2595,6 +2605,12 @@ export class TurboFileEditor extends EditorPane {
 		};
 		inputBox.inputElement.addEventListener('keydown', handleKeydown);
 		disposables.add({ dispose: () => inputBox.inputElement.removeEventListener('keydown', handleKeydown) });
+
+		const stopClipboardEventPropagation = (event: ClipboardEvent) => event.stopPropagation();
+		for (const eventType of ['copy', 'cut', 'paste'] as const) {
+			inputBox.inputElement.addEventListener(eventType, stopClipboardEventPropagation);
+			disposables.add({ dispose: () => inputBox.inputElement.removeEventListener(eventType, stopClipboardEventPropagation) });
+		}
 
 		const handleBlur = () => {
 			const window = getWindow(inputBox.inputElement);
