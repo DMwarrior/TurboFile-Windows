@@ -1824,7 +1824,15 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+				if (this.isEditableKeyboardTarget(event.target)) {
+					return;
+				}
 				const key = event.key.toLowerCase();
+				if (key === 'a') {
+					event.preventDefault();
+					this.selectAllPaneItems(side);
+					return;
+				}
 				if (key === 'c' || key === 'x') {
 					event.preventDefault();
 					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy');
@@ -5257,6 +5265,37 @@ export class TurboFileEditor extends EditorPane {
 		if (shouldRender) {
 			this.render();
 		}
+	}
+
+	private selectAllPaneItems(side: 'left' | 'right'): void {
+		const state = this.paneStates[side];
+		const selectablePaths = state.items
+			.filter(item => !!item.path && !item.parent)
+			.map(item => item.path!);
+
+		state.selectedPaths.clear();
+		for (const path of selectablePaths) {
+			state.selectedPaths.add(path);
+		}
+
+		const focusedPath = state.selectedPath && state.selectedPaths.has(state.selectedPath)
+			? state.selectedPath
+			: selectablePaths[0];
+		state.selectedPath = focusedPath;
+		state.selectionAnchorPath = focusedPath;
+		this.lastActiveSide = side;
+		this.statusMessage = selectablePaths.length
+			? `${this.getSideLabel(side)}已全选 ${selectablePaths.length} 项。`
+			: `${this.getSideLabel(side)}当前目录暂无可选项目。`;
+		this.render();
+	}
+
+	private isEditableKeyboardTarget(target: EventTarget | null): boolean {
+		const element = target instanceof HTMLElement ? target : undefined;
+		if (!element) {
+			return false;
+		}
+		return element.isContentEditable || !!element.closest('input, textarea, select, [contenteditable="true"]');
 	}
 
 	private updateRenderedSelection(side: 'left' | 'right'): void {
