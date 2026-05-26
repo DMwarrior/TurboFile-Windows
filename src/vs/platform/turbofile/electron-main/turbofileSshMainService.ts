@@ -1196,6 +1196,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	async writeClipboardImage(content: string, mime: string, encoding: TurboFileContentEncoding = 'base64'): Promise<ITurboFileFileOperationResult> {
+		try {
+			const buffer = Buffer.from(content, encoding);
+			const image = nativeImage.createFromBuffer(buffer);
+			if (image.isEmpty()) {
+				return { ok: false, message: `无法解析图片数据：${mime || 'unknown'}` };
+			}
+			clipboard.writeImage(image);
+			return { ok: true, message: 'Image copied to clipboard.' };
+		} catch (error) {
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error)
+			};
+		}
+	}
+
 	async writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding: TurboFileContentEncoding = 'utf8'): Promise<ITurboFileFileOperationResult> {
 		const buffer = encoding === 'base64' ? Buffer.from(content, 'base64') : Buffer.from(content, 'utf8');
 		try {

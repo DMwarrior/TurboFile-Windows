@@ -7055,13 +7055,21 @@ export class TurboFileEditor extends EditorPane {
 			const gridState = this.imageGridState;
 			if (gridState?.previewVisible) {
 				const image = gridState.images[gridState.selectedIndex];
-				const src = this.getImagePreviewSource(image);
-				if (!image || !src) {
+				const device = this.getPaneDevice(gridState.side);
+				if (!image?.item.path || !device) {
 					return;
 				}
-				await this.ensureImagePreviewElementLoaded(gridState, gridState.selectedIndex);
-				const imageElement = image.previewImage ?? await this.loadImagePreviewSource(src);
-				await this.copyImageElementToClipboard(imageElement, image.item.name);
+				const result = await this.sshService.readImage(await this.toTransferEndpoint(device, image.item.path), {
+					encoding: 'base64',
+					forceOriginal: true,
+					maxBytes: 128 * 1024 * 1024,
+					sourceSize: image.item.rawSize,
+					sourceModified: image.item.rawModified
+				});
+				if (!result.ok || !result.content) {
+					throw new Error(result.message || '无法读取预览图片。');
+				}
+				await this.writePreviewImageContentToClipboard(result.content, result.mime, image.item.name);
 				return;
 			}
 
@@ -7069,8 +7077,7 @@ export class TurboFileEditor extends EditorPane {
 			if (!preview || preview.mode !== 'image' || preview.loading || preview.error || !preview.content) {
 				return;
 			}
-			const src = `data:${preview.mime};base64,${preview.content}`;
-			await this.copyImageElementToClipboard(await this.loadImagePreviewSource(src), preview.item.name);
+			await this.writePreviewImageContentToClipboard(preview.content, preview.mime, preview.item.name);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = `复制图片失败：${message}`;
@@ -7078,33 +7085,11 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async loadImagePreviewSource(src: string): Promise<HTMLImageElement> {
-		const loader = new Image();
-		loader.decoding = 'async';
-		return this.loadImagePreviewElement(loader, src);
-	}
-
-	private async copyImageElementToClipboard(image: HTMLImageElement, name: string): Promise<void> {
-		const ownerDocument = this.container?.ownerDocument ?? document;
-		const ownerWindow = getWindow(this.container ?? ownerDocument.body);
-		const clipboard = ownerWindow.navigator.clipboard as { write?: (items: unknown[]) => Promise<void> } | undefined;
-		const ClipboardItemConstructor = (ownerWindow as Window & { ClipboardItem?: new (items: Record<string, Blob>) => unknown }).ClipboardItem;
-		if (!clipboard?.write || !ClipboardItemConstructor) {
-			throw new Error('当前环境不支持复制图片到剪贴板。');
+	private async writePreviewImageContentToClipboard(content: string, mime: string, name: string): Promise<void> {
+		const result = await this.sshService.writeClipboardImage(content, mime, 'base64');
+		if (!result.ok) {
+			throw new Error(result.message || '复制图片失败。');
 		}
-
-		const canvas = ownerDocument.createElement('canvas');
-		canvas.width = Math.max(1, image.naturalWidth || image.width || 1);
-		canvas.height = Math.max(1, image.naturalHeight || image.height || 1);
-		const context = canvas.getContext('2d');
-		if (!context) {
-			throw new Error('无法创建图片复制画布。');
-		}
-		context.drawImage(image, 0, 0, canvas.width, canvas.height);
-		const blob = await new Promise<Blob>((resolve, reject) => {
-			canvas.toBlob(result => result ? resolve(result) : reject(new Error('无法生成图片剪贴板数据。')), 'image/png');
-		});
-		await clipboard.write([new ClipboardItemConstructor({ 'image/png': blob })]);
 		this.statusMessage = `已复制图片：${name}`;
 		this.render();
 	}
