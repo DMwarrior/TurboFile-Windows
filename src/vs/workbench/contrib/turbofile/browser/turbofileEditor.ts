@@ -7091,7 +7091,6 @@ export class TurboFileEditor extends EditorPane {
 			throw new Error(result.message || '复制图片失败。');
 		}
 		this.statusMessage = `已复制图片：${name}`;
-		this.render();
 	}
 
 	private async deleteImageGridPreview(): Promise<void> {
