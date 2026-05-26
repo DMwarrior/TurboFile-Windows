@@ -3484,6 +3484,7 @@ export class TurboFileEditor extends EditorPane {
 			image.className = 'turbofile-preview-image';
 			image.src = `data:${preview.mime};base64,${preview.content}`;
 			image.alt = preview.item.name;
+			image.addEventListener('contextmenu', event => this.showPreviewImageContextMenu(event));
 			body.appendChild(image);
 		} else if (preview.mode === 'text') {
 			const textarea = document.createElement('textarea');
@@ -4004,6 +4005,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 			this.appendImagePreviewCanvas(figure, selected, previewSrc, state);
 			figure.addEventListener('pointerdown', event => this.handleImagePreviewPointerDown(event));
+			figure.addEventListener('contextmenu', event => this.showPreviewImageContextMenu(event));
 			if (state.pixelInspectorVisible) {
 				this.attachImagePreviewPixelInspector(stage, figure, selected, previewSrc);
 			}
@@ -4976,6 +4978,19 @@ export class TurboFileEditor extends EditorPane {
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
 			getActions: () => this.getPaneContextActions(side),
+			skipTelemetry: true
+		});
+	}
+
+	private showPreviewImageContextMenu(event: MouseEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+		const anchor = new StandardMouseEvent(getWindow(event), event);
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => [
+				this.menuAction('turbofile.copyPreviewImage', '复制', Codicon.copy, () => { void this.copyPreviewImageToClipboard(); }, this.canCopyPreviewImage())
+			],
 			skipTelemetry: true
 		});
 	}
@@ -7023,6 +7038,75 @@ export class TurboFileEditor extends EditorPane {
 		ownerDocument.body.appendChild(anchor);
 		anchor.click();
 		anchor.remove();
+	}
+
+	private canCopyPreviewImage(): boolean {
+		const gridState = this.imageGridState;
+		if (gridState?.previewVisible) {
+			const image = gridState.images[gridState.selectedIndex];
+			return !!image && !!this.getImagePreviewSource(image);
+		}
+		const preview = this.previewState;
+		return !!preview && preview.mode === 'image' && !preview.loading && !preview.error && !!preview.content;
+	}
+
+	private async copyPreviewImageToClipboard(): Promise<void> {
+		try {
+			const gridState = this.imageGridState;
+			if (gridState?.previewVisible) {
+				const image = gridState.images[gridState.selectedIndex];
+				const src = this.getImagePreviewSource(image);
+				if (!image || !src) {
+					return;
+				}
+				await this.ensureImagePreviewElementLoaded(gridState, gridState.selectedIndex);
+				const imageElement = image.previewImage ?? await this.loadImagePreviewSource(src);
+				await this.copyImageElementToClipboard(imageElement, image.item.name);
+				return;
+			}
+
+			const preview = this.previewState;
+			if (!preview || preview.mode !== 'image' || preview.loading || preview.error || !preview.content) {
+				return;
+			}
+			const src = `data:${preview.mime};base64,${preview.content}`;
+			await this.copyImageElementToClipboard(await this.loadImagePreviewSource(src), preview.item.name);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `复制图片失败：${message}`;
+			this.showDialogInfo('复制图片失败', message);
+		}
+	}
+
+	private async loadImagePreviewSource(src: string): Promise<HTMLImageElement> {
+		const loader = new Image();
+		loader.decoding = 'async';
+		return this.loadImagePreviewElement(loader, src);
+	}
+
+	private async copyImageElementToClipboard(image: HTMLImageElement, name: string): Promise<void> {
+		const ownerDocument = this.container?.ownerDocument ?? document;
+		const ownerWindow = getWindow(this.container ?? ownerDocument.body);
+		const clipboard = ownerWindow.navigator.clipboard as { write?: (items: unknown[]) => Promise<void> } | undefined;
+		const ClipboardItemConstructor = (ownerWindow as Window & { ClipboardItem?: new (items: Record<string, Blob>) => unknown }).ClipboardItem;
+		if (!clipboard?.write || !ClipboardItemConstructor) {
+			throw new Error('当前环境不支持复制图片到剪贴板。');
+		}
+
+		const canvas = ownerDocument.createElement('canvas');
+		canvas.width = Math.max(1, image.naturalWidth || image.width || 1);
+		canvas.height = Math.max(1, image.naturalHeight || image.height || 1);
+		const context = canvas.getContext('2d');
+		if (!context) {
+			throw new Error('无法创建图片复制画布。');
+		}
+		context.drawImage(image, 0, 0, canvas.width, canvas.height);
+		const blob = await new Promise<Blob>((resolve, reject) => {
+			canvas.toBlob(result => result ? resolve(result) : reject(new Error('无法生成图片剪贴板数据。')), 'image/png');
+		});
+		await clipboard.write([new ClipboardItemConstructor({ 'image/png': blob })]);
+		this.statusMessage = `已复制图片：${name}`;
+		this.render();
 	}
 
 	private async deleteImageGridPreview(): Promise<void> {
