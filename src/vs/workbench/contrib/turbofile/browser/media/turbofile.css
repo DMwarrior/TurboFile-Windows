@@ -2985,6 +2985,19 @@ body.hc-black .turbofile-live-transfer-panel {
 	border-radius: 3px;
 	background: var(--vscode-input-background);
 	color: var(--vscode-input-foreground);
+	pointer-events: auto;
+}
+
+.turbofile-device-field input {
+	cursor: text;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.turbofile-device-field select {
+	cursor: pointer;
+	user-select: auto;
+	-webkit-user-select: auto;
 }
 
 .turbofile-device-field.is-wide {

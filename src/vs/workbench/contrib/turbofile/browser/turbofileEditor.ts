@@ -9063,6 +9063,7 @@ export class TurboFileEditor extends EditorPane {
 		const overlay = $('.turbofile-device-overlay');
 		const form = document.createElement('form');
 		form.className = 'turbofile-device-form';
+		this.bindDeviceFormEventIsolation(form);
 		const editingDevice = this.editingDeviceId ? this.devices.find(device => device.id === this.editingDeviceId) : undefined;
 		const isEditing = !!editingDevice;
 
@@ -9135,7 +9136,19 @@ export class TurboFileEditor extends EditorPane {
 		});
 
 		overlay.appendChild(form);
+		window.setTimeout(() => {
+			const firstInput = form.querySelector<HTMLInputElement>('input[name="name"]');
+			firstInput?.focus({ preventScroll: true });
+			firstInput?.select();
+		}, 0);
 		return overlay;
+	}
+
+	private bindDeviceFormEventIsolation(form: HTMLFormElement): void {
+		const stopPropagation = (event: globalThis.Event) => event.stopPropagation();
+		for (const eventName of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup', 'keypress']) {
+			form.addEventListener(eventName, stopPropagation);
+		}
 	}
 
 	private appendInputField(parent: HTMLElement, name: string, label: string, placeholder: string, type = 'text', wide = false, value?: string): void {
@@ -9154,6 +9167,7 @@ export class TurboFileEditor extends EditorPane {
 		input.type = type;
 		input.placeholder = placeholder;
 		input.value = value ?? (name === 'port' ? '22' : '');
+		this.bindDeviceFormControl(input);
 
 		field.appendChild(labelElement);
 		field.appendChild(input);
@@ -9177,9 +9191,21 @@ export class TurboFileEditor extends EditorPane {
 			select.appendChild(option);
 		}
 
+		this.bindDeviceFormControl(select);
+
 		field.appendChild(labelElement);
 		field.appendChild(select);
 		parent.appendChild(field);
+	}
+
+	private bindDeviceFormControl(control: HTMLInputElement | HTMLSelectElement): void {
+		control.addEventListener('pointerdown', event => {
+			event.stopPropagation();
+			control.focus({ preventScroll: true });
+		});
+		for (const eventName of ['mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'input', 'change']) {
+			control.addEventListener(eventName, event => event.stopPropagation());
+		}
 	}
 
 	private readDeviceDraft(form: HTMLFormElement, message: HTMLElement): TurboFileDeviceDraft | undefined {
