@@ -947,7 +947,7 @@ export class TurboFileEditor extends EditorPane {
 		card.appendChild(meta);
 
 		const actions = $('.turbofile-page-card-actions');
-		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => this.showDialogInfo('连接设备', `请在传输页左右设备栏选择「${device.name}」后开始浏览和传输。`), true));
+		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }, true));
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
 			actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 			actions.appendChild(this.createPageButton(Codicon.trash, '删除', () => { void this.deleteDeviceFromPage(device); }));
@@ -9094,13 +9094,10 @@ export class TurboFileEditor extends EditorPane {
 
 		const actions = $('.turbofile-device-form-actions');
 		const cancel = this.createButton('取消', 'turbofile-secondary-button');
-		const test = this.createButton('测试连接', 'turbofile-secondary-button');
 		const save = this.createButton('保存设备', 'turbofile-primary-button');
 		cancel.element.type = 'button';
-		test.element.type = 'button';
 		save.element.type = 'submit';
 		actions.appendChild(cancel.element);
-		actions.appendChild(test.element);
 		actions.appendChild(save.element);
 		form.appendChild(actions);
 
@@ -9110,27 +9107,6 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 		});
 
-		test.element.addEventListener('click', async () => {
-			const draft = this.readDeviceDraft(form, message);
-			if (!draft) {
-				return;
-			}
-			message.textContent = '正在测试 SSH 连接...';
-			const storedPassword = editingDevice && this.deviceStore ? await this.deviceStore.getPassword(editingDevice.id) : undefined;
-			const storedPrivateKey = editingDevice && this.deviceStore ? await this.deviceStore.getPrivateKey(editingDevice.id) : undefined;
-			const storedPassphrase = editingDevice && this.deviceStore ? await this.deviceStore.getPassphrase(editingDevice.id) : undefined;
-			const result = await this.sshService.testConnection({
-				host: draft.host,
-				port: draft.port,
-				username: draft.username,
-				password: draft.password || storedPassword,
-				privateKey: draft.privateKey || storedPrivateKey,
-				privateKeyPath: draft.privateKeyPath,
-				passphrase: draft.passphrase || storedPassphrase
-			});
-			this.deviceFormMessage = result.ok ? 'SSH 连接成功。' : `SSH 连接失败：${result.message}`;
-			message.textContent = this.deviceFormMessage;
-		});
 
 		form.addEventListener('submit', async event => {
 			event.preventDefault();
