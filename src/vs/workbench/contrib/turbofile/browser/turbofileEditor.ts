@@ -3825,8 +3825,12 @@ export class TurboFileEditor extends EditorPane {
 		overlay.appendChild(stage);
 
 		const toolbar = $('.turbofile-image-preview-toolbar');
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.symbolColor, 'Toggle RGB pixel inspector', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible));
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.graphLine, 'Toggle histogram', () => this.toggleImagePreviewHistogram(), state.histogramVisible));
+		const pixelInspector = this.renderImagePreviewTopAction(Codicon.symbolColor, 'Toggle RGB pixel inspector', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible);
+		pixelInspector.dataset.turbofilePreviewToggle = 'pixel-inspector';
+		toolbar.appendChild(pixelInspector);
+		const histogram = this.renderImagePreviewTopAction(Codicon.graphLine, 'Toggle histogram', () => this.toggleImagePreviewHistogram(), state.histogramVisible);
+		histogram.dataset.turbofilePreviewToggle = 'histogram';
+		toolbar.appendChild(histogram);
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, 'Download image', () => this.downloadImageGridPreview()));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, 'Delete image', () => { void this.deleteImageGridPreview(); }));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, 'Close', () => this.closeImageGridPreview()));
@@ -4306,9 +4310,13 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private attachImagePreviewPixelInspector(stage: HTMLElement, figure: HTMLElement, image: TurboFileImageGridImage, src: string): void {
+		if (figure.dataset.turbofilePixelInspectorAttached === 'true') {
+			return;
+		}
 		const tooltip = $('.turbofile-image-preview-pixel-tooltip');
 		tooltip.textContent = 'Loading RGB...';
 		stage.appendChild(tooltip);
+		figure.dataset.turbofilePixelInspectorAttached = 'true';
 		this.prepareImagePreviewAnalysis(image, src);
 		figure.addEventListener('mousemove', event => this.updateImagePreviewPixelTooltip(event, stage, tooltip, image, src));
 		figure.addEventListener('mouseleave', () => {
@@ -4526,6 +4534,57 @@ export class TurboFileEditor extends EditorPane {
 		}
 		overlay.appendChild(this.renderImagePreviewSideButton(state, -1));
 		overlay.appendChild(this.renderImagePreviewSideButton(state, 1));
+	}
+
+	private updateImagePreviewToggleButton(toggle: string, active: boolean): void {
+		const button = this.container?.querySelector<HTMLButtonElement>(`.turbofile-image-preview-action[data-turbofile-preview-toggle="${toggle}"]`);
+		if (!button) {
+			return;
+		}
+		button.classList.toggle('is-active', active);
+		if (active) {
+			button.setAttribute('aria-pressed', 'true');
+		} else {
+			button.removeAttribute('aria-pressed');
+		}
+	}
+
+	private updateImagePreviewPixelInspectorInPlace(state: TurboFileImageGridState): void {
+		const stage = this.container?.querySelector<HTMLElement>('.turbofile-image-preview-stage');
+		const figure = stage?.querySelector<HTMLElement>('.turbofile-image-preview-figure');
+		if (!stage || !figure) {
+			return;
+		}
+
+		figure.classList.toggle('is-pixel-inspector', state.pixelInspectorVisible);
+		const tooltip = stage.querySelector<HTMLElement>('.turbofile-image-preview-pixel-tooltip');
+		if (!state.pixelInspectorVisible) {
+			tooltip?.classList.remove('is-visible');
+			return;
+		}
+
+		const selected = state.images[state.selectedIndex];
+		const previewSrc = this.getImagePreviewSource(selected);
+		if (selected && previewSrc) {
+			this.attachImagePreviewPixelInspector(stage, figure, selected, previewSrc);
+		}
+	}
+
+	private updateImagePreviewHistogramInPlace(state: TurboFileImageGridState): void {
+		const overlay = this.container?.querySelector<HTMLElement>('.turbofile-image-preview-overlay');
+		const panel = overlay?.querySelector<HTMLElement>('.turbofile-image-preview-histogram');
+		if (!overlay) {
+			return;
+		}
+		if (!state.histogramVisible) {
+			panel?.remove();
+			return;
+		}
+		if (panel) {
+			this.updateImagePreviewHistogramCanvas();
+			return;
+		}
+		overlay.appendChild(this.renderImagePreviewHistogramPanel(state));
 	}
 
 	private renderSyncPreviewOverlay(): HTMLElement {
@@ -6935,7 +6994,8 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.pixelInspectorVisible = !state.pixelInspectorVisible;
-		this.render();
+		this.updateImagePreviewToggleButton('pixel-inspector', state.pixelInspectorVisible);
+		this.updateImagePreviewPixelInspectorInPlace(state);
 	}
 
 	private toggleImagePreviewHistogram(): void {
@@ -6944,7 +7004,8 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.histogramVisible = !state.histogramVisible;
-		this.render();
+		this.updateImagePreviewToggleButton('histogram', state.histogramVisible);
+		this.updateImagePreviewHistogramInPlace(state);
 	}
 
 	private zoomImagePreviewByOculanteStep(step: number): void {
