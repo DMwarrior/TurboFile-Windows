@@ -638,10 +638,10 @@ export class TurboFileEditor extends EditorPane {
 		const localWindowsDefaultPath = this.getLocalWindowsDefaultPath();
 		this.localWindowsDevice = {
 			id: LOCAL_WINDOWS_DEVICE_ID,
-			name: '樊坤',
-			host: '10.190.129.29',
+			name: 'Windows',
+			host: 'localhost',
 			port: 0,
-			username: 'warrior',
+			username: 'local',
 			authType: 'password',
 			defaultPath: localWindowsDefaultPath,
 			platform: 'windows',
@@ -721,13 +721,15 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const result = await this.deviceStore.ensureDefaultDevices();
-		if (!result.added && !result.updated) {
+		if (!result.added && !result.updated && !result.removed) {
 			return;
 		}
 
 		this.devices = this.deviceStore.loadDevices();
-		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
-		this.statusMessage = `已加载默认 SSH 设备：新增 ${result.added} 台，更新 ${result.updated} 台。`;
+		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: result.added > 0 });
+		this.statusMessage = result.removed
+			? `已清理内置 SSH 设备 ${result.removed} 台。`
+			: `已加载默认 SSH 设备：新增 ${result.added} 台，更新 ${result.updated} 台。`;
 		this.render();
 		void this.refreshPane('left');
 		void this.refreshPane('right');
@@ -1914,7 +1916,7 @@ export class TurboFileEditor extends EditorPane {
 		button.setAttribute('aria-expanded', 'false');
 		button.setAttribute('aria-label', `${this.getSideLabel(side)}设备选择`);
 		button.appendChild($('span.turbofile-device-select-icon', undefined, currentDevice ? this.getDeviceOptionIcon(currentDevice) : '🖥️'));
-		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows (localhost)'));
+		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows'));
 		button.appendChild(renderIcon(Codicon.chevronDown));
 
 		menu.setAttribute('role', 'listbox');
@@ -8916,7 +8918,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getDeviceDisplayLabel(device: TurboFileDevice): string {
-		const host = device.id === LOCAL_WINDOWS_DEVICE_ID && device.host === 'localhost' ? '10.190.129.29' : device.host;
+		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'Windows';
+		}
+		const host = device.host;
 		return `${device.name} (${host})`;
 	}
 
@@ -9079,7 +9084,7 @@ export class TurboFileEditor extends EditorPane {
 			['privateKey', '私钥']
 		], editingDevice?.authType ?? 'password');
 		this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
-		this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\warrior\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
+		this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\User\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
 		this.appendInputField(form, 'passphrase', '私钥口令', isEditing ? '留空保持原私钥口令' : '', 'password', true);
 		this.appendInputField(form, 'defaultPath', '默认目录', '/home', 'text', true, editingDevice?.defaultPath);
 

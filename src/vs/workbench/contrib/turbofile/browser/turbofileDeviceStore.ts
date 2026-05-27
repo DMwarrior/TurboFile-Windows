@@ -43,103 +43,9 @@ function getDefaultCapabilitiesForPlatform(platform: TurboFileDevicePlatform | u
 }
 
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
-	{
-		id: 'turbofile-default-192-168-9-62',
-		name: '62服务器',
-		host: '192.168.9.62',
-		port: 22,
-		username: 'th',
-		authType: 'password',
-		password: 'th123456',
-		defaultPath: '/home/th',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-192-168-9-61',
-		name: '61服务器',
-		host: '192.168.9.61',
-		port: 22,
-		username: 'th',
-		authType: 'password',
-		password: 'th123456',
-		defaultPath: '/home/th',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-192-168-9-60',
-		name: '60服务器',
-		host: '192.168.9.60',
-		port: 22,
-		username: 'th',
-		authType: 'password',
-		password: 'taiho603656_0',
-		defaultPath: '/home/th',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-192-168-9-57',
-		name: '57服务器',
-		host: '192.168.9.57',
-		port: 22,
-		username: 'thgd',
-		authType: 'password',
-		password: '123456',
-		defaultPath: '/home/thgd',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-192-168-9-64',
-		name: '64服务器',
-		host: '192.168.9.64',
-		port: 22,
-		username: 'ubuntu',
-		authType: 'password',
-		password: 'asdf1234',
-		defaultPath: '/home/ubuntu',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-221-226-81-42',
-		name: 'ubuntu',
-		host: '221.226.81.42',
-		port: 5206,
-		username: 'ubuntu',
-		authType: 'password',
-		password: 'asb#1234',
-		defaultPath: '/home/ubuntu',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-36-33-34-59',
-		name: 'hello',
-		host: '36.33.34.59',
-		port: 5206,
-		username: 'hello',
-		authType: 'password',
-		password: 'Vps@1234',
-		defaultPath: '/home/hello',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	},
-	{
-		id: 'turbofile-default-8-147-112-203',
-		name: 'A10服务器',
-		host: '8.147.112.203',
-		port: 22,
-		username: 'root',
-		authType: 'password',
-		password: 'Th123456#',
-		defaultPath: '/root',
-		platform: 'linux',
-		capabilities: TURBOFILE_DEFAULT_LINUX_CAPABILITIES
-	}
 ];
+
+const TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX = 'turbofile-default-';
 
 export class TurboFileDeviceStore {
 
@@ -188,11 +94,24 @@ export class TurboFileDeviceStore {
 		return device;
 	}
 
-	async ensureDefaultDevices(): Promise<{ added: number; updated: number }> {
-		const devices = this.loadDevices();
+	async ensureDefaultDevices(): Promise<{ added: number; updated: number; removed: number }> {
+		let devices = this.loadDevices();
 		const deletedDefaultDeviceIds = this.loadDeletedDefaultDeviceIds();
 		let added = 0;
 		let updated = 0;
+		const removedDeviceIds = devices
+			.filter(device => this.isLegacyDefaultDeviceId(device.id))
+			.map(device => device.id);
+
+		if (removedDeviceIds.length) {
+			devices = devices.filter(device => !this.isLegacyDefaultDeviceId(device.id));
+		}
+
+		for (const deviceId of removedDeviceIds) {
+			await this.secretStorageService.delete(this.getPasswordKey(deviceId));
+			await this.secretStorageService.delete(this.getPrivateKeyKey(deviceId));
+			await this.secretStorageService.delete(this.getPassphraseKey(deviceId));
+		}
 
 		for (const defaultDevice of TURBOFILE_DEFAULT_SSH_DEVICES) {
 			if (deletedDefaultDeviceIds.has(defaultDevice.id)) {
@@ -232,11 +151,11 @@ export class TurboFileDeviceStore {
 			}
 		}
 
-		if (added || updated) {
+		if (added || updated || removedDeviceIds.length) {
 			this.storeDevices(devices);
 		}
 
-		return { added, updated };
+		return { added, updated, removed: removedDeviceIds.length };
 	}
 
 	async updateDevice(deviceId: string, draft: TurboFileDeviceDraft): Promise<TurboFileDevice> {
@@ -315,7 +234,11 @@ export class TurboFileDeviceStore {
 	}
 
 	private isDefaultDeviceId(deviceId: string): boolean {
-		return TURBOFILE_DEFAULT_SSH_DEVICES.some(device => device.id === deviceId);
+		return TURBOFILE_DEFAULT_SSH_DEVICES.some(device => device.id === deviceId) || this.isLegacyDefaultDeviceId(deviceId);
+	}
+
+	private isLegacyDefaultDeviceId(deviceId: string): boolean {
+		return deviceId.startsWith(TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX);
 	}
 
 	private normalizeDevice(candidate: unknown): TurboFileDevice | undefined {
