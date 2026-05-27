@@ -37,7 +37,7 @@ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickin
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { IEditorOpenContext } from '../../../common/editor.js';
+import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
@@ -595,7 +595,6 @@ export class TurboFileEditor extends EditorPane {
 	private availableColorThemes: IWorkbenchColorTheme[] = [];
 	private isLoadingColorThemes = false;
 	private hasLoadedColorThemes = false;
-	private nativeEditorTabsPromise: Promise<void> | undefined;
 	private currentTransferMode: 'copy' | 'move' = 'copy';
 	private remoteFileSystemProvider: TurboFileRemoteFileSystemProvider | undefined;
 	private lastActiveSide: 'left' | 'right' = 'left';
@@ -687,7 +686,6 @@ export class TurboFileEditor extends EditorPane {
 		void this.ensureDefaultSshDevices();
 		void this.ensureTurboFileChrome();
 		this.ensureRemoteFileSystemProvider();
-		void this.ensureNativeEditorTabs();
 		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => this.handleWorkbenchCommand(command)));
 		this._register(this.layoutService.onDidChangePartVisibility(event => {
 			if (event.partId === Parts.PANEL_PART && !event.visible) {
@@ -7988,28 +7986,24 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		await this.ensureNativeEditorTabs();
 		const resource = device.id === LOCAL_WINDOWS_DEVICE_ID
 			? URI.file(item.path)
 			: this.ensureRemoteFileSystemProvider().registerFile(device, await this.getSshConnectionOptions(device), item);
 
 		this.previewState = undefined;
-		await this.editorService.openEditor({ resource, options: { pinned: true } });
+		await this.editorService.openEditor({
+			resource,
+			options: {
+				pinned: true,
+				revealIfOpened: true,
+				override: DEFAULT_EDITOR_ASSOCIATION.id,
+				index: 0
+			}
+		});
 		this.statusMessage = `已用 VS Code 原生编辑器打开：${item.name}`;
 		this.render();
 	}
 
-	private async ensureNativeEditorTabs(): Promise<void> {
-		if (!this.nativeEditorTabsPromise) {
-			this.nativeEditorTabsPromise = (async () => {
-				const showTabs = this.configurationService.getValue<string>('workbench.editor.showTabs');
-				if (showTabs !== 'multiple') {
-					await this.configurationService.updateValue('workbench.editor.showTabs', 'multiple', ConfigurationTarget.USER);
-				}
-			})();
-		}
-		await this.nativeEditorTabsPromise;
-	}
 
 	private async savePreview(): Promise<void> {
 		const preview = this.previewState;
