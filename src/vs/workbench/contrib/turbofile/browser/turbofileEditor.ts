@@ -4258,8 +4258,12 @@ export class TurboFileEditor extends EditorPane {
 		const height = Math.max(1, viewportHeight ?? rect.height);
 		const scaledWidth = render.width * state.previewZoom;
 		const scaledHeight = render.height * state.previewZoom;
-		state.previewPanX = Math.min(width, Math.max(-scaledWidth, state.previewPanX));
-		state.previewPanY = Math.min(height, Math.max(-scaledHeight, state.previewPanY));
+		state.previewPanX = scaledWidth <= width
+			? (width - scaledWidth) / 2
+			: Math.min(0, Math.max(width - scaledWidth, state.previewPanX));
+		state.previewPanY = scaledHeight <= height
+			? (height - scaledHeight) / 2
+			: Math.min(0, Math.max(height - scaledHeight, state.previewPanY));
 	}
 
 	private handleImagePreviewWheel(event: WheelEvent): void {
@@ -4270,14 +4274,9 @@ export class TurboFileEditor extends EditorPane {
 		if (!state?.previewVisible || !render?.ready) {
 			return;
 		}
-		const rect = render.canvas.getBoundingClientRect();
-		const anchor = {
-			x: event.clientX - rect.left,
-			y: event.clientY - rect.top
-		};
 		const wheelDelta = Math.max(-IMAGE_PREVIEW_WHEEL_DELTA_LIMIT, Math.min(IMAGE_PREVIEW_WHEEL_DELTA_LIMIT, -event.deltaY / IMAGE_PREVIEW_WHEEL_DIVISOR));
 		const scaleDelta = wheelDelta * state.previewZoom * IMAGE_PREVIEW_ZOOM_RATIO;
-		this.setImageGridPreviewZoom(state.previewZoom + scaleDelta, anchor);
+		this.setImageGridPreviewZoom(state.previewZoom + scaleDelta);
 	}
 
 	private handleImagePreviewPointerDown(event: PointerEvent): void {
