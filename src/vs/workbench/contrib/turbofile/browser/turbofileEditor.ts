@@ -2175,7 +2175,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async openPanePath(side: 'left' | 'right', path: string): Promise<void> {
-		await this.navigatePaneDirectory(side, path);
+		await this.refreshPane(side, { path, force: true });
 	}
 
 	private async navigatePaneDirectory(side: 'left' | 'right', path: string): Promise<void> {
@@ -2189,7 +2189,7 @@ export class TurboFileEditor extends EditorPane {
 		const cached = this.getCachedPaneDirectory(device, path);
 		state.path = path;
 		state.error = undefined;
-		state.loading = false;
+		state.loading = true;
 		this.resetPaneScroll(side);
 		this.clearPaneSelection(side);
 		if (cached) {
@@ -2227,6 +2227,17 @@ export class TurboFileEditor extends EditorPane {
 		if (state.error) {
 			this.fileListRenderedRange[side] = undefined;
 			list.appendChild(this.renderFileRow(side, { name: state.error, size: '', rawSize: 0, modified: '', rawModified: 0, type: 'unknown' }, false));
+			return;
+		}
+		if (state.loading && state.items.length === 0) {
+			this.fileListRenderedRange[side] = undefined;
+			const row = $('.turbofile-file-row');
+			const name = $('.turbofile-file-name');
+			name.textContent = '正在加载目录...';
+			row.appendChild(name);
+			row.appendChild($('.turbofile-file-meta'));
+			row.appendChild($('.turbofile-file-meta'));
+			list.appendChild(row);
 			return;
 		}
 
@@ -5131,13 +5142,18 @@ export class TurboFileEditor extends EditorPane {
 
 		const targetPath = options.path ?? state.path;
 		const requestId = ++this.paneRequestSeq[side];
-		if (targetPath !== state.path) {
+		const pathChanged = targetPath !== state.path;
+		if (pathChanged) {
 			this.resetPaneScroll(side);
 		}
 
 		state.path = targetPath;
 		state.loading = true;
 		state.error = undefined;
+		if (pathChanged) {
+			state.items = [];
+			this.clearPaneSelection(side);
+		}
 		if (!options.silent) {
 			this.render();
 		}
