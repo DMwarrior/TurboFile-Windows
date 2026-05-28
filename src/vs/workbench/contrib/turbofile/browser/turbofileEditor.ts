@@ -9682,24 +9682,29 @@ function renderTurboFileDeviceMonitorIcon(): SVGElement {
 	svg.setAttribute('viewBox', '0 0 24 24');
 	svg.setAttribute('aria-hidden', 'true');
 	svg.classList.add('turbofile-device-monitor-svg');
-	svg.innerHTML = [
-		'<defs>',
-		`<linearGradient id="${screenId}" x1="4" y1="4" x2="20" y2="16" gradientUnits="userSpaceOnUse">`,
-		'<stop stop-color="#5de7ef"/>',
-		'<stop offset="1" stop-color="#2e8cff"/>',
-		'</linearGradient>',
-		`<linearGradient id="${shineId}" x1="6" y1="5" x2="18" y2="13" gradientUnits="userSpaceOnUse">`,
-		'<stop stop-color="#ffffff" stop-opacity=".42"/>',
-		'<stop offset="1" stop-color="#ffffff" stop-opacity="0"/>',
-		'</linearGradient>',
-		'</defs>',
-		'<rect x="3.4" y="4.2" width="17.2" height="12" rx="1.4" fill="#1f2933"/>',
-		`<rect x="4.6" y="5.3" width="14.8" height="9.7" rx=".7" fill="url(#${screenId})"/>`,
-		`<path fill="url(#${shineId})" d="M5.6 6.1h12.8v3.2c-2.6-.8-5.2-.9-7.8-.3-1.8.4-3.4.3-5-.1V6.1z"/>`,
-		'<path fill="#343a40" d="M10.6 16.2h2.8v2.1h3.7v1.5H6.9v-1.5h3.7v-2.1z"/>',
-		'<path fill="#8a98a8" d="M7.8 20h8.4c.4 0 .7.3.7.7v.2H7.1v-.2c0-.4.3-.7.7-.7z"/>',
-		'<path fill="#ffffff" fill-opacity=".28" d="M5.4 5.9h13.2v.8H5.4z"/>'
-	].join('');
+	const create = (tag: string, attrs: Record<string, string>): SVGElement => {
+		const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+		for (const [name, value] of Object.entries(attrs)) {
+			element.setAttribute(name, value);
+		}
+		return element;
+	};
+	const defs = create('defs', {});
+	const screen = create('linearGradient', { id: screenId, x1: '4', y1: '4', x2: '20', y2: '16', gradientUnits: 'userSpaceOnUse' });
+	screen.appendChild(create('stop', { 'stop-color': '#5de7ef' }));
+	screen.appendChild(create('stop', { offset: '1', 'stop-color': '#2e8cff' }));
+	const shine = create('linearGradient', { id: shineId, x1: '6', y1: '5', x2: '18', y2: '13', gradientUnits: 'userSpaceOnUse' });
+	shine.appendChild(create('stop', { 'stop-color': '#ffffff', 'stop-opacity': '.42' }));
+	shine.appendChild(create('stop', { offset: '1', 'stop-color': '#ffffff', 'stop-opacity': '0' }));
+	defs.appendChild(screen);
+	defs.appendChild(shine);
+	svg.appendChild(defs);
+	svg.appendChild(create('rect', { x: '3.4', y: '4.2', width: '17.2', height: '12', rx: '1.4', fill: '#1f2933' }));
+	svg.appendChild(create('rect', { x: '4.6', y: '5.3', width: '14.8', height: '9.7', rx: '.7', fill: `url(#${screenId})` }));
+	svg.appendChild(create('path', { fill: `url(#${shineId})`, d: 'M5.6 6.1h12.8v3.2c-2.6-.8-5.2-.9-7.8-.3-1.8.4-3.4.3-5-.1V6.1z' }));
+	svg.appendChild(create('path', { fill: '#343a40', d: 'M10.6 16.2h2.8v2.1h3.7v1.5H6.9v-1.5h3.7v-2.1z' }));
+	svg.appendChild(create('path', { fill: '#8a98a8', d: 'M7.8 20h8.4c.4 0 .7.3.7.7v.2H7.1v-.2c0-.4.3-.7.7-.7z' }));
+	svg.appendChild(create('path', { fill: '#ffffff', 'fill-opacity': '.28', d: 'M5.4 5.9h13.2v.8H5.4z' }));
 	return svg;
 }
 
