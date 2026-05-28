@@ -153,12 +153,28 @@ body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light 
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
+body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-workbench.is-turbofile-dark) {
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-workbench.is-turbofile-light) {
+	--turbofile-editor-unified-background: #ffffff;
+	--turbofile-file-surface-final: #ffffff;
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-and-actions-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-and-actions-container > .monaco-scrollable-element,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions .monaco-action-bar,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions .actions-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-layout-actions,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .monaco-scrollable-element,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab.active,
@@ -167,6 +183,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.edito
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-label .monaco-icon-label,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-actions,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .action-label {
+	background: var(--turbofile-file-surface-final, var(--turbofile-editor-file-surface, var(--vscode-editor-background))) !important;
 	background-color: var(--turbofile-file-surface-final, var(--turbofile-editor-file-surface, var(--vscode-editor-background))) !important;
 }
 
