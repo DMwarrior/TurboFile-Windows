@@ -1901,7 +1901,7 @@ export class TurboFileEditor extends EditorPane {
 		button.setAttribute('aria-haspopup', 'listbox');
 		button.setAttribute('aria-expanded', 'false');
 		button.setAttribute('aria-label', `${this.getSideLabel(side)}设备选择`);
-		button.appendChild($('span.turbofile-device-select-icon', undefined, currentDevice ? this.getDeviceOptionIcon(currentDevice) : '🖥️'));
+		button.appendChild(this.renderDeviceSelectIcon(currentDevice));
 		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows'));
 		button.appendChild(renderIcon(Codicon.chevronDown));
 
@@ -1916,7 +1916,7 @@ export class TurboFileEditor extends EditorPane {
 			if (device.id === currentDevice?.id) {
 				option.classList.add('is-selected');
 			}
-			option.appendChild($('span.turbofile-device-select-icon', undefined, this.getDeviceOptionIcon(device)));
+			option.appendChild(this.renderDeviceSelectIcon(device));
 			option.appendChild($('span.turbofile-device-select-label', undefined, this.getDeviceDisplayLabel(device)));
 			option.addEventListener('pointerenter', () => this.prefetchPaneDeviceDefaultDirectory(side, device));
 			option.addEventListener('focus', () => this.prefetchPaneDeviceDefaultDirectory(side, device));
@@ -8911,8 +8911,10 @@ export class TurboFileEditor extends EditorPane {
 		return `${device.name} (${host})`;
 	}
 
-	private getDeviceOptionIcon(_device: TurboFileDevice): string {
-		return '🖥️';
+	private renderDeviceSelectIcon(_device: TurboFileDevice | undefined): HTMLElement {
+		const icon = $('span.turbofile-device-select-icon');
+		icon.setAttribute('aria-hidden', 'true');
+		return icon;
 	}
 
 	private formatPanePathForDisplay(path: string, windowsPath: boolean): string {
