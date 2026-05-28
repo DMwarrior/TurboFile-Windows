@@ -1046,7 +1046,8 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	flex-wrap: wrap;
 }
 
-.turbofile-device-page-card .turbofile-page-card-title .codicon {
+.turbofile-device-page-card .turbofile-page-card-title .codicon,
+.turbofile-device-page-icon {
 	width: 36px;
 	height: 36px;
 	display: inline-flex;
@@ -1056,6 +1057,11 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	color: #ffffff;
 	background: linear-gradient(135deg, var(--turbofile-device-card-accent, #6d78ff), var(--turbofile-device-card-accent-2, #3fb6d8));
 	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.turbofile-device-page-icon {
+	color: inherit;
+	padding: 5px;
 }
 
 .turbofile-device-page-card .turbofile-page-card-actions {
@@ -1728,11 +1734,18 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	height: 18px;
 	flex: 0 0 auto;
 	line-height: 1;
-	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='screen' x1='4' y1='4' x2='20' y2='16' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%235de7ef'/%3E%3Cstop offset='1' stop-color='%232e8cff'/%3E%3C/linearGradient%3E%3ClinearGradient id='shine' x1='6' y1='5' x2='18' y2='13' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='white' stop-opacity='.42'/%3E%3Cstop offset='1' stop-color='white' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3.4' y='4.2' width='17.2' height='12' rx='1.4' fill='%231f2933'/%3E%3Crect x='4.6' y='5.3' width='14.8' height='9.7' rx='.7' fill='url(%23screen)'/%3E%3Cpath fill='url(%23shine)' d='M5.6 6.1h12.8v3.2c-2.6-.8-5.2-.9-7.8-.3-1.8.4-3.4.3-5-.1V6.1z'/%3E%3Cpath fill='%23343a40' d='M10.6 16.2h2.8v2.1h3.7v1.5H6.9v-1.5h3.7v-2.1z'/%3E%3Cpath fill='%238a98a8' d='M7.8 20h8.4c.4 0 .7.3.7.7v.2H7.1v-.2c0-.4.3-.7.7-.7z'/%3E%3Cpath fill='white' fill-opacity='.28' d='M5.4 5.9h13.2v.8H5.4z'/%3E%3C/svg%3E");
-	background-position: center;
-	background-repeat: no-repeat;
-	background-size: contain;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	filter: drop-shadow(0 0 4px rgba(46, 140, 255, 0.22));
+	forced-color-adjust: none;
+}
+
+.turbofile-device-monitor-svg {
+	width: 100%;
+	height: 100%;
+	display: block;
+	flex: 0 0 auto;
 }
 
 .turbofile-device-card > .codicon-chevron-down,
