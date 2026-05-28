@@ -59,6 +59,8 @@
 	--tf-yellow-soft: rgba(225, 255, 37, 0.26);
 	--tf-pink-soft: rgba(255, 100, 218, 0.16);
 	--turbofile-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+	--turbofile-file-surface-final: var(--vscode-editor-background);
+	--tf-file-surface: var(--turbofile-file-surface-final);
 	--turbofile-pane-border: var(--tf-border);
 	position: relative;
 	height: 100%;
@@ -95,6 +97,8 @@
 	--tf-yellow-soft: rgba(225, 255, 37, 0.26);
 	--tf-pink-soft: rgba(255, 100, 218, 0.16);
 	--turbofile-unified-background: var(--tf-bg);
+	--turbofile-file-surface-final: #ffffff;
+	--tf-file-surface: var(--turbofile-file-surface-final);
 }
 
 .turbofile-editor-shell {
@@ -132,18 +136,21 @@ body.turbofile-shell .monaco-workbench .part.panel .xterm {
 
 body.turbofile-shell.turbofile-main-editor-visible {
 	--turbofile-editor-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
-	--turbofile-editor-file-surface: var(--vscode-editor-background);
+	--turbofile-file-surface-final: var(--vscode-editor-background);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-dark,
 body.vs-dark.turbofile-shell.turbofile-main-editor-visible,
 body.hc-black.turbofile-shell.turbofile-main-editor-visible {
-	--turbofile-editor-file-surface: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light {
 	--turbofile-editor-unified-background: #ffffff;
-	--turbofile-editor-file-surface: #ffffff;
+	--turbofile-file-surface-final: #ffffff;
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content,
@@ -160,7 +167,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.edito
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-label .monaco-icon-label,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-actions,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .action-label {
-	background-color: var(--turbofile-editor-file-surface, var(--vscode-editor-background)) !important;
+	background-color: var(--turbofile-file-surface-final, var(--turbofile-editor-file-surface, var(--vscode-editor-background))) !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
@@ -2144,7 +2151,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-height: 0;
 	overflow: auto;
 	overflow-x: hidden;
-	background: var(--vscode-editor-background);
+	background: var(--turbofile-file-surface-final, var(--tf-file-surface, var(--vscode-editor-background)));
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
 	color: var(--turbofile-browser-font-color, var(--vscode-foreground));
@@ -2210,7 +2217,6 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	padding: 0 10px;
 	border: 0;
 	color: var(--turbofile-browser-font-color, var(--vscode-foreground));
-	transition: background-color 90ms ease;
 }
 
 .turbofile-file-row:hover {
@@ -4010,9 +4016,10 @@ body.hc-black .turbofile-live-transfer-panel {
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench {
 	--tf-bg: var(--vscode-editor-background);
-	--tf-bg-secondary: color-mix(in srgb, var(--tf-file-surface) 92%, var(--vscode-foreground) 4%);
-	--tf-surface: var(--tf-file-surface);
-	--tf-file-surface: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
+	--tf-file-surface: var(--turbofile-file-surface-final);
+	--tf-bg-secondary: color-mix(in srgb, var(--turbofile-file-surface-final) 92%, var(--vscode-foreground) 4%);
+	--tf-surface: var(--turbofile-file-surface-final);
 	--tf-surface-muted: color-mix(in srgb, var(--vscode-foreground) 6%, var(--tf-file-surface));
 	--tf-text: var(--vscode-foreground);
 	--tf-text-muted: var(--vscode-descriptionForeground);
