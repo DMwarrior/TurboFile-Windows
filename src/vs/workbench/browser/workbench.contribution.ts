@@ -67,7 +67,7 @@ const registry = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Con
 					localize('workbench.editor.showTabs.none', "The editor title area is not displayed."),
 				],
 				'description': localize('showEditorTabs', "Controls whether opened editors should show as individual tabs, one single large tab or if the title area should not be shown."),
-				'default': EditorTabsMode.NONE
+				'default': EditorTabsMode.MULTIPLE
 			},
 			[LayoutSettings.EDITOR_ACTIONS_LOCATION]: {
 				'type': 'string',
