@@ -571,6 +571,7 @@ export class TurboFileEditor extends EditorPane {
 	private imagePreviewRender: TurboFileImagePreviewRender | undefined;
 	private imagePreviewRenderSeq = 0;
 	private imagePreviewResizeObserver: ResizeObserver | undefined;
+	private editorTabBackgroundSyncRaf = 0;
 	private readonly imageReadCache = new Map<string, TurboFileCachedImageReadResult>();
 	private readonly fileListScrollRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRestoreRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
@@ -772,6 +773,7 @@ export class TurboFileEditor extends EditorPane {
 		document.body.classList.remove('turbofile-transfer-tabs-visible');
 		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark');
 		document.body.style.removeProperty('--turbofile-editor-file-surface');
+	this.clearEditorTabBackgroundSyncRaf();
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
@@ -828,6 +830,7 @@ export class TurboFileEditor extends EditorPane {
 		if (this.dialogState) {
 			this.container.appendChild(this.renderDialogOverlay());
 		}
+		this.scheduleEditorTabBackgroundSync();
 		this.bindImageGridObserver();
 	}
 
@@ -1213,6 +1216,46 @@ export class TurboFileEditor extends EditorPane {
 		document.body.classList.toggle('turbofile-editor-theme-light', effectiveMode === 'light');
 		document.body.classList.toggle('turbofile-editor-theme-dark', effectiveMode === 'dark');
 		document.body.style.removeProperty('--turbofile-editor-file-surface');
+		this.scheduleEditorTabBackgroundSync();
+	}
+
+	private scheduleEditorTabBackgroundSync(): void {
+		if (!this.container) {
+			document.body.style.removeProperty('--turbofile-editor-file-surface');
+			return;
+		}
+
+		const ownerWindow = getWindow(this.container);
+		this.clearEditorTabBackgroundSyncRaf();
+		document.body.style.removeProperty('--turbofile-editor-file-surface');
+		this.editorTabBackgroundSyncRaf = ownerWindow.requestAnimationFrame(() => {
+			this.editorTabBackgroundSyncRaf = ownerWindow.requestAnimationFrame(() => {
+				this.editorTabBackgroundSyncRaf = 0;
+				this.syncEditorTabBackground();
+			});
+		});
+	}
+
+	private clearEditorTabBackgroundSyncRaf(): void {
+		if (!this.editorTabBackgroundSyncRaf || !this.container) {
+			this.editorTabBackgroundSyncRaf = 0;
+			return;
+		}
+		getWindow(this.container).cancelAnimationFrame(this.editorTabBackgroundSyncRaf);
+		this.editorTabBackgroundSyncRaf = 0;
+	}
+
+	private syncEditorTabBackground(): void {
+		const fileList = this.container?.querySelector<HTMLElement>('.turbofile-file-list');
+		if (!fileList) {
+			document.body.style.removeProperty('--turbofile-editor-file-surface');
+			return;
+		}
+
+		const background = getWindow(fileList).getComputedStyle(fileList).backgroundColor;
+		if (background) {
+			document.body.style.setProperty('--turbofile-editor-file-surface', background);
+		}
 	}
 
 	private getAppearanceMode(): 'light' | 'dark' | 'system' {
