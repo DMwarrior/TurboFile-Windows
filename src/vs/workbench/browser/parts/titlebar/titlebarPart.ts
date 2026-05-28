@@ -452,6 +452,11 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 		this.centerContent = append(this.rootContainer, $('.titlebar-center'));
 		this.rightContent = append(this.rootContainer, $('.titlebar-right'));
 
+		if (!isMacintosh) {
+			this.appIcon = append(this.leftContent, $('div.window-appicon'));
+			this.appIcon.setAttribute('aria-hidden', 'true');
+		}
+
 		// Draggable region that we can manipulate for #52522
 		this.dragRegion = prepend(this.rootContainer, $('div.titlebar-drag-region'));
 
