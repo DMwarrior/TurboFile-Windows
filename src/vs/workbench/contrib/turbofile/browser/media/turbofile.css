@@ -134,31 +134,31 @@ body.turbofile-shell .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
-body.turbofile-shell.turbofile-main-editor-visible {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench {
 	--turbofile-editor-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
 	--turbofile-file-surface-final: var(--vscode-editor-background);
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
-body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-dark,
-body.vs-dark.turbofile-shell.turbofile-main-editor-visible,
-body.hc-black.turbofile-shell.turbofile-main-editor-visible {
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-dark .monaco-workbench,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench.vs-dark,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench.hc-black {
 	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
-body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light {
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench {
 	--turbofile-editor-unified-background: #ffffff;
 	--turbofile-file-surface-final: #ffffff;
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
-body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-workbench.is-turbofile-dark) {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-dark) {
 	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
 }
 
-body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-workbench.is-turbofile-light) {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) {
 	--turbofile-editor-unified-background: #ffffff;
 	--turbofile-file-surface-final: #ffffff;
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
