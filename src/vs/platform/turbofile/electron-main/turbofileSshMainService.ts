@@ -32,18 +32,23 @@ const REMOTE_DIRECTORY_SFTP_IDLE_MS = 5 * 60 * 1000;
 const REMOTE_DIRECTORY_LISTING_CACHE_TTL_MS = 2000;
 const REMOTE_DIRECTORY_LISTING_CACHE_MAX_ENTRIES = 256;
 const SFTP_TRANSFER_CONCURRENCY = 64;
-const SFTP_TRANSFER_CHUNK_SIZE = 128 * 1024;
+const SFTP_TRANSFER_CHUNK_SIZE = 255 * 1024;
 const SFTP_LARGE_FILE_THRESHOLD = 512 * 1024 * 1024;
-const SFTP_LARGE_TRANSFER_CONCURRENCY = 96;
-const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 512 * 1024;
+const SFTP_LARGE_TRANSFER_CONCURRENCY = 128;
+const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 255 * 1024;
+const SFTP_COMPAT_TRANSFER_CONCURRENCY = 32;
+const SFTP_COMPAT_TRANSFER_CHUNK_SIZE = 32 * 1024;
 const SFTP_RELAY_CHUNK_SIZE = 512 * 1024;
 const SFTP_RELAY_CONCURRENCY = 64;
-const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 8;
+const SFTP_DIRECTORY_ENTRY_CONCURRENCY = 16;
+const SFTP_DIRECTORY_DISCOVERY_CONCURRENCY = 64;
+const SFTP_DIRECTORY_TRANSFER_CONNECTIONS = 16;
+const SFTP_DIRECTORY_MKDIR_BATCH_SIZE = 256;
 const LOCAL_DIRECTORY_STAT_CONCURRENCY = 64;
 const LOCAL_COPY_DIRECTORY_CONCURRENCY = 16;
 const LOCAL_COPY_FILE_HIGH_WATER_MARK = 1024 * 1024;
 const RSYNC_DIRECTORY_PARALLEL_WORKERS = 4;
-const BATCH_TRANSFER_WORKERS = 8;
+const BATCH_TRANSFER_WORKERS = 16;
 const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
 const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
@@ -165,6 +170,30 @@ interface IRemoteDirectorySftpSession {
 interface IRemoteDirectoryReadResult {
 	readonly path: string;
 	readonly entries: ISFTPFileEntry[];
+}
+
+interface ILocalDirectoryTransferFile {
+	readonly localPath: string;
+	readonly remotePath: string;
+	readonly size: number;
+}
+
+interface ILocalDirectoryTransferPlan {
+	readonly directories: string[];
+	readonly files: ILocalDirectoryTransferFile[];
+	readonly totalBytes: number;
+}
+
+interface IRemoteDirectoryTransferFile {
+	readonly remotePath: string;
+	readonly localPath: string;
+	readonly size: number;
+}
+
+interface IRemoteDirectoryTransferPlan {
+	readonly directories: string[];
+	readonly files: IRemoteDirectoryTransferFile[];
+	readonly totalBytes: number;
 }
 
 interface ITransferProgressSnapshot {
@@ -367,7 +396,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (request.source.kind === 'local' && request.target.kind === 'ssh') {
 				this.throwIfTransferCanceled(request.progressId);
 				const stat = await fsp.stat(request.source.path);
-				const bytes = await getLocalPathSize(request.source.path);
+				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
 				this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP upload.', true);
 				let transferredBytes = 0;
 				const onDelta = (delta: number): void => {
@@ -375,15 +404,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					transferredBytes += delta;
 					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over SFTP.');
 				};
-				await this.withSftp(request.target, async sftp => {
-					this.throwIfTransferCanceled(request.progressId);
-					if (stat.isDirectory()) {
-						await this.uploadDirectory(sftp, request.source.path, request.target.path, onDelta, request.progressId);
-					} else {
+				const onTotal = (totalBytes: number): void => {
+					bytes = Math.max(bytes, totalBytes);
+					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Uploading over SFTP.', true);
+				};
+				if (stat.isDirectory()) {
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and uploading directory over SFTP.', true);
+					await this.uploadDirectoryConcurrent(request.target, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
+				} else {
+					await this.withSftp(request.target, async sftp => {
+						this.throwIfTransferCanceled(request.progressId);
 						await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
 						await this.fastPutWithFallback(sftp, request.source.path, request.target.path, bytes, onDelta, request.progressId);
-					}
-				}, request.progressId);
+					}, request.progressId);
+				}
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true);
 				this.clearRemoteDirectoryListingCache(request.target);
@@ -395,22 +429,32 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await ensureLocalParentDirectory(request.target.path);
 				let bytes = 0;
 				const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
-				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
-				await this.withSftp(request.source, async sftp => {
+				bytes = sourceType === 'directory'
+					? Math.max(0, request.expectedBytes ?? 0)
+					: Math.max(0, request.expectedBytes ?? 0);
+				let transferredBytes = 0;
+				const onDelta = (delta: number): void => {
 					this.throwIfTransferCanceled(request.progressId);
-					this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true);
-					let transferredBytes = 0;
-					const onDelta = (delta: number): void => {
+					transferredBytes += delta;
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Downloading over SFTP.');
+				};
+				const onTotal = (totalBytes: number): void => {
+					bytes = Math.max(bytes, totalBytes);
+					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Downloading over SFTP.', true);
+				};
+				if (sourceType === 'directory') {
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and downloading directory over SFTP.', true);
+					await this.downloadDirectoryConcurrent(request.source, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
+				} else {
+					await this.withSftp(request.source, async sftp => {
 						this.throwIfTransferCanceled(request.progressId);
-						transferredBytes += delta;
-						this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Downloading over SFTP.');
-					};
-					if (sourceType === 'directory') {
-						await this.downloadDirectory(sftp, request.source.path, request.target.path, onDelta, request.progressId);
-					} else {
+						if (bytes <= 0) {
+							bytes = (await this.remoteStat(sftp, request.source.path)).size;
+						}
+						this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true);
 						await this.fastGetWithFallback(sftp, request.source.path, request.target.path, bytes, onDelta, request.progressId);
-					}
-				}, request.progressId);
+					}, request.progressId);
+				}
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP download completed.', true);
 				return this.createTransferResult(true, strategy, bytes, 'SFTP download completed.', startedAt);
@@ -2520,8 +2564,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private createSftpTransferOptions(onDelta?: (delta: number) => void, progressId?: string, bytes = 0, adaptive = true): ISFTPTransferOptions {
 		const useLargeOptions = adaptive && bytes >= SFTP_LARGE_FILE_THRESHOLD;
 		const options: { step?: (totalTransferred: number, chunk: number, total: number) => void; concurrency: number; chunkSize: number } = {
-			concurrency: useLargeOptions ? SFTP_LARGE_TRANSFER_CONCURRENCY : SFTP_TRANSFER_CONCURRENCY,
-			chunkSize: useLargeOptions ? SFTP_LARGE_TRANSFER_CHUNK_SIZE : SFTP_TRANSFER_CHUNK_SIZE
+			concurrency: adaptive ? (useLargeOptions ? SFTP_LARGE_TRANSFER_CONCURRENCY : SFTP_TRANSFER_CONCURRENCY) : SFTP_COMPAT_TRANSFER_CONCURRENCY,
+			chunkSize: adaptive ? (useLargeOptions ? SFTP_LARGE_TRANSFER_CHUNK_SIZE : SFTP_TRANSFER_CHUNK_SIZE) : SFTP_COMPAT_TRANSFER_CHUNK_SIZE
 		};
 		if (!onDelta) {
 			return options;
@@ -3474,6 +3518,205 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				throw new Error(`Remote path is not a directory: ${current}`);
 			}
 		}
+	}
+
+	private async uploadDirectoryConcurrent(endpoint: ITurboFileTransferEndpoint, localPath: string, remotePath: string, onTotal?: (totalBytes: number) => void, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		const plan = await this.collectLocalDirectoryTransferPlan(localPath, remotePath, progressId);
+		onTotal?.(plan.totalBytes);
+		await this.withSftpPool(endpoint, this.getDirectorySftpConnectionCount(plan.files.length, plan.totalBytes), progressId, async sftps => {
+			this.throwIfTransferCanceled(progressId);
+			await this.ensureRemoteDirectoriesForUpload(endpoint, sftps[0], plan.directories);
+			await this.runSftpWorkers(sftps, plan.files, progressId, async (sftp, file) => {
+				this.throwIfTransferCanceled(progressId);
+				await this.fastPutWithFallback(sftp, file.localPath, file.remotePath, file.size, onDelta, progressId);
+			});
+		});
+	}
+
+	private async downloadDirectoryConcurrent(endpoint: ITurboFileTransferEndpoint, remotePath: string, localPath: string, onTotal?: (totalBytes: number) => void, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		const plan = await this.withSftp(endpoint, sftp => this.collectRemoteDirectoryTransferPlan(sftp, remotePath, localPath, progressId), progressId);
+		onTotal?.(plan.totalBytes);
+		await mapLimit(plan.directories, LOCAL_DIRECTORY_STAT_CONCURRENCY, directory => fsp.mkdir(directory, { recursive: true }));
+		await this.withSftpPool(endpoint, this.getDirectorySftpConnectionCount(plan.files.length, plan.totalBytes), progressId, async sftps => {
+			await this.runSftpWorkers(sftps, plan.files, progressId, async (sftp, file) => {
+				this.throwIfTransferCanceled(progressId);
+				await fsp.mkdir(dirname(file.localPath), { recursive: true });
+				await this.fastGetWithFallback(sftp, file.remotePath, file.localPath, file.size, onDelta, progressId);
+			});
+		});
+	}
+
+	private getDirectorySftpConnectionCount(fileCount: number, totalBytes: number): number {
+		if (fileCount <= 1) {
+			return 1;
+		}
+		if (fileCount < 16 && totalBytes < SFTP_LARGE_FILE_THRESHOLD) {
+			return Math.min(4, fileCount);
+		}
+		if (fileCount >= 256 || totalBytes >= SFTP_LARGE_FILE_THRESHOLD) {
+			return Math.min(SFTP_DIRECTORY_TRANSFER_CONNECTIONS, fileCount);
+		}
+		return Math.min(8, fileCount);
+	}
+
+	private async collectLocalDirectoryTransferPlan(localPath: string, remotePath: string, progressId?: string): Promise<ILocalDirectoryTransferPlan> {
+		const directories: string[] = [];
+		const files: ILocalDirectoryTransferFile[] = [];
+		let totalBytes = 0;
+
+		const walk = async (currentLocalPath: string, currentRemotePath: string): Promise<void> => {
+			this.throwIfTransferCanceled(progressId);
+			directories.push(currentRemotePath);
+			const entries = await fsp.readdir(currentLocalPath, { withFileTypes: true });
+			await mapLimit(entries, SFTP_DIRECTORY_DISCOVERY_CONCURRENCY, async entry => {
+				this.throwIfTransferCanceled(progressId);
+				const childLocalPath = join(currentLocalPath, entry.name);
+				const childRemotePath = joinRemotePath(currentRemotePath, entry.name);
+				if (entry.isDirectory()) {
+					await walk(childLocalPath, childRemotePath);
+					return;
+				}
+				if (!entry.isFile()) {
+					return;
+				}
+				const stat = await fsp.stat(childLocalPath);
+				totalBytes += stat.size;
+				files.push({
+					localPath: childLocalPath,
+					remotePath: childRemotePath,
+					size: stat.size
+				});
+			});
+		};
+
+		await walk(localPath, remotePath);
+		return { directories, files, totalBytes };
+	}
+
+	private async collectRemoteDirectoryTransferPlan(sftp: ISFTPWrapper, remotePath: string, localPath: string, progressId?: string): Promise<IRemoteDirectoryTransferPlan> {
+		const directories: string[] = [];
+		const files: IRemoteDirectoryTransferFile[] = [];
+		let totalBytes = 0;
+
+		const walk = async (currentRemotePath: string, currentLocalPath: string): Promise<void> => {
+			this.throwIfTransferCanceled(progressId);
+			directories.push(currentLocalPath);
+			const entries = await this.readRemoteDirectory(sftp, currentRemotePath);
+			await mapLimit(entries, SFTP_DIRECTORY_DISCOVERY_CONCURRENCY, async entry => {
+				this.throwIfTransferCanceled(progressId);
+				if (entry.filename === '.' || entry.filename === '..') {
+					return;
+				}
+				const childRemotePath = joinRemotePath(currentRemotePath, entry.filename);
+				const childLocalPath = join(currentLocalPath, entry.filename);
+				if (entry.attrs.isDirectory()) {
+					await walk(childRemotePath, childLocalPath);
+					return;
+				}
+				if (!entry.attrs.isFile() && !entry.attrs.isSymbolicLink()) {
+					return;
+				}
+				totalBytes += entry.attrs.size;
+				files.push({
+					remotePath: childRemotePath,
+					localPath: childLocalPath,
+					size: entry.attrs.size
+				});
+			});
+		};
+
+		await walk(remotePath, localPath);
+		return { directories, files, totalBytes };
+	}
+
+	private async ensureRemoteDirectoriesForUpload(endpoint: ITurboFileTransferEndpoint, fallbackSftp: ISFTPWrapper, directories: readonly string[]): Promise<void> {
+		const uniqueDirectories = [...new Set(directories)].filter(directory => !!directory && directory !== '.' && directory !== '/');
+		if (!uniqueDirectories.length) {
+			return;
+		}
+		if (endpoint.kind === 'ssh' && !uniqueDirectories.some(looksLikeWindowsPath)) {
+			try {
+				await this.withSshClient(endpoint, async client => {
+					for (let index = 0; index < uniqueDirectories.length; index += SFTP_DIRECTORY_MKDIR_BATCH_SIZE) {
+						const chunk = uniqueDirectories.slice(index, index + SFTP_DIRECTORY_MKDIR_BATCH_SIZE);
+						await this.execRemote(client, `mkdir -p -- ${chunk.map(directory => quotePosixShellArg(directory)).join(' ')}`);
+					}
+				});
+				return;
+			} catch {
+				// Some devices expose SFTP but not a POSIX shell; fall back to SFTP mkdir.
+			}
+		}
+		await mapLimit(uniqueDirectories, SFTP_DIRECTORY_ENTRY_CONCURRENCY, directory => this.ensureRemoteDirectory(fallbackSftp, directory));
+	}
+
+	private async withSftpPool<T>(endpoint: ITurboFileTransferEndpoint, requestedConnections: number, progressId: string | undefined, task: (sftps: ISFTPWrapper[]) => Promise<T>): Promise<T> {
+		if (!endpoint.connection) {
+			throw new Error('SSH endpoint is missing connection options.');
+		}
+
+		const configResult = await this.createConnectConfig(endpoint.connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		const desiredConnections = Math.max(1, Math.min(requestedConnections, SFTP_DIRECTORY_TRANSFER_CONNECTIONS));
+		const clients: ISSHClient[] = [];
+		const sftps: ISFTPWrapper[] = [];
+		const closeAll = (): void => {
+			for (const sftp of sftps) {
+				try {
+					sftp.end();
+				} catch {
+					// Best-effort cleanup.
+				}
+			}
+			for (const client of clients) {
+				try {
+					client.end();
+				} catch {
+					// Best-effort cleanup.
+				}
+			}
+		};
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, closeAll);
+		try {
+			for (let index = 0; index < desiredConnections; index++) {
+				this.throwIfTransferCanceled(progressId);
+				try {
+					const client = await this.connect(configResult.config);
+					const sftp = await this.openSftp(client);
+					clients.push(client);
+					sftps.push(sftp);
+				} catch (error) {
+					if (!sftps.length) {
+						throw error;
+					}
+					break;
+				}
+			}
+			return await task(sftps);
+		} finally {
+			unregisterCancel();
+			closeAll();
+		}
+	}
+
+	private async runSftpWorkers<T>(sftps: readonly ISFTPWrapper[], items: readonly T[], progressId: string | undefined, worker: (sftp: ISFTPWrapper, item: T, index: number) => Promise<void>): Promise<void> {
+		let nextIndex = 0;
+		await Promise.all(sftps.map(async sftp => {
+			while (true) {
+				this.throwIfTransferCanceled(progressId);
+				const index = nextIndex;
+				if (index >= items.length) {
+					return;
+				}
+				nextIndex = index + 1;
+				await worker(sftp, items[index], index);
+			}
+		}));
 	}
 
 	private async uploadDirectory(sftp: ISFTPWrapper, localPath: string, remotePath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {

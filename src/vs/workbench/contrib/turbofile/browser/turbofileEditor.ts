@@ -5462,7 +5462,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private createTransferTaskItem(item: TurboFileFileItem): TurboFileTaskTransferItem {
-		const knownSize = Math.max(0, item.rawSize);
+		const knownSize = item.directory ? 0 : Math.max(0, item.rawSize);
 		const displaySize = item.directory && knownSize === 0 ? '' : item.size;
 		return {
 			name: item.name,
@@ -5698,7 +5698,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
 			await this.ensureTransferItemSize(this.localWindowsDevice, sourceItem, transferItem, task, {
-				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(this.localWindowsDevice, targetDevice)
+				skipDirectorySize: !!sourceItem.directory
 			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(targetSide, targetSide, sourceItem, {
@@ -5883,7 +5883,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.speedSamples = [];
 			const progress = Math.min(88, 12 + Math.round((index / sourceItems.length) * 70));
 			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
-				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)
+				skipDirectorySize: !!sourceItem.directory
 			});
 			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(targetDevice));
 			if (this.isSameTransferTarget(sourceDevice, sourceItem.path, targetDevice, targetPath)) {
@@ -6274,7 +6274,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.lastSampleBytes = undefined;
 			transferItem.speedSamples = [];
 			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
-				skipDirectorySize: sourceItem.directory && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)
+				skipDirectorySize: !!sourceItem.directory
 			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
 			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task });
@@ -6351,7 +6351,9 @@ export class TurboFileEditor extends EditorPane {
 			const targetEndpoint = await this.toTransferEndpoint(targetDevice, targetPath);
 			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItem);
 			const activeItem = options.task?.activeTransferItemIndex !== undefined ? options.task.transferItems?.[options.task.activeTransferItemIndex] : undefined;
-			const expectedBytes = Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, sourceItem.rawSize, 0);
+			const expectedBytes = sourceItem.directory
+				? Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, 0)
+				: Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, sourceItem.rawSize, 0);
 			if (activeItem) {
 				activeItem.strategy = plannedStrategy;
 			}
@@ -6413,7 +6415,7 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path!);
 			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
-			const expectedBytes = items.reduce((sum, item) => sum + Math.max(0, item.rawSize), 0);
+			const expectedBytes = items.reduce((sum, item) => sum + (item.directory ? 0 : Math.max(0, item.rawSize)), 0);
 			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, items[0]);
 			task.strategy = plannedStrategy;
 			for (const transferItem of task.transferItems) {
@@ -6428,7 +6430,7 @@ export class TurboFileEditor extends EditorPane {
 					targetName: item.name,
 					displayName: item.name,
 					sourceType: item.type,
-					expectedBytes: Math.max(0, item.rawSize)
+					expectedBytes: item.directory ? 0 : Math.max(0, item.rawSize)
 				})),
 				operation,
 				progressId,
