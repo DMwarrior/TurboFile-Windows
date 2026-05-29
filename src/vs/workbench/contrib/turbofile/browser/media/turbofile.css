@@ -4987,8 +4987,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 0 0 10px 10px;
 	background: var(--tf-image-info-bg);
 	color: var(--tf-image-info-text);
-	font-size: 12px;
-	font-weight: 700;
 	line-height: 1.2;
 	z-index: 2;
 	opacity: 0;

@@ -4337,6 +4337,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateImagePreviewPixelTooltip(event: MouseEvent, stage: HTMLElement, tooltip: HTMLElement, image: TurboFileImageGridImage, src: string): void {
+		if (!this.imageGridState?.pixelInspectorVisible) {
+			tooltip.classList.remove('is-visible');
+			return;
+		}
 		const render = this.imagePreviewRender;
 		const analysis = this.prepareImagePreviewAnalysis(image, src);
 		if (!render || !analysis) {
