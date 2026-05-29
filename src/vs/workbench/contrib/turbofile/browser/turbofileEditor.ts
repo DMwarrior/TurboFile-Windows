@@ -609,6 +609,8 @@ export class TurboFileEditor extends EditorPane {
 	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
 	private terminalRevealInProgress = false;
+	private pendingAppearanceMode: 'light' | 'dark' | undefined;
+	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
 	private maximizedPane: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
@@ -783,7 +785,11 @@ export class TurboFileEditor extends EditorPane {
 	override dispose(): void {
 		document.body.classList.remove('turbofile-main-editor-visible');
 		document.body.classList.remove('turbofile-transfer-tabs-visible');
-		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark');
+		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark', 'turbofile-theme-switching');
+		if (this.appearanceTransitionTimer !== undefined) {
+			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
+			this.appearanceTransitionTimer = undefined;
+		}
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
 		this.clearFileListScrollRaf('left');
@@ -1238,11 +1244,48 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const effectiveMode = this.getEffectiveAppearanceMode(this.getAppearanceMode());
-		this.container.classList.toggle('is-turbofile-light', effectiveMode === 'light');
-		this.container.classList.toggle('is-turbofile-dark', effectiveMode === 'dark');
-		document.body.classList.toggle('turbofile-editor-theme-light', effectiveMode === 'light');
-		document.body.classList.toggle('turbofile-editor-theme-dark', effectiveMode === 'dark');
+		const effectiveMode = this.pendingAppearanceMode ?? this.getEffectiveAppearanceMode(this.getAppearanceMode());
+		this.applyTurboFileThemeClasses(effectiveMode);
+	}
+
+	private applyTurboFileThemeClasses(mode: 'light' | 'dark'): void {
+		this.container?.classList.toggle('is-turbofile-light', mode === 'light');
+		this.container?.classList.toggle('is-turbofile-dark', mode === 'dark');
+		document.body.classList.toggle('turbofile-editor-theme-light', mode === 'light');
+		document.body.classList.toggle('turbofile-editor-theme-dark', mode === 'dark');
+	}
+
+	private beginAppearanceTransition(mode: 'light' | 'dark'): void {
+		if (this.appearanceTransitionTimer !== undefined) {
+			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
+			this.appearanceTransitionTimer = undefined;
+		}
+		this.pendingAppearanceMode = mode;
+		document.body.classList.add('turbofile-theme-switching');
+		this.container?.classList.add('is-theme-switching');
+		this.applyTurboFileThemeClasses(mode);
+		this.ensureTitlebarThemeToggle();
+	}
+
+	private endAppearanceTransition(): void {
+		if (!this.container) {
+			this.pendingAppearanceMode = undefined;
+			document.body.classList.remove('turbofile-theme-switching');
+			return;
+		}
+
+		const targetWindow = getWindow(this.container);
+		if (this.appearanceTransitionTimer !== undefined) {
+			targetWindow.clearTimeout(this.appearanceTransitionTimer);
+		}
+		this.appearanceTransitionTimer = targetWindow.setTimeout(() => {
+			this.appearanceTransitionTimer = undefined;
+			this.pendingAppearanceMode = undefined;
+			document.body.classList.remove('turbofile-theme-switching');
+			this.container?.classList.remove('is-theme-switching');
+			this.applyTurboFileThemeState();
+			this.ensureTitlebarThemeToggle();
+		}, 180);
 	}
 
 	private getAppearanceMode(): 'light' | 'dark' | 'system' {
@@ -1280,21 +1323,30 @@ export class TurboFileEditor extends EditorPane {
 	private async applyAppearanceMode(mode: 'light' | 'dark' | 'system'): Promise<void> {
 		const darkTheme = this.getAppearanceTheme('dark');
 		const lightTheme = this.getAppearanceTheme('light');
+		const preferred = this.workbenchThemeService.getPreferredColorScheme();
+		const targetMode = mode === 'system'
+			? preferred === ColorScheme.LIGHT || preferred === ColorScheme.HIGH_CONTRAST_LIGHT ? 'light' : 'dark'
+			: mode;
+		this.beginAppearanceTransition(targetMode);
 		try {
 			if (mode === 'system') {
 				await this.configurationService.updateValue(ThemeSettings.PREFERRED_DARK_THEME, darkTheme.settingsId, ConfigurationTarget.USER);
 				await this.configurationService.updateValue(ThemeSettings.PREFERRED_LIGHT_THEME, lightTheme.settingsId, ConfigurationTarget.USER);
 				await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, true, ConfigurationTarget.USER);
-				const preferred = this.workbenchThemeService.getPreferredColorScheme();
 				await this.workbenchThemeService.setColorTheme(preferred === ColorScheme.LIGHT ? lightTheme : darkTheme, 'auto');
 				this.statusMessage = '已设置为跟随系统主题。';
 			} else {
 				await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, false, ConfigurationTarget.USER);
 				await this.applyColorTheme(mode === 'light' ? lightTheme : darkTheme);
+				this.endAppearanceTransition();
 				return;
 			}
+			this.endAppearanceTransition();
 			this.render();
 		} catch (error) {
+			this.pendingAppearanceMode = undefined;
+			document.body.classList.remove('turbofile-theme-switching');
+			this.container?.classList.remove('is-theme-switching');
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = `切换外观失败：${message}`;
 			this.render();
