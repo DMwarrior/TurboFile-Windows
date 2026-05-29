@@ -22,7 +22,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -47,7 +47,7 @@ import { ITerminalProfileService } from '../../terminal/common/terminal.js';
 import { ColorThemeData } from '../../../services/themes/common/colorThemeData.js';
 import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWorkbenchColorTheme, IWorkbenchThemeService, ThemeSettings, ThemeSettingDefaults } from '../../../services/themes/common/workbenchThemeService.js';
 import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
-import { TurboFileAuthType, TurboFileDevice, TurboFileDevicePlatform } from '../common/turbofileTypes.js';
+import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol } from '../common/turbofileTypes.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -654,7 +654,8 @@ export class TurboFileEditor extends EditorPane {
 				rsync: false,
 				shell: true,
 				archive: true
-			}
+			},
+			preferredTransferProtocol: 'sftp'
 		};
 		this.paneStates = {
 			left: {
@@ -945,6 +946,7 @@ export class TurboFileEditor extends EditorPane {
 		meta.appendChild(this.renderInfoLine('地址', device.id === LOCAL_WINDOWS_DEVICE_ID ? device.host : `${device.host}:${device.port || 22}`));
 		meta.appendChild(this.renderInfoLine('用户', device.username || '本机'));
 		meta.appendChild(this.renderInfoLine('默认目录', device.defaultPath || (device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDefaultPath() : '/')));
+		meta.appendChild(this.renderInfoLine('传输协议', this.getDeviceTransferProtocolLabel(device)));
 		card.appendChild(meta);
 
 		const actions = $('.turbofile-page-card-actions');
@@ -971,6 +973,18 @@ export class TurboFileEditor extends EditorPane {
 			hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
 		}
 		return Math.abs(hash) % 6;
+	}
+
+	private getDeviceTransferProtocolLabel(device: TurboFileDevice): string {
+		switch (device.preferredTransferProtocol) {
+			case 'rsync':
+				return device.capabilities.rsync ? 'rsync 极速模式' : 'rsync 待检测';
+			case 'scp':
+				return device.capabilities.scp ? 'scp 兼容模式' : 'scp 待检测';
+			case 'sftp':
+			default:
+				return 'SFTP 默认稳定';
+		}
 	}
 
 	private renderSettingsPage(): HTMLElement {
@@ -1663,6 +1677,38 @@ export class TurboFileEditor extends EditorPane {
 			this.statusMessage = `SSH 连接失败：${result.message}`;
 		}
 		this.render();
+	}
+
+	private async detectAndStoreDeviceCapabilities(device: TurboFileDevice): Promise<string> {
+		if (!this.deviceStore || device.id === LOCAL_WINDOWS_DEVICE_ID || device.preferredTransferProtocol === 'sftp') {
+			return '';
+		}
+
+		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptions(device));
+		if (!result.ok || !result.capabilities) {
+			return '协议能力检测失败，将按 SFTP 兜底';
+		}
+
+		const capabilities = this.toDeviceCapabilities(result.capabilities);
+		this.deviceStore.updateDeviceCapabilities(device.id, capabilities);
+		if (device.preferredTransferProtocol === 'rsync') {
+			return capabilities.rsync ? 'rsync 可用' : 'rsync 不可用，将按 SFTP 兜底';
+		}
+		if (device.preferredTransferProtocol === 'scp') {
+			return capabilities.scp ? 'SCP 可用' : 'SCP 不可用，将按 SFTP 兜底';
+		}
+		return '';
+	}
+
+	private toDeviceCapabilities(capabilities: ITurboFileRemoteCapabilities): TurboFileDeviceCapabilities {
+		return {
+			ssh: capabilities.ssh,
+			sftp: capabilities.sftp,
+			scp: capabilities.scp,
+			rsync: capabilities.rsync,
+			shell: capabilities.shell,
+			archive: capabilities.archive
+		};
 	}
 
 	private handleWorkbenchCommand(command: TurboFileWorkbenchCommand): void {
@@ -3329,7 +3375,11 @@ export class TurboFileEditor extends EditorPane {
 		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			return 'remote-copy';
 		}
-		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice) && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync) {
+		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)
+			&& sourceDevice.preferredTransferProtocol === 'rsync'
+			&& targetDevice.preferredTransferProtocol === 'rsync'
+			&& sourceDevice.capabilities.rsync
+			&& targetDevice.capabilities.rsync) {
 			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
 		return 'sftp-direct';
@@ -6961,9 +7011,10 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanY = 0;
 		state.previewFitPending = true;
 		state.previewSamplingMode = 'smooth';
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
-		this.imageGridPreviewRequestSeq++;
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
 		this.updateImagePreviewOverlay();
 		return true;
@@ -6982,6 +7033,8 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanY = 0;
 		state.previewFitPending = true;
 		state.previewSamplingMode = 'smooth';
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.imageGridPreviewRequestSeq++;
@@ -7009,6 +7062,8 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanY = 0;
 		state.previewFitPending = true;
 		state.previewSamplingMode = 'smooth';
+		state.previewPendingIndex = undefined;
+		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
@@ -7200,8 +7255,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (!await this.showDialogConfirm('删除图片', `删除 ${image.item.name}？`, undefined, true)) {
 			return;
-		state.previewPendingIndex = undefined;
-		state.previewPendingRequestSeq = undefined;
 		}
 
 		const deleteIndex = state.selectedIndex;
@@ -7214,6 +7267,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewFitPending = true;
 		state.previewSamplingMode = 'smooth';
 		state.previewVisible = state.images.length > 0;
+		this.imageGridPreviewRequestSeq++;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
@@ -7224,8 +7278,6 @@ export class TurboFileEditor extends EditorPane {
 
 		const task = this.beginTask('delete', `Delete ${image.item.name}`, device.name);
 		this.render();
-		state.previewPendingIndex = undefined;
-		state.previewPendingRequestSeq = undefined;
 		if (state.previewVisible) {
 			void this.ensureImageGridPreviewLoaded(state, state.selectedIndex, this.imageGridPreviewRequestSeq);
 			this.scheduleImageGridPreviewNeighborsLoaded(state, state.selectedIndex);
@@ -7252,8 +7304,6 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.imageGridState.columns = columns;
-		state.previewPendingIndex = undefined;
-		state.previewPendingRequestSeq = undefined;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.render();
@@ -7575,6 +7625,7 @@ export class TurboFileEditor extends EditorPane {
 			image.height = result.height ?? image.height;
 			if (result.ok) {
 				this.imageGridLoadedPreviewIndexes.add(index);
+				await this.ensureImagePreviewElementLoaded(state, index);
 			}
 		} catch (error) {
 			if (this.imageGridState === state) {
@@ -7585,6 +7636,20 @@ export class TurboFileEditor extends EditorPane {
 				image.previewLoading = false;
 				this.finishImageGridPreviewLoad(state, index, requestSeq, silent);
 			}
+		}
+	}
+
+	private finishImageGridPreviewLoad(state: TurboFileImageGridState, index: number, requestSeq?: number, silent: boolean = false): void {
+		if (this.imageGridState !== state) {
+			return;
+		}
+		if (state.previewPendingIndex === index && state.previewPendingRequestSeq !== undefined && this.commitImageGridPreviewIndexIfReady(state, index, state.previewPendingRequestSeq)) {
+			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
+			return;
+		}
+		if (!silent && state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
+			this.updateImagePreviewOverlay();
+			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
 		}
 	}
 
@@ -7746,7 +7811,6 @@ export class TurboFileEditor extends EditorPane {
 			height: clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
 			quality: IMAGE_PREVIEW_QUALITY
 		};
-				await this.ensureImagePreviewElementLoaded(state, index);
 	}
 
 	private getImageGridThumbnailParallelLimit(state: TurboFileImageGridState): number {
@@ -7763,20 +7827,6 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.scrollTop = body.scrollTop;
-	private finishImageGridPreviewLoad(state: TurboFileImageGridState, index: number, requestSeq?: number, silent: boolean = false): void {
-		if (this.imageGridState !== state) {
-			return;
-		}
-		if (state.previewPendingIndex === index && state.previewPendingRequestSeq !== undefined && this.commitImageGridPreviewIndexIfReady(state, index, state.previewPendingRequestSeq)) {
-			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
-			return;
-		}
-		if (!silent && state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
-			this.updateImagePreviewOverlay();
-			this.scheduleImageGridPreviewNeighborsLoaded(state, index);
-		}
-	}
-
 		state.viewportHeight = body.clientHeight || state.viewportHeight;
 		this.trimImageGridThumbnailQueue(state);
 		if (this.imageGridScrollRaf || !this.container) {
@@ -7909,6 +7959,10 @@ export class TurboFileEditor extends EditorPane {
 				image.previewUrl = undefined;
 				image.previewContent = '';
 				image.previewError = undefined;
+				image.previewImage = undefined;
+				image.previewImageKey = undefined;
+				image.previewImageLoading = undefined;
+				image.previewImageLoadingKey = undefined;
 				this.imageGridLoadedPreviewIndexes.delete(index);
 			}
 		}
@@ -7925,6 +7979,10 @@ export class TurboFileEditor extends EditorPane {
 		image.previewContent = '';
 		image.previewLoading = false;
 		image.previewError = undefined;
+		image.previewImage = undefined;
+		image.previewImageKey = undefined;
+		image.previewImageLoading = undefined;
+		image.previewImageLoadingKey = undefined;
 	}
 
 	private releaseImageGridStateImages(state: TurboFileImageGridState | undefined): void {
@@ -8091,10 +8149,6 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			await this.refreshPane(side, { force: true });
 		}
-				image.previewImage = undefined;
-				image.previewImageKey = undefined;
-				image.previewImageLoading = undefined;
-				image.previewImageLoadingKey = undefined;
 	}
 
 	private async extractSelected(side: 'left' | 'right'): Promise<void> {
@@ -8111,10 +8165,6 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return;
 		}
-		image.previewImage = undefined;
-		image.previewImageKey = undefined;
-		image.previewImageLoading = undefined;
-		image.previewImageLoadingKey = undefined;
 		if (!await this.showDialogConfirm('解压确认', `确定解压 ${item.name} 吗？`, '解压进度会显示在底部任务区域。')) {
 			return;
 		}
@@ -8676,7 +8726,8 @@ export class TurboFileEditor extends EditorPane {
 			path,
 			connection: await this.getSshConnectionOptions(device),
 			label: device.name,
-			supportsRsync: device.capabilities.rsync
+			supportsRsync: device.preferredTransferProtocol === 'rsync' && device.capabilities.rsync,
+			preferredProtocol: device.preferredTransferProtocol
 		};
 	}
 
@@ -9102,6 +9153,10 @@ export class TurboFileEditor extends EditorPane {
 		return device.id === LOCAL_WINDOWS_DEVICE_ID || device.platform === 'windows';
 	}
 
+	private normalizeTransferProtocol(value: string): TurboFileTransferProtocol {
+		return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : 'sftp';
+	}
+
 	private renderDeviceForm(): HTMLElement {
 		const overlay = $('.turbofile-device-overlay');
 		const form = document.createElement('form');
@@ -9127,6 +9182,11 @@ export class TurboFileEditor extends EditorPane {
 			['password', '密码'],
 			['privateKey', '私钥']
 		], editingDevice?.authType ?? 'password');
+		this.appendSelectField(form, 'preferredTransferProtocol', '传输协议', [
+			['sftp', 'SFTP 默认稳定'],
+			['rsync', 'rsync 极速模式'],
+			['scp', 'SCP 兼容模式']
+		], editingDevice?.preferredTransferProtocol ?? 'sftp');
 		this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
 		this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\User\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
 		this.appendInputField(form, 'passphrase', '私钥口令', isEditing ? '留空保持原私钥口令' : '', 'password', true);
@@ -9151,7 +9211,6 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 		});
 
-
 		form.addEventListener('submit', async event => {
 			event.preventDefault();
 			const draft = this.readDeviceDraft(form, message);
@@ -9161,10 +9220,12 @@ export class TurboFileEditor extends EditorPane {
 
 			message.textContent = '正在保存设备...';
 			try {
-				const savedDevice = editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
+				let savedDevice = editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
+				const capabilityMessage = await this.detectAndStoreDeviceCapabilities(savedDevice);
+				savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
 				this.devices = this.deviceStore.loadDevices();
 				this.ensurePaneDeviceSelection();
-				this.deviceFormMessage = `${editingDevice ? '已更新' : '已保存'}设备：${savedDevice.name}`;
+				this.deviceFormMessage = `${editingDevice ? '已更新' : '已保存'}设备：${savedDevice.name}${capabilityMessage ? `，${capabilityMessage}` : ''}`;
 				this.statusMessage = `${this.deviceFormMessage}。可在设备下拉菜单中选择。`;
 				this.isDeviceFormVisible = false;
 				this.editingDeviceId = undefined;
@@ -9233,7 +9294,6 @@ export class TurboFileEditor extends EditorPane {
 			option.selected = selectedValue === value;
 			select.appendChild(option);
 		}
-
 		this.bindDeviceFormControl(select);
 
 		field.appendChild(labelElement);
@@ -9271,7 +9331,8 @@ export class TurboFileEditor extends EditorPane {
 			privateKeyPath: String(formData.get('privateKeyPath') || '') || undefined,
 			passphrase: String(formData.get('passphrase') || '') || undefined,
 			defaultPath: String(formData.get('defaultPath') || '') || undefined,
-			platform: String(formData.get('platform') || 'unknown') as TurboFileDevicePlatform
+			platform: String(formData.get('platform') || 'unknown') as TurboFileDevicePlatform,
+			preferredTransferProtocol: this.normalizeTransferProtocol(String(formData.get('preferredTransferProtocol') || 'sftp'))
 		};
 	}
 }

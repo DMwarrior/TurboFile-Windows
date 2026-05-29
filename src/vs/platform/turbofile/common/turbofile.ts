@@ -14,6 +14,7 @@ export interface ITurboFileSshService {
 	onDynamicSshTerminalExit(sessionId: string): Event<number | undefined>;
 	onDynamicTransferProgress(progressId: string): Event<ITurboFileTransferProgressEvent>;
 	testConnection(options: ITurboFileSshConnectionOptions): Promise<ITurboFileSshConnectionResult>;
+	detectCapabilities(options: ITurboFileSshConnectionOptions): Promise<ITurboFileRemoteCapabilitiesResult>;
 	listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
 	listLocalDirectory(path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
 	transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult>;
@@ -75,6 +76,20 @@ export interface ITurboFileDirectoryListing {
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';
+export type TurboFileTransferProtocol = 'sftp' | 'scp' | 'rsync';
+
+export interface ITurboFileRemoteCapabilities {
+	readonly ssh: boolean;
+	readonly sftp: boolean;
+	readonly scp: boolean;
+	readonly rsync: boolean;
+	readonly shell: boolean;
+	readonly archive: boolean;
+}
+
+export interface ITurboFileRemoteCapabilitiesResult extends ITurboFileFileOperationResult {
+	readonly capabilities?: ITurboFileRemoteCapabilities;
+}
 
 export interface ITurboFileTransferEndpoint {
 	readonly kind: TurboFileEndpointKind;
@@ -82,6 +97,7 @@ export interface ITurboFileTransferEndpoint {
 	readonly connection?: ITurboFileSshConnectionOptions;
 	readonly label?: string;
 	readonly supportsRsync?: boolean;
+	readonly preferredProtocol?: TurboFileTransferProtocol;
 }
 
 export interface ITurboFileTransferRequest {

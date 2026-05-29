@@ -6,7 +6,7 @@
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, defaultTurboFileDeviceCapabilities } from '../common/turbofileTypes.js';
+import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileDeviceCapabilities } from '../common/turbofileTypes.js';
 
 const TURBOFILE_DEVICES_STORAGE_KEY = 'turbofile.devices';
 const TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY = 'turbofile.deletedDefaultDevices';
@@ -24,6 +24,7 @@ export interface TurboFileDeviceDraft {
 	readonly passphrase?: string;
 	readonly defaultPath?: string;
 	readonly platform: TurboFileDevicePlatform;
+	readonly preferredTransferProtocol?: TurboFileTransferProtocol;
 }
 
 interface TurboFileDefaultDevice extends TurboFileDeviceDraft {
@@ -33,13 +34,17 @@ interface TurboFileDefaultDevice extends TurboFileDeviceDraft {
 
 const TURBOFILE_DEFAULT_LINUX_CAPABILITIES: TurboFileDeviceCapabilities = {
 	...defaultTurboFileDeviceCapabilities,
-	rsync: true
+	rsync: false
 };
 
 function getDefaultCapabilitiesForPlatform(platform: TurboFileDevicePlatform | undefined): TurboFileDeviceCapabilities {
 	return platform === 'linux' || platform === 'wsl'
 		? TURBOFILE_DEFAULT_LINUX_CAPABILITIES
 		: defaultTurboFileDeviceCapabilities;
+}
+
+function normalizeTransferProtocol(value: unknown): TurboFileTransferProtocol {
+	return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : 'sftp';
 }
 
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
@@ -75,7 +80,8 @@ export class TurboFileDeviceStore {
 			defaultPath: draft.defaultPath?.trim() || undefined,
 			platform: draft.platform,
 			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
-			capabilities: getDefaultCapabilitiesForPlatform(draft.platform)
+			capabilities: getDefaultCapabilitiesForPlatform(draft.platform),
+			preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
 		};
 
 		const devices = [...this.loadDevices(), device];
@@ -134,7 +140,8 @@ export class TurboFileDeviceStore {
 				defaultPath: defaultDevice.defaultPath,
 				platform: defaultDevice.platform,
 				privateKeyPath: defaultDevice.privateKeyPath,
-				capabilities: defaultDevice.capabilities ?? defaultTurboFileDeviceCapabilities
+				capabilities: defaultDevice.capabilities ?? defaultTurboFileDeviceCapabilities,
+				preferredTransferProtocol: normalizeTransferProtocol(defaultDevice.preferredTransferProtocol)
 			};
 
 			devices.push(device);
@@ -175,7 +182,8 @@ export class TurboFileDeviceStore {
 			authType: draft.authType,
 			defaultPath: draft.defaultPath?.trim() || undefined,
 			platform: draft.platform,
-			privateKeyPath: draft.privateKeyPath?.trim() || undefined
+			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
+			preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
 		};
 		devices[index] = device;
 		this.storeDevices(devices);
@@ -217,6 +225,21 @@ export class TurboFileDeviceStore {
 
 	async getPassphrase(deviceId: string): Promise<string | undefined> {
 		return this.secretStorageService.get(this.getPassphraseKey(deviceId));
+	}
+
+	updateDeviceCapabilities(deviceId: string, capabilities: TurboFileDeviceCapabilities): TurboFileDevice | undefined {
+		const devices = this.loadDevices();
+		const index = devices.findIndex(device => device.id === deviceId);
+		if (index < 0) {
+			return undefined;
+		}
+		const device: TurboFileDevice = {
+			...devices[index],
+			capabilities
+		};
+		devices[index] = device;
+		this.storeDevices(devices);
+		return device;
 	}
 
 	private storeDevices(devices: TurboFileDevice[]): void {
@@ -263,10 +286,9 @@ export class TurboFileDeviceStore {
 			capabilities: {
 				...defaultCapabilities,
 				...device.capabilities,
-				rsync: platform === 'linux' || platform === 'wsl'
-					? true
-					: device.capabilities?.rsync ?? defaultCapabilities.rsync
+				rsync: device.capabilities?.rsync ?? defaultCapabilities.rsync
 			},
+			preferredTransferProtocol: normalizeTransferProtocol(device.preferredTransferProtocol),
 			lastConnectedAt: device.lastConnectedAt
 		};
 	}
