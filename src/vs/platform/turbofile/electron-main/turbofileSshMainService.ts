@@ -345,7 +345,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	async listLocalDirectory(path: string, _refresh = false): Promise<ITurboFileDirectoryListing> {
 		const dirents = await fsp.readdir(path, { withFileTypes: true });
-		const entries = (await mapLimit(dirents, LOCAL_DIRECTORY_STAT_CONCURRENCY, async dirent => {
+		const visibleNames = await getWindowsExplorerVisibleLocalNames(path);
+		const entries = (await mapLimit(dirents.filter(dirent => !visibleNames || visibleNames.has(dirent.name)), LOCAL_DIRECTORY_STAT_CONCURRENCY, async dirent => {
 			try {
 				const fullPath = join(path, dirent.name);
 				const stat = await fsp.lstat(fullPath);
@@ -3972,6 +3973,18 @@ function runLocalCommand(command: string, args: string[]): Promise<void> {
 	});
 }
 
+function runLocalCommandBuffer(command: string, args: string[], maxBuffer = 10 * 1024 * 1024): Promise<Buffer> {
+	return new Promise((resolve, reject) => {
+		execFile(command, args, { windowsHide: true, maxBuffer, encoding: 'buffer' }, (error, stdout, stderr) => {
+			if (error) {
+				reject(new Error(formatLocalCommandError(stderr?.toString(), error.message)));
+				return;
+			}
+			resolve(stdout);
+		});
+	});
+}
+
 function formatLocalCommandError(stderr: string | undefined, fallback: string): string {
 	const message = (stderr ?? '').trim();
 	if (!message) {
@@ -3985,6 +3998,19 @@ function formatLocalCommandError(stderr: string | undefined, fallback: string): 
 
 function runLocalPowerShellScript(script: string): Promise<void> {
 	return runLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)]);
+}
+
+async function getWindowsExplorerVisibleLocalNames(path: string): Promise<Set<string> | undefined> {
+	if (platform() !== 'win32') {
+		return undefined;
+	}
+
+	try {
+		const stdout = await runLocalCommandBuffer('cmd.exe', ['/d', '/u', '/c', 'dir', '/b', '/a:-h-s', path], 64 * 1024 * 1024);
+		return new Set(stdout.toString('utf16le').replace(/^\uFEFF/, '').split(/\r?\n/).filter(name => !!name));
+	} catch {
+		return undefined;
+	}
 }
 
 function runLocalRobocopyCommand(args: string[]): Promise<void> {

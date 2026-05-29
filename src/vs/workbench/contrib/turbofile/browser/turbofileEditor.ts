@@ -8762,7 +8762,8 @@ export class TurboFileEditor extends EditorPane {
 			directory: true,
 			parent: true
 		}] : [];
-		return [...parent, ...entries.filter(entry => !isHiddenFileName(entry.name)).map(entry => this.toFileItem(entry))];
+		const showDotNames = this.isWindowsDevice(device);
+		return [...parent, ...entries.filter(entry => showDotNames || !isHiddenFileName(entry.name)).map(entry => this.toFileItem(entry))];
 	}
 
 	private toFileItem(entry: ITurboFileFileEntry): TurboFileFileItem {
