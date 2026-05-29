@@ -135,6 +135,7 @@ interface TurboFileImageGridImage {
 
 type TurboFileImageGridColumns = 4 | 6 | 8 | 10 | 12;
 type TurboFileImageGridViewKind = 'large' | 'medium' | 'compact';
+type TurboFileImagePreviewSamplingMode = 'smooth' | 'lossless';
 
 interface TurboFileImageGridViewOption {
 	readonly columns: TurboFileImageGridColumns;
@@ -156,6 +157,7 @@ interface TurboFileImageGridState {
 	previewFitPending: boolean;
 	previewPendingIndex?: number;
 	previewPendingRequestSeq?: number;
+	previewSamplingMode: TurboFileImagePreviewSamplingMode;
 	pixelInspectorVisible: boolean;
 	histogramVisible: boolean;
 	histogramX: number;
@@ -391,7 +393,7 @@ const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 16;
-const IMAGE_GRID_CARD_VERTICAL_CHROME = 0;
+const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
@@ -3718,8 +3720,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
-		const card = $('button.turbofile-image-page-card') as HTMLButtonElement;
-		card.type = 'button';
+		const card = $('div.turbofile-image-page-card') as HTMLElement;
+		card.tabIndex = 0;
+		card.setAttribute('role', 'button');
 		card.title = image.item.name;
 		card.dataset.imageIndex = String(index);
 		if (state.selectedIndex === index) {
@@ -3746,12 +3749,24 @@ export class TurboFileEditor extends EditorPane {
 
 		const name = $('.turbofile-image-page-card-name');
 		name.textContent = image.item.name;
+		name.addEventListener('pointerdown', event => event.stopPropagation());
+		name.addEventListener('click', event => event.stopPropagation());
+		name.addEventListener('dblclick', event => event.stopPropagation());
 		card.appendChild(name);
 
 		card.addEventListener('click', () => this.selectImageGridItem(index));
 		card.addEventListener('dblclick', event => {
 			event.preventDefault();
 			this.openImageGridPreview(index);
+		});
+		card.addEventListener('keydown', event => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				this.openImageGridPreview(index);
+			} else if (event.key === ' ' || event.key === 'Spacebar') {
+				event.preventDefault();
+				this.selectImageGridItem(index);
+			}
 		});
 		return card;
 	}
@@ -3762,10 +3777,6 @@ export class TurboFileEditor extends EditorPane {
 		const indexLabel = $('span.turbofile-image-page-card-index');
 		indexLabel.textContent = String(index + 1);
 		info.appendChild(indexLabel);
-
-		const name = $('span.turbofile-image-page-card-filename');
-		name.textContent = image.item.name;
-		info.appendChild(name);
 
 		const dimensions = $('span.turbofile-image-page-card-dimensions');
 		const dimensionsLabel = this.getImageGridCardDimensionsLabel(image);
@@ -3825,6 +3836,9 @@ export class TurboFileEditor extends EditorPane {
 		const pixelInspector = this.renderImagePreviewTopAction(Codicon.symbolColor, 'Toggle RGB pixel inspector', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible);
 		pixelInspector.dataset.turbofilePreviewToggle = 'pixel-inspector';
 		toolbar.appendChild(pixelInspector);
+		const losslessSampling = this.renderImagePreviewTopAction(Codicon.symbolRuler, 'Toggle lossless pixel zoom', () => this.toggleImagePreviewSamplingMode(), state.previewSamplingMode === 'lossless');
+		losslessSampling.dataset.turbofilePreviewToggle = 'lossless-sampling';
+		toolbar.appendChild(losslessSampling);
 		const histogram = this.renderImagePreviewTopAction(Codicon.graphLine, 'Toggle histogram', () => this.toggleImagePreviewHistogram(), state.histogramVisible);
 		histogram.dataset.turbofilePreviewToggle = 'histogram';
 		toolbar.appendChild(histogram);
@@ -4221,8 +4235,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.limitImagePreviewOffset(state, render, cssWidth, cssHeight);
-		render.context.imageSmoothingEnabled = state.previewZoom < 1;
-		render.context.imageSmoothingQuality = state.previewZoom < 1 ? 'high' : 'low';
+		const shouldSmooth = state.previewSamplingMode === 'smooth' || state.previewZoom < 1;
+		render.context.imageSmoothingEnabled = shouldSmooth;
+		render.context.imageSmoothingQuality = shouldSmooth ? 'high' : 'low';
 		const drawX = Math.trunc(state.previewPanX);
 		const drawY = Math.trunc(state.previewPanY);
 		const drawWidth = render.width * state.previewZoom;
@@ -6842,6 +6857,7 @@ export class TurboFileEditor extends EditorPane {
 			previewPanX: 0,
 			previewPanY: 0,
 			previewFitPending: true,
+			previewSamplingMode: 'smooth',
 			pixelInspectorVisible: false,
 			histogramVisible: false,
 			histogramX: 104,
@@ -6939,6 +6955,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
+		state.previewSamplingMode = 'smooth';
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.imageGridPreviewRequestSeq++;
@@ -6959,6 +6976,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
+		state.previewSamplingMode = 'smooth';
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.imageGridPreviewRequestSeq++;
@@ -6985,6 +7003,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
+		state.previewSamplingMode = 'smooth';
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.releaseImageGridImagesOutsideRange(state, this.getImageGridVirtualRange(state));
@@ -7009,6 +7028,16 @@ export class TurboFileEditor extends EditorPane {
 		state.histogramVisible = !state.histogramVisible;
 		this.updateImagePreviewToggleButton('histogram', state.histogramVisible);
 		this.updateImagePreviewHistogramInPlace(state);
+	}
+
+	private toggleImagePreviewSamplingMode(): void {
+		const state = this.imageGridState;
+		if (!state?.previewVisible) {
+			return;
+		}
+		state.previewSamplingMode = state.previewSamplingMode === 'lossless' ? 'smooth' : 'lossless';
+		this.updateImagePreviewToggleButton('lossless-sampling', state.previewSamplingMode === 'lossless');
+		this.renderImagePreviewCanvas();
 	}
 
 	private zoomImagePreviewByOculanteStep(step: number): void {
@@ -7178,6 +7207,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
+		state.previewSamplingMode = 'smooth';
 		state.previewVisible = state.images.length > 0;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();

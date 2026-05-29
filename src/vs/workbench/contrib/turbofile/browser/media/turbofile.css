@@ -3311,6 +3311,8 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-foreground) 3%);
 	color: var(--vscode-foreground);
 	cursor: pointer;
+	text-align: left;
+	user-select: none;
 	transition: border-color 120ms ease, box-shadow 120ms ease, transform 90ms ease;
 	content-visibility: auto;
 	contain: layout paint style;
@@ -3329,6 +3331,11 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-image-page-card.is-selected {
 	border-color: #22c55e;
 	box-shadow: 0 0 0 2px color-mix(in srgb, #22c55e 25%, transparent);
+}
+
+.turbofile-image-page-card:focus-visible {
+	outline: 2px solid color-mix(in srgb, #22c55e 62%, transparent);
+	outline-offset: 2px;
 }
 
 .turbofile-image-page-card::after {
@@ -3370,7 +3377,17 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-card-name {
-	display: none;
+	display: block;
+	padding: 8px 10px 10px;
+	color: color-mix(in srgb, var(--vscode-foreground) 84%, transparent);
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+	white-space: normal;
+	word-break: break-word;
+	cursor: text;
+	user-select: text;
 }
 
 .turbofile-image-preview-overlay {
@@ -4881,10 +4898,11 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border: 1px solid var(--tf-image-border);
 	border-radius: 12px;
 	background: var(--tf-image-surface);
+	color: var(--tf-image-text);
 	box-shadow: var(--tf-image-card-shadow);
 	overflow: hidden;
 	transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
-	contain-intrinsic-size: 220px 160px;
+	contain-intrinsic-size: 220px 218px;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card:hover,
@@ -4961,7 +4979,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	right: 0;
 	bottom: 0;
 	display: grid;
-	grid-template-columns: minmax(22px, max-content) minmax(0, 1fr) max-content;
+	grid-template-columns: minmax(22px, max-content) minmax(0, 1fr);
 	align-items: center;
 	gap: 8px;
 	min-height: 34px;
@@ -4991,6 +5009,28 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	color: var(--tf-image-info-text);
 	white-space: nowrap;
 	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.turbofile-image-page-card-dimensions {
+	justify-self: end;
+}
+
+.vs .turbofile-workbench .turbofile-image-page-card-name,
+.vs-dark .turbofile-workbench .turbofile-image-page-card-name,
+.hc-black .turbofile-workbench .turbofile-image-page-card-name,
+.turbofile-workbench.is-turbofile-light .turbofile-image-page-card-name,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-name {
+	display: block;
+	padding: 8px 10px 10px;
+	color: var(--tf-image-text);
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+	white-space: normal;
+	word-break: break-word;
+	cursor: text;
+	user-select: text;
 }
 
 .turbofile-image-page-card-filename {
