@@ -1609,6 +1609,14 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	overflow: hidden;
 }
 
+.turbofile-transfer-page.is-pane-maximized .turbofile-main {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.turbofile-pane.is-hidden-by-maximize {
+	display: none;
+}
+
 .turbofile-pane,
 .turbofile-transfer-rail,
 .turbofile-taskbar {

@@ -609,6 +609,7 @@ export class TurboFileEditor extends EditorPane {
 	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
+	private maximizedPane: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
 	private inlineRename: TurboFileInlineRenameState | undefined;
 	private readonly windowsClipboardPasteInFlight = new Set<string>();
@@ -864,6 +865,10 @@ export class TurboFileEditor extends EditorPane {
 		const page = $('.turbofile-transfer-page');
 		if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
 			page.classList.add('has-live-transfer');
+		}
+		if (this.maximizedPane) {
+			page.classList.add('is-pane-maximized');
+			page.dataset.maximizedPane = this.maximizedPane;
 		}
 		const main = $('.turbofile-main');
 		main.appendChild(this.renderPane('left'));
@@ -1841,6 +1846,8 @@ export class TurboFileEditor extends EditorPane {
 		const device = this.getPaneDevice(side);
 		const pane = $('.turbofile-pane');
 		pane.dataset.turbofileSide = side;
+		pane.classList.toggle('is-maximized', this.maximizedPane === side);
+		pane.classList.toggle('is-hidden-by-maximize', !!this.maximizedPane && this.maximizedPane !== side);
 		const browserTitle = side === 'left' ? '左侧文件浏览' : '右侧文件浏览';
 
 		const header = $('.turbofile-pane-header');
@@ -1863,6 +1870,12 @@ export class TurboFileEditor extends EditorPane {
 		this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', 'secondary');
 		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', gridAccent);
 		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
+		this.appendToolbarButton(
+			toolbar,
+			this.maximizedPane === side ? Codicon.screenNormal : Codicon.screenFull,
+			this.maximizedPane === side ? '恢复双栏' : '单栏显示',
+			() => this.togglePaneMaximized(side)
+		);
 
 		const pathbar = this.renderPanePathbar(side, device, state, toolbarAccent);
 		const selectedCount = this.getSelectedTransferItems(side).length;
@@ -4961,6 +4974,14 @@ export class TurboFileEditor extends EditorPane {
 		const state = this.syncPreviewState;
 		this.syncPreviewState = undefined;
 		state?.resolve(plan);
+		this.render();
+	}
+
+	private togglePaneMaximized(side: 'left' | 'right'): void {
+		this.maximizedPane = this.maximizedPane === side ? undefined : side;
+		this.lastActiveSide = side;
+		this.fileListRenderedRange.left = undefined;
+		this.fileListRenderedRange.right = undefined;
 		this.render();
 	}
 
