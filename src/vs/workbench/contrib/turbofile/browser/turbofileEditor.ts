@@ -608,6 +608,7 @@ export class TurboFileEditor extends EditorPane {
 	private remoteFileSystemProvider: TurboFileRemoteFileSystemProvider | undefined;
 	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
+	private terminalRevealInProgress = false;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
 	private maximizedPane: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
@@ -699,7 +700,7 @@ export class TurboFileEditor extends EditorPane {
 		this.ensureRemoteFileSystemProvider();
 		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => this.handleWorkbenchCommand(command)));
 		this._register(this.layoutService.onDidChangePartVisibility(event => {
-			if (event.partId === Parts.PANEL_PART && !event.visible) {
+			if (event.partId === Parts.PANEL_PART && !event.visible && !this.terminalRevealInProgress) {
 				this.restoreTaskbarAfterTerminal();
 			}
 		}));
@@ -863,8 +864,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderTransferPage(): HTMLElement {
 		const page = $('.turbofile-transfer-page');
-		if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
+		const hasLiveTransfer = this.tasks.some(task => task.kind === 'transfer' && task.status === 'running');
+		if (hasLiveTransfer) {
 			page.classList.add('has-live-transfer');
+		}
+		if (this.taskbarHiddenForTerminal) {
+			page.classList.add('is-terminal-focused');
 		}
 		if (this.maximizedPane) {
 			page.classList.add('is-pane-maximized');
@@ -874,10 +879,8 @@ export class TurboFileEditor extends EditorPane {
 		main.appendChild(this.renderPane('left'));
 		main.appendChild(this.renderPane('right'));
 		page.appendChild(main);
-		if (!this.taskbarHiddenForTerminal || this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
+		if (!this.taskbarHiddenForTerminal) {
 			page.appendChild(this.renderTaskbar());
-		} else {
-			page.classList.add('is-terminal-focused');
 		}
 		return page;
 	}
@@ -8373,12 +8376,12 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.taskbarHiddenForTerminal = true;
+		this.terminalRevealInProgress = true;
 		this.render();
 		const title = this.getTerminalTitle(side, device);
-		await this.terminalGroupService.showPanel(true);
-		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
-			const task = this.beginTask('terminal', `打开终端 ${title}`, state.path);
-			try {
+		try {
+			await this.terminalGroupService.showPanel(true);
+			if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
 				const defaultProfile = this.terminalProfileService.getDefaultProfile();
 				await this.createAndRevealTerminal({
 					cwd: state.path,
@@ -8390,17 +8393,11 @@ export class TurboFileEditor extends EditorPane {
 						icon: defaultProfile.icon ?? Codicon.terminal
 					} : undefined
 				});
-				this.finishTask(task, 'success', `已打开本地终端：${title}`);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				this.restoreTaskbarAfterTerminal();
-				this.finishTask(task, 'error', `打开本地终端失败：${message}`, { error: message });
+				this.statusMessage = `已打开本地终端：${title}`;
+				this.render();
+				return;
 			}
-			return;
-		}
 
-		const task = this.beginTask('terminal', `打开 SSH 终端 ${title}`, state.path);
-		try {
 			const connection = await this.getSshConnectionOptions(device);
 			await this.createAndRevealTerminal({
 				location: TerminalLocation.Panel,
@@ -8411,11 +8408,17 @@ export class TurboFileEditor extends EditorPane {
 					customPtyImplementation: (id, cols, rows) => new TurboFileSshTerminalProcess(id, cols, rows, this.sshService, connection, state.path)
 				}
 			});
-			this.finishTask(task, 'success', `已打开内置 SSH 终端：${title}`);
+			this.statusMessage = `已打开内置 SSH 终端：${title}`;
+			this.render();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.restoreTaskbarAfterTerminal();
-			this.finishTask(task, 'error', `打开 SSH 终端失败：${message}`, { error: message });
+			this.statusMessage = device.id === LOCAL_WINDOWS_DEVICE_ID
+				? `打开本地终端失败：${message}`
+				: `打开 SSH 终端失败：${message}`;
+			this.render();
+		} finally {
+			this.terminalRevealInProgress = false;
 		}
 	}
 
