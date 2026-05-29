@@ -160,6 +160,7 @@ interface ITurboFileSshTerminalMainSession {
 	bootstrapping: boolean;
 	hasDataListener: boolean;
 	closed: boolean;
+	sharedDirectorySessionKey?: string;
 }
 
 interface IRemoteDirectorySftpSession {
@@ -1428,7 +1429,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error(configResult.message);
 		}
 
-		const client = await this.connect(configResult.config);
+		const reusableDirectorySession = await this.getReusableDirectorySftpSession(options);
+		const client = reusableDirectorySession?.client ?? await this.connect(configResult.config);
 		let stream: ISSHShellStream | undefined;
 		try {
 			stream = await this.openShell(client, cols, rows);
@@ -1442,7 +1444,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bootstrapBuffer: '',
 				bootstrapping: true,
 				hasDataListener: false,
-				closed: false
+				closed: false,
+				sharedDirectorySessionKey: reusableDirectorySession?.key
 			};
 			this.terminalSessions.set(sessionId, session);
 
@@ -1491,7 +1494,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			};
 		} catch (error) {
 			stream?.end();
-			client.end();
+			if (!reusableDirectorySession) {
+				client.end();
+			} else {
+				this.touchDirectorySftpSession(reusableDirectorySession.key);
+			}
 			throw error;
 		}
 	}
@@ -2203,6 +2210,29 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return session;
 	}
 
+	private async getReusableDirectorySftpSession(options: ITurboFileSshConnectionOptions): Promise<IRemoteDirectorySftpSession | undefined> {
+		const key = this.getDirectorySftpSessionKey(options);
+		const existing = this.directorySftpSessions.get(key);
+		if (!existing) {
+			return undefined;
+		}
+
+		try {
+			const session = await existing;
+			if (session.closed) {
+				this.directorySftpSessions.delete(key);
+				return undefined;
+			}
+
+			// Keep the shared SSH client alive while the interactive terminal owns a shell channel.
+			this.clearDirectorySftpIdleTimer(key);
+			return session;
+		} catch {
+			this.directorySftpSessions.delete(key);
+			return undefined;
+		}
+	}
+
 	private async createDirectorySftpSession(key: string, config: ConnectConfig): Promise<IRemoteDirectorySftpSession> {
 		const client = await this.connect(config);
 		let sftp: ISFTPWrapper | undefined;
@@ -2474,10 +2504,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} catch {
 			// Ignore cleanup errors from already closed SSH channels.
 		}
-		try {
-			session.client.end();
-		} catch {
-			// Ignore cleanup errors from already closed SSH clients.
+		if (session.sharedDirectorySessionKey) {
+			this.touchDirectorySftpSession(session.sharedDirectorySessionKey);
+		} else {
+			try {
+				session.client.end();
+			} catch {
+				// Ignore cleanup errors from already closed SSH clients.
+			}
 		}
 		session.exitEmitter.fire(exitCode);
 		session.dataEmitter.dispose();

@@ -8398,7 +8398,7 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 
-			const connection = await this.getSshConnectionOptions(device);
+			const connection = this.getSshConnectionOptions(device);
 			await this.createAndRevealTerminal({
 				location: TerminalLocation.Panel,
 				config: {
@@ -9772,7 +9772,7 @@ class TurboFileSshTerminalProcess extends BasePty implements ITerminalChildProce
 		cols: number,
 		rows: number,
 		private readonly sshService: ITurboFileSshService,
-		private readonly connection: ITurboFileSshConnectionOptions,
+		private readonly connection: Promise<ITurboFileSshConnectionOptions> | ITurboFileSshConnectionOptions,
 		private readonly cwd: string
 	) {
 		super(id, false);
@@ -9780,12 +9780,16 @@ class TurboFileSshTerminalProcess extends BasePty implements ITerminalChildProce
 		this._lastDimensions.rows = rows;
 		this._properties.cwd = cwd;
 		this._properties.initialCwd = cwd;
-		this._properties.title = `极速传 ${connection.username}@${connection.host}`;
+		void Promise.resolve(connection).then(resolvedConnection => {
+			this._properties.title = `极速传 ${resolvedConnection.username}@${resolvedConnection.host}`;
+			this.handleDidChangeProperty({ type: ProcessPropertyType.Title, value: this._properties.title });
+		}, () => undefined);
 	}
 
 	async start(): Promise<ITerminalLaunchError | ITerminalLaunchResult | undefined> {
 		try {
-			const session = await this.sshService.createSshTerminal(this.connection, this.cwd, this._lastDimensions.cols, this._lastDimensions.rows);
+			const connection = await this.connection;
+			const session = await this.sshService.createSshTerminal(connection, this.cwd, this._lastDimensions.cols, this._lastDimensions.rows);
 			this.sessionId = session.sessionId;
 			this._properties.cwd = session.cwd;
 			this._properties.initialCwd = session.cwd;
