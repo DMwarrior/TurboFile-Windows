@@ -14,7 +14,7 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferDependency } from '../common/turbofile.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -338,9 +338,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				handle.end();
 				return true;
 			}).catch(() => false);
-			const [scp, rsync, tar, zip, unzip] = await Promise.all([
+			const [scp, rsync, sshpass, tar, zip, unzip] = await Promise.all([
 				hasCommand('scp'),
 				hasCommand('rsync'),
+				hasCommand('sshpass'),
 				hasCommand('tar'),
 				hasCommand('zip'),
 				hasCommand('unzip')
@@ -353,6 +354,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					sftp,
 					scp,
 					rsync,
+					sshpass,
 					shell: true,
 					archive: tar || zip || unzip
 				}
@@ -365,6 +367,43 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} finally {
 			client?.end();
 		}
+	}
+
+	async installTransferDependencies(options: ITurboFileSshConnectionOptions, packages: readonly TurboFileTransferDependency[]): Promise<ITurboFileDependencyInstallResult> {
+		const requestedPackages = normalizeTransferDependencies(packages);
+		if (!requestedPackages.length) {
+			return { ok: true, message: 'No dependencies requested.', installedPackages: [], missingPackages: [] };
+		}
+
+		const configResult = await this.createConnectConfig(options);
+		if (!configResult.ok) {
+			return { ok: false, message: configResult.message, installedPackages: [], missingPackages: requestedPackages };
+		}
+
+		let installError: Error | undefined;
+		let client: ISSHClient | undefined;
+		try {
+			client = await this.connect(configResult.config);
+			await this.execRemote(client, buildTransferDependencyInstallCommand(requestedPackages, options));
+		} catch (error) {
+			installError = error instanceof Error ? error : new Error(String(error));
+		} finally {
+			client?.end();
+		}
+
+		const capabilityResult = await this.detectCapabilities(options);
+		const capabilities = capabilityResult.capabilities;
+		const missingPackages = capabilities ? getMissingTransferDependencies(requestedPackages, capabilities) : requestedPackages;
+		const installedPackages = requestedPackages.filter(pkg => !missingPackages.includes(pkg));
+		const ok = capabilityResult.ok && missingPackages.length === 0;
+		const missingMessage = missingPackages.length ? `缺少 ${missingPackages.join('、')}` : '依赖已安装';
+		return {
+			ok,
+			message: ok ? 'rsync/sshpass 安装并检测成功。' : `${installError ? `${installError.message}；` : ''}${missingMessage}`,
+			installedPackages,
+			missingPackages,
+			capabilities
+		};
 	}
 
 	async listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh = false): Promise<ITurboFileDirectoryListing> {
@@ -4096,6 +4135,49 @@ function getTransferName(path: string): string {
 
 function quotePosixShellArg(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function normalizeTransferDependencies(packages: readonly TurboFileTransferDependency[]): TurboFileTransferDependency[] {
+	const allowed = new Set<TurboFileTransferDependency>(['rsync', 'sshpass']);
+	const normalized: TurboFileTransferDependency[] = [];
+	for (const pkg of packages) {
+		if (allowed.has(pkg) && !normalized.includes(pkg)) {
+			normalized.push(pkg);
+		}
+	}
+	return normalized;
+}
+
+function getMissingTransferDependencies(packages: readonly TurboFileTransferDependency[], capabilities: ITurboFileRemoteCapabilities): TurboFileTransferDependency[] {
+	return packages.filter(pkg => pkg === 'rsync' ? !capabilities.rsync : !capabilities.sshpass);
+}
+
+function buildTransferDependencyInstallCommand(packages: readonly TurboFileTransferDependency[], options: ITurboFileSshConnectionOptions): string {
+	const packageArgs = packages.map(pkg => quotePosixShellArg(pkg)).join(' ');
+	const installScript = [
+		'set -e',
+		`packages="${packages.join(' ')}"`,
+		'if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y "$@"',
+		'elif command -v dnf >/dev/null 2>&1; then dnf install -y "$@"',
+		'elif command -v yum >/dev/null 2>&1; then yum install -y "$@"',
+		'elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm "$@"',
+		'elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install "$@"',
+		'elif command -v apk >/dev/null 2>&1; then apk add --no-cache "$@"',
+		'else echo "未找到支持的包管理器，请手动安装 rsync 和 sshpass。" >&2; exit 42',
+		'fi'
+	].join('; ');
+	const installViaRoot = `sh -c ${quotePosixShellArg(installScript)} sh ${packageArgs}`;
+	const installViaPasswordSudo = options.password
+		? ` || (printf %s ${quotePosixShellArg(`${options.password}\n`)} | sudo -S -p '' sh -c ${quotePosixShellArg(installScript)} sh ${packageArgs})`
+		: '';
+	// Prefer root or passwordless sudo; password sudo is only attempted when the SSH password is available.
+	return [
+		'if [ "$(id -u)" -eq 0 ]; then',
+		installViaRoot,
+		'; elif command -v sudo >/dev/null 2>&1; then',
+		`(sudo -n sh -c ${quotePosixShellArg(installScript)} sh ${packageArgs})${installViaPasswordSudo}`,
+		'; else echo "当前用户不是 root，且远端没有 sudo，无法自动安装。" >&2; exit 43; fi'
+	].join(' ');
 }
 
 function runLocalCommand(command: string, args: string[]): Promise<void> {

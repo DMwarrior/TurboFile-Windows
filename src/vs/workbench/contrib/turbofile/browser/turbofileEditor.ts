@@ -22,7 +22,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -249,6 +249,13 @@ type TurboFileTaskKind = 'transfer' | 'delete' | 'rename' | 'mkdir' | 'create-fi
 type TurboFileTaskStatus = 'running' | 'success' | 'error' | 'canceled';
 type TurboFileTransferItemStatus = 'waiting' | 'running' | 'success' | 'error' | 'canceled';
 type TurboFileTransferStrategy = ITurboFileTransferResult['strategy'];
+
+interface TurboFileProtocolCheckResult {
+	readonly status: 'success' | 'error';
+	readonly message: string;
+	readonly capabilities?: ITurboFileRemoteCapabilities;
+	readonly missingDependencies?: readonly TurboFileTransferDependency[];
+}
 
 interface TurboFileTaskRetryTransfer {
 	readonly sourceSide: 'left' | 'right';
@@ -952,7 +959,6 @@ export class TurboFileEditor extends EditorPane {
 		const actions = $('.turbofile-page-card-actions');
 		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }, true));
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			actions.appendChild(this.createPageButton(Codicon.sync, '检测协议', () => { void this.detectDeviceProtocol(device); }));
 			actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 			actions.appendChild(this.createPageButton(Codicon.trash, '删除', () => { void this.deleteDeviceFromPage(device); }));
 		}
@@ -1680,27 +1686,7 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
-	private async detectDeviceProtocol(device: TurboFileDevice): Promise<void> {
-		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
-			return;
-		}
-
-		this.deviceConnectionMessages.set(device.id, { status: 'testing', message: '正在检测传输协议能力...' });
-		this.statusMessage = `正在检测 ${device.name} 的传输协议能力...`;
-		this.render();
-		const result = await this.detectAndStoreDeviceCapabilities(device);
-		this.devices = this.deviceStore?.loadDevices() ?? this.devices;
-		if (result) {
-			this.deviceConnectionMessages.set(device.id, result);
-			this.statusMessage = `${device.name}：${result.message}`;
-		} else {
-			this.deviceConnectionMessages.set(device.id, { status: 'success', message: 'SFTP 默认稳定，无需额外检测。' });
-			this.statusMessage = `${device.name}：SFTP 默认稳定，无需额外检测。`;
-		}
-		this.render();
-	}
-
-	private async detectAndStoreDeviceCapabilities(device: TurboFileDevice): Promise<{ status: 'success' | 'error'; message: string } | undefined> {
+	private async detectAndStoreDeviceCapabilities(device: TurboFileDevice): Promise<TurboFileProtocolCheckResult | undefined> {
 		if (!this.deviceStore || device.id === LOCAL_WINDOWS_DEVICE_ID || device.preferredTransferProtocol === 'sftp') {
 			return undefined;
 		}
@@ -1712,17 +1698,50 @@ export class TurboFileEditor extends EditorPane {
 
 		const capabilities = this.toDeviceCapabilities(result.capabilities);
 		this.deviceStore.updateDeviceCapabilities(device.id, capabilities);
-		if (device.preferredTransferProtocol === 'rsync') {
-			return capabilities.rsync
-				? { status: 'success', message: 'rsync 可用，服务器互传会优先极速模式。' }
-				: { status: 'error', message: 'rsync 不可用，将按 SFTP 兜底。请安装 rsync 后重新检测。' };
+		return this.getProtocolCheckResult(this.normalizeTransferProtocol(device.preferredTransferProtocol ?? 'sftp'), result.capabilities);
+	}
+
+	private async detectDraftProtocolCapabilities(draft: TurboFileDeviceDraft, editingDevice: TurboFileDevice | undefined): Promise<TurboFileProtocolCheckResult | undefined> {
+		if (draft.preferredTransferProtocol === 'sftp') {
+			return { status: 'success', message: 'SFTP 默认稳定，无需额外检测。', missingDependencies: [] };
 		}
-		if (device.preferredTransferProtocol === 'scp') {
+
+		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptionsFromDraft(draft, editingDevice));
+		if (!result.ok || !result.capabilities) {
+			return { status: 'error', message: `协议能力检测失败：${result.message}`, missingDependencies: [] };
+		}
+
+		return this.getProtocolCheckResult(this.normalizeTransferProtocol(draft.preferredTransferProtocol ?? 'sftp'), result.capabilities);
+	}
+
+	private getProtocolCheckResult(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileProtocolCheckResult | undefined {
+		if (protocol === 'rsync') {
+			const missingDependencies = this.getMissingProtocolDependencies(protocol, capabilities);
+			if (!missingDependencies.length) {
+				return { status: 'success', message: 'rsync 可用，sshpass 可用。服务器互传会优先极速模式。', capabilities, missingDependencies };
+			}
+			return { status: 'error', message: `缺少 ${missingDependencies.join('、')}，服务器互传将按 SFTP 兜底。`, capabilities, missingDependencies };
+		}
+		if (protocol === 'scp') {
 			return capabilities.scp
-				? { status: 'success', message: 'SCP 可用，兼容模式可使用。' }
-				: { status: 'error', message: 'SCP 不可用，将按 SFTP 兜底。' };
+				? { status: 'success', message: 'SCP 可用，兼容模式可使用。', capabilities, missingDependencies: [] }
+				: { status: 'error', message: 'SCP 不可用，将按 SFTP 兜底。', capabilities, missingDependencies: [] };
 		}
 		return undefined;
+	}
+
+	private getMissingProtocolDependencies(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileTransferDependency[] {
+		if (protocol !== 'rsync') {
+			return [];
+		}
+		const missing: TurboFileTransferDependency[] = [];
+		if (!capabilities.rsync) {
+			missing.push('rsync');
+		}
+		if (!capabilities.sshpass) {
+			missing.push('sshpass');
+		}
+		return missing;
 	}
 
 	private toDeviceCapabilities(capabilities: ITurboFileRemoteCapabilities): TurboFileDeviceCapabilities {
@@ -1730,7 +1749,7 @@ export class TurboFileEditor extends EditorPane {
 			ssh: capabilities.ssh,
 			sftp: capabilities.sftp,
 			scp: capabilities.scp,
-			rsync: capabilities.rsync,
+			rsync: capabilities.rsync && capabilities.sshpass,
 			shell: capabilities.shell,
 			archive: capabilities.archive
 		};
@@ -8768,6 +8787,18 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
+	private async getSshConnectionOptionsFromDraft(draft: TurboFileDeviceDraft, editingDevice?: TurboFileDevice): Promise<ITurboFileSshConnectionOptions> {
+		return {
+			host: draft.host,
+			port: draft.port || 22,
+			username: draft.username,
+			password: draft.password ?? (editingDevice ? await this.deviceStore?.getPassword(editingDevice.id) : undefined),
+			privateKey: draft.privateKey ?? (editingDevice ? await this.deviceStore?.getPrivateKey(editingDevice.id) : undefined),
+			privateKeyPath: draft.privateKeyPath,
+			passphrase: draft.passphrase ?? (editingDevice ? await this.deviceStore?.getPassphrase(editingDevice.id) : undefined)
+		};
+	}
+
 	private clearPaneSelection(side: 'left' | 'right'): void {
 		const state = this.paneStates[side];
 		state.selectedPath = undefined;
@@ -9207,11 +9238,7 @@ export class TurboFileEditor extends EditorPane {
 			['password', '密码'],
 			['privateKey', '私钥']
 		], editingDevice?.authType ?? 'password');
-		this.appendSelectField(form, 'preferredTransferProtocol', '传输协议', [
-			['sftp', 'SFTP 默认稳定'],
-			['rsync', 'rsync 极速模式'],
-			['scp', 'SCP 兼容模式']
-		], editingDevice?.preferredTransferProtocol ?? 'sftp');
+		this.appendProtocolField(form, editingDevice);
 		this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
 		this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\User\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
 		this.appendInputField(form, 'passphrase', '私钥口令', isEditing ? '留空保持原私钥口令' : '', 'password', true);
@@ -9306,6 +9333,150 @@ export class TurboFileEditor extends EditorPane {
 		field.appendChild(labelElement);
 		field.appendChild(input);
 		parent.appendChild(field);
+	}
+
+	private appendProtocolField(parent: HTMLElement, editingDevice?: TurboFileDevice): void {
+		const field = $('.turbofile-device-field.is-wide');
+		const labelElement = document.createElement('label');
+		labelElement.textContent = '传输协议';
+		labelElement.htmlFor = 'turbofile-device-preferredTransferProtocol';
+
+		const row = $('.turbofile-device-protocol-row');
+		row.style.display = 'grid';
+		row.style.gridTemplateColumns = 'minmax(180px, 1fr) auto auto';
+		row.style.gap = '8px';
+		row.style.alignItems = 'center';
+
+		const select = document.createElement('select');
+		select.id = 'turbofile-device-preferredTransferProtocol';
+		select.name = 'preferredTransferProtocol';
+		for (const [value, text] of [
+			['sftp', 'SFTP 默认稳定'],
+			['rsync', 'rsync 极速模式'],
+			['scp', 'SCP 兼容模式']
+		] as [string, string][]) {
+			const option = document.createElement('option');
+			option.value = value;
+			option.textContent = text;
+			option.selected = (editingDevice?.preferredTransferProtocol ?? 'sftp') === value;
+			select.appendChild(option);
+		}
+		this.bindDeviceFormControl(select);
+
+		const detect = this.createButton('检测', 'turbofile-secondary-button').element;
+		detect.type = 'button';
+		const install = this.createButton('安装 rsync/sshpass', 'turbofile-secondary-button').element;
+		install.type = 'button';
+		install.style.display = 'none';
+
+		const status = $('.turbofile-device-protocol-status');
+		status.style.gridColumn = '1 / -1';
+		status.style.minHeight = '18px';
+		status.style.color = 'var(--vscode-descriptionForeground)';
+		status.textContent = select.value === 'sftp' ? 'SFTP 默认稳定，无需额外检测。' : '选择后将自动检测协议能力。';
+
+		let lastMissingDependencies: readonly TurboFileTransferDependency[] = [];
+		let detectionRun = 0;
+		const setStatus = (kind: 'idle' | 'testing' | 'success' | 'error', message: string): void => {
+			status.textContent = message;
+			status.style.color = kind === 'success'
+				? 'var(--vscode-testing-iconPassed)'
+				: kind === 'error'
+					? 'var(--vscode-testing-iconFailed)'
+					: 'var(--vscode-descriptionForeground)';
+		};
+		const setInstallVisible = (visible: boolean): void => {
+			install.style.display = visible ? '' : 'none';
+		};
+		const runDetection = async (): Promise<void> => {
+			const protocol = this.normalizeTransferProtocol(select.value);
+			lastMissingDependencies = [];
+			setInstallVisible(false);
+			if (protocol === 'sftp') {
+				setStatus('idle', 'SFTP 默认稳定，无需额外检测。');
+				return;
+			}
+			const draft = this.readDeviceDraft(parent as HTMLFormElement, status);
+			if (!draft) {
+				setInstallVisible(false);
+				return;
+			}
+			const runId = ++detectionRun;
+			detect.disabled = true;
+			install.disabled = true;
+			setStatus('testing', '正在检测协议能力...');
+			try {
+				const result = await this.detectDraftProtocolCapabilities(draft, editingDevice);
+				if (runId !== detectionRun) {
+					return;
+				}
+				if (!result) {
+					setStatus('idle', 'SFTP 默认稳定，无需额外检测。');
+					setInstallVisible(false);
+					return;
+				}
+				lastMissingDependencies = result.missingDependencies ?? [];
+				setStatus(result.status, result.message);
+				setInstallVisible(protocol === 'rsync' && lastMissingDependencies.length > 0 && !!result.capabilities);
+			} catch (error) {
+				if (runId !== detectionRun) {
+					return;
+				}
+				const reason = error instanceof Error ? error.message : String(error);
+				setStatus('error', `协议检测失败：${reason}`);
+				setInstallVisible(false);
+			} finally {
+				if (runId === detectionRun) {
+					detect.disabled = false;
+					install.disabled = false;
+				}
+			}
+		};
+		detect.addEventListener('click', () => { void runDetection(); });
+		select.addEventListener('change', () => { void runDetection(); });
+		install.addEventListener('click', async () => {
+			const dependencies = lastMissingDependencies.filter((dependency): dependency is TurboFileTransferDependency => dependency === 'rsync' || dependency === 'sshpass');
+			if (!dependencies.length) {
+				return;
+			}
+			const confirmed = getWindow(this.container).confirm(`将在远端服务器安装：${dependencies.join('、')}\n\n该操作会修改远端系统包，请确认你信任这台服务器并拥有安装权限。`);
+			if (!confirmed) {
+				return;
+			}
+			const draft = this.readDeviceDraft(parent as HTMLFormElement, status);
+			if (!draft) {
+				return;
+			}
+			detect.disabled = true;
+			install.disabled = true;
+			setStatus('testing', '正在远端安装 rsync/sshpass...');
+			const result = await this.sshService.installTransferDependencies(await this.getSshConnectionOptionsFromDraft(draft, editingDevice), dependencies);
+			if (result.capabilities && editingDevice && this.deviceStore) {
+				this.deviceStore.updateDeviceCapabilities(editingDevice.id, this.toDeviceCapabilities(result.capabilities));
+				this.devices = this.deviceStore.loadDevices();
+			}
+			if (!result.ok) {
+				lastMissingDependencies = result.missingPackages;
+				setStatus('error', `安装后仍不可用：${result.message}`);
+				setInstallVisible(lastMissingDependencies.length > 0);
+			} else {
+				setStatus('success', 'rsync/sshpass 安装成功，正在重新检测...');
+				await runDetection();
+			}
+			detect.disabled = false;
+			install.disabled = false;
+		});
+
+		row.appendChild(select);
+		row.appendChild(detect);
+		row.appendChild(install);
+		row.appendChild(status);
+		field.appendChild(labelElement);
+		field.appendChild(row);
+		parent.appendChild(field);
+		if (select.value === 'rsync') {
+			window.setTimeout(() => { void runDetection(); }, 0);
+		}
 	}
 
 	private appendSelectField(parent: HTMLElement, name: string, label: string, options: [string, string][], selectedValue?: string): void {
