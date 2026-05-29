@@ -3380,9 +3380,8 @@ body.hc-black .turbofile-live-transfer-panel {
 	display: block;
 	padding: 8px 10px 10px;
 	color: color-mix(in srgb, var(--vscode-foreground) 84%, transparent);
-	font-size: 12px;
-	font-weight: 600;
 	line-height: 1.25;
+	text-align: center;
 	overflow-wrap: anywhere;
 	white-space: normal;
 	word-break: break-word;
@@ -5023,9 +5022,8 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	display: block;
 	padding: 8px 10px 10px;
 	color: var(--tf-image-text);
-	font-size: 12px;
-	font-weight: 600;
 	line-height: 1.25;
+	text-align: center;
 	overflow-wrap: anywhere;
 	white-space: normal;
 	word-break: break-word;

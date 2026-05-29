@@ -3824,7 +3824,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const dismiss = $('button.turbofile-image-preview-dismiss') as HTMLButtonElement;
 		dismiss.type = 'button';
-		dismiss.setAttribute('aria-label', 'Close overlay');
+		dismiss.setAttribute('aria-label', '关闭预览');
 		dismiss.addEventListener('click', () => this.closeImageGridPreview());
 		overlay.appendChild(dismiss);
 
@@ -3833,18 +3833,18 @@ export class TurboFileEditor extends EditorPane {
 		overlay.appendChild(stage);
 
 		const toolbar = $('.turbofile-image-preview-toolbar');
-		const pixelInspector = this.renderImagePreviewTopAction(Codicon.symbolColor, 'Toggle RGB pixel inspector', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible);
+		const pixelInspector = this.renderImagePreviewTopAction(Codicon.symbolColor, 'RGB 像素检查', () => this.toggleImagePreviewPixelInspector(), state.pixelInspectorVisible);
 		pixelInspector.dataset.turbofilePreviewToggle = 'pixel-inspector';
 		toolbar.appendChild(pixelInspector);
-		const losslessSampling = this.renderImagePreviewTopAction(Codicon.symbolRuler, 'Toggle lossless pixel zoom', () => this.toggleImagePreviewSamplingMode(), state.previewSamplingMode === 'lossless');
+		const losslessSampling = this.renderImagePreviewTopAction(Codicon.symbolRuler, '无损像素缩放', () => this.toggleImagePreviewSamplingMode(), state.previewSamplingMode === 'lossless');
 		losslessSampling.dataset.turbofilePreviewToggle = 'lossless-sampling';
 		toolbar.appendChild(losslessSampling);
-		const histogram = this.renderImagePreviewTopAction(Codicon.graphLine, 'Toggle histogram', () => this.toggleImagePreviewHistogram(), state.histogramVisible);
+		const histogram = this.renderImagePreviewTopAction(Codicon.graphLine, '直方图', () => this.toggleImagePreviewHistogram(), state.histogramVisible);
 		histogram.dataset.turbofilePreviewToggle = 'histogram';
 		toolbar.appendChild(histogram);
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, 'Download image', () => this.downloadImageGridPreview()));
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, 'Delete image', () => { void this.deleteImageGridPreview(); }));
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, 'Close', () => this.closeImageGridPreview()));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, '下载图片', () => this.downloadImageGridPreview()));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, '删除图片', () => { void this.deleteImageGridPreview(); }));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, '关闭', () => this.closeImageGridPreview()));
 		overlay.appendChild(toolbar);
 
 		if (state.histogramVisible) {
@@ -3902,7 +3902,7 @@ export class TurboFileEditor extends EditorPane {
 		controls.setAttribute('role', 'group');
 		controls.setAttribute('aria-label', 'Zoom controls');
 
-		const zoomOut = this.renderImagePreviewTopAction(Codicon.zoomOut, 'Zoom out', () => this.zoomImagePreviewByOculanteStep(-IMAGE_PREVIEW_BUTTON_ZOOM_DELTA));
+		const zoomOut = this.renderImagePreviewTopAction(Codicon.zoomOut, '缩小', () => this.zoomImagePreviewByOculanteStep(-IMAGE_PREVIEW_BUTTON_ZOOM_DELTA));
 		zoomOut.classList.add('is-transient');
 		zoomOut.disabled = state.previewZoom <= IMAGE_PREVIEW_ZOOM_MIN;
 		controls.appendChild(zoomOut);
@@ -3913,12 +3913,12 @@ export class TurboFileEditor extends EditorPane {
 		value.textContent = this.getImagePreviewZoomLabel(state);
 		controls.appendChild(value);
 
-		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, 'Zoom in', () => this.zoomImagePreviewByOculanteStep(IMAGE_PREVIEW_BUTTON_ZOOM_DELTA));
+		const zoomIn = this.renderImagePreviewTopAction(Codicon.zoomIn, '放大', () => this.zoomImagePreviewByOculanteStep(IMAGE_PREVIEW_BUTTON_ZOOM_DELTA));
 		zoomIn.classList.add('is-transient');
 		zoomIn.disabled = state.previewZoom >= IMAGE_PREVIEW_ZOOM_MAX;
 		controls.appendChild(zoomIn);
 
-		const reset = this.renderImagePreviewTopAction(Codicon.screenNormal, 'Reset to fit', () => this.resetImagePreviewView());
+		const reset = this.renderImagePreviewTopAction(Codicon.screenNormal, '适应窗口', () => this.resetImagePreviewView());
 		reset.classList.add('is-reset');
 		reset.disabled = state.previewFitPending;
 		controls.appendChild(reset);
@@ -3940,7 +3940,8 @@ export class TurboFileEditor extends EditorPane {
 		header.append('Histogram');
 		const close = $('button.turbofile-image-preview-histogram-close') as HTMLButtonElement;
 		close.type = 'button';
-		close.setAttribute('aria-label', 'Close histogram');
+		close.title = '关闭直方图';
+		close.setAttribute('aria-label', '关闭直方图');
 		close.appendChild(renderIcon(Codicon.close));
 		close.addEventListener('click', event => {
 			event.stopPropagation();
@@ -7193,7 +7194,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!state || !image?.item.path || !device) {
 			return;
 		}
-		if (!await this.showDialogConfirm('Delete image', `Delete ${image.item.name}?`, undefined, true)) {
+		if (!await this.showDialogConfirm('删除图片', `删除 ${image.item.name}？`, undefined, true)) {
 			return;
 		state.previewPendingIndex = undefined;
 		state.previewPendingRequestSeq = undefined;
