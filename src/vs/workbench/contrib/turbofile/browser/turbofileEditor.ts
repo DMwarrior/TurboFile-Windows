@@ -281,6 +281,16 @@ interface TurboFileInlineRenameState {
 	readonly directory: boolean;
 }
 
+interface TurboFileOptimisticRenameSnapshot {
+	readonly panePath: string;
+	readonly index: number;
+	readonly originalItem: TurboFileFileItem;
+	readonly renamedPath: string;
+	readonly selectedPath?: string;
+	readonly selectedPaths: string[];
+	readonly selectionAnchorPath?: string;
+}
+
 interface TurboFileTaskTransferItem {
 	readonly name: string;
 	readonly type: TurboFileFileType;
@@ -6855,6 +6865,78 @@ export class TurboFileEditor extends EditorPane {
 		return true;
 	}
 
+	private applyOptimisticRename(side: 'left' | 'right', item: TurboFileFileItem, targetName: string, targetPath: string): TurboFileOptimisticRenameSnapshot | undefined {
+		if (!item.path) {
+			return undefined;
+		}
+
+		const state = this.paneStates[side];
+		const index = state.items.findIndex(candidate => candidate.path === item.path);
+		if (index < 0) {
+			return undefined;
+		}
+
+		const snapshot: TurboFileOptimisticRenameSnapshot = {
+			panePath: state.path,
+			index,
+			originalItem: state.items[index],
+			renamedPath: targetPath,
+			selectedPath: state.selectedPath,
+			selectedPaths: Array.from(state.selectedPaths),
+			selectionAnchorPath: state.selectionAnchorPath
+		};
+		const now = Date.now();
+		const renamedItem: TurboFileFileItem = {
+			...state.items[index],
+			name: targetName,
+			path: targetPath,
+			modified: formatDate(now),
+			rawModified: now
+		};
+
+		state.items = [...state.items];
+		state.items[index] = renamedItem;
+		if (state.selectedPath === item.path) {
+			state.selectedPath = targetPath;
+		}
+		if (state.selectionAnchorPath === item.path) {
+			state.selectionAnchorPath = targetPath;
+		}
+		if (state.selectedPaths.delete(item.path)) {
+			state.selectedPaths.add(targetPath);
+		}
+		this.fileListRenderedRange[side] = undefined;
+		const device = this.getPaneDevice(side);
+		if (device) {
+			this.paneDirectoryCache.delete(this.getPaneDirectoryCacheKey(device, state.path));
+		}
+		this.statusMessage = `\u5df2\u91cd\u547d\u540d\uff1a${item.name} -> ${targetName}`;
+		this.rememberPaneDeviceSnapshot(side);
+		this.render();
+		return snapshot;
+	}
+
+	private revertOptimisticRename(side: 'left' | 'right', snapshot: TurboFileOptimisticRenameSnapshot): void {
+		const state = this.paneStates[side];
+		if (state.path !== snapshot.panePath) {
+			return;
+		}
+
+		const renamedIndex = state.items.findIndex(item => item.path === snapshot.renamedPath);
+		state.items = [...state.items];
+		if (renamedIndex >= 0) {
+			state.items[renamedIndex] = snapshot.originalItem;
+		} else {
+			state.items.splice(Math.min(snapshot.index, state.items.length), 0, snapshot.originalItem);
+		}
+		state.selectedPath = snapshot.selectedPath;
+		state.selectedPaths = new Set(snapshot.selectedPaths);
+		state.selectionAnchorPath = snapshot.selectionAnchorPath;
+		this.fileListRenderedRange[side] = undefined;
+		this.rememberPaneDeviceSnapshot(side);
+		this.render();
+	}
+
 	private async renameSelected(side: 'left' | 'right'): Promise<void> {
 		const item = this.getSelectedItem(side);
 		const device = this.getPaneDevice(side);
@@ -6924,6 +7006,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const targetName = nextName.trim();
 		const targetPath = joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(device));
+		const optimisticRename = this.applyOptimisticRename(side, item, targetName, targetPath);
 		const task = this.beginTask('rename', `重命名 ${item.name}`, `${item.name} -> ${targetName}`);
 		try {
 			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, item.path), targetPath);
@@ -6931,13 +7014,17 @@ export class TurboFileEditor extends EditorPane {
 				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 				this.finishTask(task, 'success', `已重命名：${item.name} -> ${targetName}`);
 			} else {
+				if (optimisticRename) {
+					this.revertOptimisticRename(side, optimisticRename);
+				}
 				this.finishTask(task, 'error', `重命名失败：${result.message}`, { error: result.message });
 			}
 		} catch (error) {
+			if (optimisticRename) {
+				this.revertOptimisticRename(side, optimisticRename);
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `重命名失败：${message}`, { error: message });
-		} finally {
-			await this.refreshPane(side, { force: true });
 		}
 	}
 
