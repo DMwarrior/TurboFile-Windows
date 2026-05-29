@@ -5181,8 +5181,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 12px;
 	background: var(--tf-image-control-bg);
 	color: var(--tf-image-muted);
-	font-size: 12px;
-	font-weight: 600;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	box-shadow: var(--tf-image-card-shadow);
@@ -5513,8 +5511,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 10px;
 	background: var(--tf-preview-control-bg);
 	color: var(--tf-preview-control-text);
-	font-size: 12px;
-	font-weight: 500;
 	box-shadow: var(--tf-preview-elevated-shadow);
 	backdrop-filter: none;
 	pointer-events: auto;
@@ -5531,7 +5527,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	font-weight: 700;
 	color: var(--tf-preview-control-text);
 }
 
