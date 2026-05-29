@@ -886,7 +886,7 @@ export class TurboFileEditor extends EditorPane {
 				this.statusMessage = `设备列表已刷新：${this.devices.length} 台 SSH 设备。`;
 				this.render();
 			}),
-			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm(), true)
+			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm())
 		]));
 
 		const grid = $('.turbofile-device-page-grid');
@@ -957,7 +957,7 @@ export class TurboFileEditor extends EditorPane {
 		card.appendChild(meta);
 
 		const actions = $('.turbofile-page-card-actions');
-		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }, true));
+		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }));
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
 			actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 			actions.appendChild(this.createPageButton(Codicon.trash, '删除', () => { void this.deleteDeviceFromPage(device); }));
