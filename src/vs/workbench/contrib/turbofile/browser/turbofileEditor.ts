@@ -8143,13 +8143,14 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const resource = device.id === LOCAL_WINDOWS_DEVICE_ID
 				? URI.file(item.path)
-				: this.ensureRemoteFileSystemProvider().registerFile(device, await this.getSshConnectionOptions(device), item);
+				: this.ensureRemoteFileSystemProvider().registerFile(device, this.getSshConnectionOptions(device), item);
+			const languageId = this.languageService.guessLanguageIdByFilepathOrFirstLine(resource) ?? undefined;
 
 			void this.editorService.openEditor({
 				resource,
+				languageId,
 				options: {
 					pinned: true,
-					revealIfOpened: true,
 					override: DEFAULT_EDITOR_ASSOCIATION.id
 				}
 			}).catch(reportOpenError);
@@ -9560,7 +9561,7 @@ export class TurboFileEditor extends EditorPane {
 }
 
 interface TurboFileRegisteredRemoteDevice {
-	readonly connection: ITurboFileSshConnectionOptions;
+	readonly connection: Promise<ITurboFileSshConnectionOptions>;
 	readonly label: string;
 }
 
@@ -9580,7 +9581,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 		super();
 	}
 
-	registerFile(device: TurboFileDevice, connection: ITurboFileSshConnectionOptions, item: TurboFileFileItem): URI {
+	registerFile(device: TurboFileDevice, connection: Promise<ITurboFileSshConnectionOptions>, item: TurboFileFileItem): URI {
 		const resource = URI.from({
 			scheme: TURBOFILE_REMOTE_DOCUMENT_SCHEME,
 			authority: device.id,
@@ -9614,7 +9615,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 	}
 
 	async mkdir(resource: URI): Promise<void> {
-		const result = await this.sshService.createDirectory(this.toEndpoint(resource));
+		const result = await this.sshService.createDirectory(await this.toEndpoint(resource));
 		if (!result.ok) {
 			throw createTurboFileProviderError(result.message, FileSystemProviderErrorCode.Unknown);
 		}
@@ -9624,7 +9625,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 
 	async readdir(resource: URI): Promise<[string, FileType][]> {
 		const registeredDevice = this.getRegisteredDevice(resource);
-		const listing = await this.sshService.listRemoteDirectory(registeredDevice.connection, this.toRemotePath(resource));
+		const listing = await this.sshService.listRemoteDirectory(await registeredDevice.connection, this.toRemotePath(resource));
 		return listing.entries.map(entry => {
 			const childResource = URI.from({
 				scheme: TURBOFILE_REMOTE_DOCUMENT_SCHEME,
@@ -9638,7 +9639,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 	}
 
 	async delete(resource: URI, opts: IFileDeleteOptions): Promise<void> {
-		const result = await this.sshService.deletePath(this.toEndpoint(resource), opts.recursive);
+		const result = await this.sshService.deletePath(await this.toEndpoint(resource), opts.recursive);
 		if (!result.ok) {
 			throw createTurboFileProviderError(result.message, FileSystemProviderErrorCode.Unknown);
 		}
@@ -9648,7 +9649,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 	}
 
 	async rename(from: URI, to: URI, _opts: IFileOverwriteOptions): Promise<void> {
-		const result = await this.sshService.renamePath(this.toEndpoint(from), this.toRemotePath(to));
+		const result = await this.sshService.renamePath(await this.toEndpoint(from), this.toRemotePath(to));
 		if (!result.ok) {
 			throw createTurboFileProviderError(result.message, FileSystemProviderErrorCode.Unknown);
 		}
@@ -9669,7 +9670,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 	}
 
 	async readFile(resource: URI): Promise<Uint8Array> {
-		const result = await this.sshService.readFile(this.toEndpoint(resource), { encoding: 'base64', maxBytes: 256 * 1024 * 1024 });
+		const result = await this.sshService.readFile(await this.toEndpoint(resource), { encoding: 'base64', maxBytes: 256 * 1024 * 1024 });
 		if (!result.ok) {
 			throw createTurboFileProviderError(result.message, FileSystemProviderErrorCode.Unknown);
 		}
@@ -9686,7 +9687,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 	}
 
 	async writeFile(resource: URI, content: Uint8Array, _opts: IFileWriteOptions): Promise<void> {
-		const result = await this.sshService.writeFile(this.toEndpoint(resource), encodeBase64(VSBuffer.wrap(content)), 'base64');
+		const result = await this.sshService.writeFile(await this.toEndpoint(resource), encodeBase64(VSBuffer.wrap(content)), 'base64');
 		if (!result.ok) {
 			throw createTurboFileProviderError(result.message, FileSystemProviderErrorCode.Unknown);
 		}
@@ -9706,7 +9707,7 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 		const registeredDevice = this.getRegisteredDevice(resource);
 		const path = this.toRemotePath(resource);
 		const parentPath = getPaneParentPath(path, false) ?? '/';
-		const listing = await this.sshService.listRemoteDirectory(registeredDevice.connection, parentPath);
+		const listing = await this.sshService.listRemoteDirectory(await registeredDevice.connection, parentPath);
 		const name = getPathBasename(path);
 		const entry = listing.entries.find(entry => entry.path === path || entry.name === name);
 		if (!entry) {
@@ -9715,12 +9716,12 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 		return entry;
 	}
 
-	private toEndpoint(resource: URI): ITurboFileTransferEndpoint {
+	private async toEndpoint(resource: URI): Promise<ITurboFileTransferEndpoint> {
 		const registeredDevice = this.getRegisteredDevice(resource);
 		return {
 			kind: 'ssh',
 			path: this.toRemotePath(resource),
-			connection: registeredDevice.connection,
+			connection: await registeredDevice.connection,
 			label: registeredDevice.label
 		};
 	}
