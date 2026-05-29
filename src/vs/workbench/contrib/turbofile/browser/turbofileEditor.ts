@@ -952,6 +952,7 @@ export class TurboFileEditor extends EditorPane {
 		const actions = $('.turbofile-page-card-actions');
 		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }, true));
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			actions.appendChild(this.createPageButton(Codicon.sync, '检测协议', () => { void this.detectDeviceProtocol(device); }));
 			actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 			actions.appendChild(this.createPageButton(Codicon.trash, '删除', () => { void this.deleteDeviceFromPage(device); }));
 		}
@@ -978,9 +979,9 @@ export class TurboFileEditor extends EditorPane {
 	private getDeviceTransferProtocolLabel(device: TurboFileDevice): string {
 		switch (device.preferredTransferProtocol) {
 			case 'rsync':
-				return device.capabilities.rsync ? 'rsync 极速模式' : 'rsync 待检测';
+				return device.capabilities.rsync ? 'rsync 极速模式（可用）' : 'rsync 极速模式（未通过检测）';
 			case 'scp':
-				return device.capabilities.scp ? 'scp 兼容模式' : 'scp 待检测';
+				return device.capabilities.scp ? 'SCP 兼容模式（可用）' : 'SCP 兼容模式（未通过检测）';
 			case 'sftp':
 			default:
 				return 'SFTP 默认稳定';
@@ -1679,25 +1680,49 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
-	private async detectAndStoreDeviceCapabilities(device: TurboFileDevice): Promise<string> {
+	private async detectDeviceProtocol(device: TurboFileDevice): Promise<void> {
+		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return;
+		}
+
+		this.deviceConnectionMessages.set(device.id, { status: 'testing', message: '正在检测传输协议能力...' });
+		this.statusMessage = `正在检测 ${device.name} 的传输协议能力...`;
+		this.render();
+		const result = await this.detectAndStoreDeviceCapabilities(device);
+		this.devices = this.deviceStore?.loadDevices() ?? this.devices;
+		if (result) {
+			this.deviceConnectionMessages.set(device.id, result);
+			this.statusMessage = `${device.name}：${result.message}`;
+		} else {
+			this.deviceConnectionMessages.set(device.id, { status: 'success', message: 'SFTP 默认稳定，无需额外检测。' });
+			this.statusMessage = `${device.name}：SFTP 默认稳定，无需额外检测。`;
+		}
+		this.render();
+	}
+
+	private async detectAndStoreDeviceCapabilities(device: TurboFileDevice): Promise<{ status: 'success' | 'error'; message: string } | undefined> {
 		if (!this.deviceStore || device.id === LOCAL_WINDOWS_DEVICE_ID || device.preferredTransferProtocol === 'sftp') {
-			return '';
+			return undefined;
 		}
 
 		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptions(device));
 		if (!result.ok || !result.capabilities) {
-			return '协议能力检测失败，将按 SFTP 兜底';
+			return { status: 'error', message: `协议能力检测失败，将按 SFTP 兜底：${result.message}` };
 		}
 
 		const capabilities = this.toDeviceCapabilities(result.capabilities);
 		this.deviceStore.updateDeviceCapabilities(device.id, capabilities);
 		if (device.preferredTransferProtocol === 'rsync') {
-			return capabilities.rsync ? 'rsync 可用' : 'rsync 不可用，将按 SFTP 兜底';
+			return capabilities.rsync
+				? { status: 'success', message: 'rsync 可用，服务器互传会优先极速模式。' }
+				: { status: 'error', message: 'rsync 不可用，将按 SFTP 兜底。请安装 rsync 后重新检测。' };
 		}
 		if (device.preferredTransferProtocol === 'scp') {
-			return capabilities.scp ? 'SCP 可用' : 'SCP 不可用，将按 SFTP 兜底';
+			return capabilities.scp
+				? { status: 'success', message: 'SCP 可用，兼容模式可使用。' }
+				: { status: 'error', message: 'SCP 不可用，将按 SFTP 兜底。' };
 		}
-		return '';
+		return undefined;
 	}
 
 	private toDeviceCapabilities(capabilities: ITurboFileRemoteCapabilities): TurboFileDeviceCapabilities {
@@ -9218,14 +9243,19 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 
-			message.textContent = '正在保存设备...';
+			message.textContent = draft.preferredTransferProtocol === 'sftp' ? '正在保存设备...' : '正在保存并检测协议能力...';
 			try {
 				let savedDevice = editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
-				const capabilityMessage = await this.detectAndStoreDeviceCapabilities(savedDevice);
+				const capabilityResult = await this.detectAndStoreDeviceCapabilities(savedDevice);
 				savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
 				this.devices = this.deviceStore.loadDevices();
 				this.ensurePaneDeviceSelection();
-				this.deviceFormMessage = `${editingDevice ? '已更新' : '已保存'}设备：${savedDevice.name}${capabilityMessage ? `，${capabilityMessage}` : ''}`;
+				if (capabilityResult) {
+					this.deviceConnectionMessages.set(savedDevice.id, capabilityResult);
+				} else if (savedDevice.preferredTransferProtocol === 'sftp') {
+					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: 'SFTP 默认稳定，无需额外检测。' });
+				}
+				this.deviceFormMessage = `${editingDevice ? '已更新' : '已保存'}设备：${savedDevice.name}${capabilityResult ? `，${capabilityResult.message}` : ''}`;
 				this.statusMessage = `${this.deviceFormMessage}。可在设备下拉菜单中选择。`;
 				this.isDeviceFormVisible = false;
 				this.editingDeviceId = undefined;
