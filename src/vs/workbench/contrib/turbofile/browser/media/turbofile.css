@@ -198,26 +198,26 @@ body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-
 	height: 100% !important;
 }
 
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) {
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] {
 	width: 64px !important;
 	min-width: 64px !important;
 	max-width: 64px !important;
 }
 
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-name,
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-description,
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .label-separator {
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-name,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-description,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-separator {
 	display: none !important;
 }
 
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .tab-label {
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label {
 	justify-content: center;
 	padding-left: 0 !important;
 	padding-right: 0 !important;
 }
 
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .tab-label .codicon,
-body.turbofile-shell.turbofile-transfer-tabs-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active .tabs-container .tab:has(.tab-label[aria-label*="传输"]) .monaco-icon-label::before {
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label .codicon,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .monaco-icon-label::before {
 	font-size: 22px !important;
 	width: 22px !important;
 	height: 22px !important;
