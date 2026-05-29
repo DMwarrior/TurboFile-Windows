@@ -277,12 +277,12 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	height: 100%;
 	min-height: 0;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 50px;
+	grid-template-rows: minmax(0, 1fr) 48px;
 	overflow: hidden;
 }
 
 .turbofile-transfer-page.has-live-transfer {
-	grid-template-rows: minmax(0, 1fr) auto;
+	grid-template-rows: minmax(0, 1fr) 48px;
 }
 
 .turbofile-transfer-page.is-terminal-focused {
@@ -2394,17 +2394,152 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 
 .turbofile-taskbar {
 	display: grid;
-	grid-template-columns: minmax(160px, 1fr) auto minmax(160px, 1fr);
-	gap: 8px;
-	align-items: center;
-	padding: 5px 12px;
-	border-top: 1px solid var(--vscode-panel-border);
+	grid-template-rows: 2px 46px;
+	min-height: 48px;
+	height: 48px;
+	padding: 0;
+	border-top: 1px solid var(--vscode-statusBar-border, var(--vscode-panel-border));
+	color: var(--vscode-statusBar-foreground);
+	background: var(--vscode-statusBar-background);
+	cursor: pointer;
+	overflow: hidden;
+	user-select: none;
 }
 
 .turbofile-taskbar.has-live-transfer {
-	display: block;
-	padding: 8px 12px;
-	background: var(--turbofile-unified-background);
+	background: var(--vscode-statusBar-background);
+}
+
+.turbofile-taskbar:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.turbofile-statusbar-progress {
+	height: 2px;
+	background: color-mix(in srgb, var(--vscode-statusBar-foreground) 16%, transparent);
+	overflow: hidden;
+}
+
+.turbofile-statusbar-progress-value {
+	width: 0;
+	height: 100%;
+	background: var(--vscode-progressBar-background);
+	transition: width 140ms ease-out;
+}
+
+.turbofile-statusbar-progress.is-running .turbofile-statusbar-progress-value {
+	animation: turbofile-statusbar-progress-glow 1.2s ease-in-out infinite;
+}
+
+.turbofile-statusbar-content {
+	min-width: 0;
+	min-height: 0;
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 14px;
+	align-items: center;
+	padding: 0 10px;
+}
+
+.turbofile-statusbar-section {
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	white-space: nowrap;
+}
+
+.turbofile-statusbar-section.is-right {
+	justify-content: flex-end;
+}
+
+.turbofile-statusbar-item {
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 12px;
+	line-height: 18px;
+	color: inherit;
+	opacity: 0.94;
+}
+
+.turbofile-statusbar-item span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.turbofile-statusbar-message {
+	min-width: 0;
+	display: grid;
+	grid-template-rows: 18px 16px;
+	align-content: center;
+	gap: 0;
+}
+
+.turbofile-statusbar-message-title,
+.turbofile-statusbar-message-detail {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.turbofile-statusbar-message-title {
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 18px;
+	color: inherit;
+}
+
+.turbofile-statusbar-message-detail {
+	font-size: 11px;
+	line-height: 16px;
+	color: color-mix(in srgb, var(--vscode-statusBar-foreground) 76%, transparent);
+}
+
+.turbofile-statusbar-cancel {
+	width: 24px;
+	height: 24px;
+	border: 0;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-statusBar-foreground);
+	background: transparent;
+	cursor: pointer;
+}
+
+.turbofile-statusbar-cancel:hover {
+	background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-statusBar-foreground) 12%, transparent));
+}
+
+.turbofile-statusbar-cancel:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+@media (max-width: 980px) {
+	.turbofile-statusbar-content {
+		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.turbofile-statusbar-section.is-right {
+		display: none;
+	}
+}
+
+@keyframes turbofile-statusbar-progress-glow {
+	0%,
+	100% {
+		opacity: 0.76;
+	}
+	50% {
+		opacity: 1;
+	}
 }
 
 .turbofile-live-transfer-panel {
@@ -4667,8 +4802,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 }
 
 .vs .turbofile-taskbar {
-	border-top: 1px solid var(--tf-border);
-	background: var(--tf-bg);
+	border-top: 1px solid var(--vscode-statusBar-border, var(--tf-border));
+	color: var(--vscode-statusBar-foreground);
+	background: var(--vscode-statusBar-background);
 }
 
 .vs .turbofile-live-transfer-panel {

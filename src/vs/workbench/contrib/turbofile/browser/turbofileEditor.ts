@@ -614,9 +614,7 @@ export class TurboFileEditor extends EditorPane {
 	private availableColorThemes: IWorkbenchColorTheme[] = [];
 	private isLoadingColorThemes = false;
 	private hasLoadedColorThemes = false;
-	private currentTransferMode: 'copy' | 'move' = 'copy';
 	private remoteFileSystemProvider: TurboFileRemoteFileSystemProvider | undefined;
-	private lastActiveSide: 'left' | 'right' = 'left';
 	private taskbarHiddenForTerminal = false;
 	private terminalRevealInProgress = false;
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
@@ -1901,7 +1899,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (command.type === 'openTerminal') {
-			this.lastActiveSide = command.side;
 			void this.openTerminal(command.side);
 		}
 	}
@@ -1958,7 +1955,6 @@ export class TurboFileEditor extends EditorPane {
 		list.classList.add('show-file-icons');
 		list.tabIndex = 0;
 		list.addEventListener('pointerdown', event => {
-			this.lastActiveSide = side;
 			if ((event.target as HTMLElement | null)?.closest('.turbofile-inline-rename')) {
 				return;
 			}
@@ -2805,201 +2801,121 @@ export class TurboFileEditor extends EditorPane {
 	private renderTaskbar(): HTMLElement {
 		const taskbar = $('.turbofile-taskbar');
 		const runningTransfers = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
+		const runningTasks = this.tasks.filter(task => task.status === 'running');
+		const latest = this.tasks[0];
+		const stats = this.getTaskStats();
 		if (runningTransfers.length) {
 			taskbar.classList.add('has-live-transfer');
-			taskbar.appendChild(this.renderLiveTransferPanel(runningTransfers));
-			return taskbar;
 		}
 
-		const stats = this.getTaskStats();
-		const latest = this.tasks[0];
+		taskbar.tabIndex = 0;
+		taskbar.setAttribute('role', 'button');
+		taskbar.title = '打开任务日志';
+		taskbar.setAttribute('aria-label', '打开任务日志');
+		taskbar.addEventListener('click', () => this.setActivePage('tasks'));
+		taskbar.addEventListener('keydown', event => {
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault();
+				this.setActivePage('tasks');
+			}
+		});
 
-		const status = $('.turbofile-bottom-status');
-		const title = $('.turbofile-task-title');
-		title.textContent = `运行 ${stats.running} · 成功 ${stats.success} · 失败 ${stats.error} · 取消 ${stats.canceled}`;
-		const meta = $('.turbofile-task-meta');
-		meta.textContent = latest ? this.formatTaskLine(latest) : this.statusMessage;
+		const progress = $('.turbofile-statusbar-progress');
+		const progressValue = $('.turbofile-statusbar-progress-value');
+		const liveSummary = runningTransfers.length ? this.getLiveTransferAggregate(runningTransfers) : undefined;
+		const livePercent = liveSummary && liveSummary.totalBytes > 0
+			? Math.max(0, Math.min(100, (liveSummary.transferredBytes / liveSummary.totalBytes) * 100))
+			: runningTasks.length ? Math.max(...runningTasks.map(task => task.progress)) : 0;
+		progressValue.style.width = runningTasks.length ? `${livePercent.toFixed(1)}%` : '0%';
+		progress.classList.toggle('is-running', runningTasks.length > 0);
+		progress.appendChild(progressValue);
+		taskbar.appendChild(progress);
 
-		status.appendChild(title);
-		status.appendChild(meta);
+		const content = $('.turbofile-statusbar-content');
+		const left = $('.turbofile-statusbar-section.is-left');
+		left.appendChild(this.renderStatusbarItem(Codicon.history, `运行 ${stats.running} · 成功 ${stats.success} · 失败 ${stats.error} · 取消 ${stats.canceled}`));
 
-		const actions = $('.turbofile-bottom-actions');
-		this.appendBottomAction(actions, Codicon.copy, '复制', '复制模式', false, () => this.setTransferMode('copy'), false, `is-mode ${this.currentTransferMode === 'copy' ? 'is-selected' : ''}`, 'files');
-		this.appendBottomAction(actions, Codicon.move, '剪切', '剪切模式', false, () => this.setTransferMode('move'), false, `is-mode ${this.currentTransferMode === 'move' ? 'is-selected' : ''}`, 'scissors');
-		this.appendBottomAction(actions, Codicon.zap, '开始传输', '按当前复制/剪切模式开始传输', true, () => { void this.startPrimaryTransfer(); }, false, 'is-start', 'lightning-charge-fill', 'warning');
+		const message = $('.turbofile-statusbar-message');
+		const title = $('.turbofile-statusbar-message-title');
+		const meta = $('.turbofile-task-meta.turbofile-statusbar-message-detail');
+		if (runningTransfers.length) {
+			title.textContent = this.getLiveTransferStatusTitle(runningTransfers);
+			meta.textContent = this.getLiveTransferStatusDetail(runningTransfers);
+		} else if (latest) {
+			title.textContent = this.formatTaskLine(latest);
+			meta.textContent = latest.detail;
+		} else {
+			title.textContent = this.statusMessage;
+			meta.textContent = '暂无传输任务，最近日志会显示在这里。';
+		}
+		message.appendChild(title);
+		message.appendChild(meta);
 
-		const spacer = $('.turbofile-bottom-spacer');
-		taskbar.appendChild(status);
-		taskbar.appendChild(actions);
-		taskbar.appendChild(spacer);
+		const right = $('.turbofile-statusbar-section.is-right');
+		if (runningTransfers.length && liveSummary) {
+			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
+			right.appendChild(this.renderStatusbarItem(Codicon.clock, this.formatRemaining(liveSummary.remainingMs), '剩余时间'));
+			right.appendChild(this.renderStatusbarItem(Codicon.archive, `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`, '已传输'));
+			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
+			if (protocol) {
+				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输协议'));
+			}
+			const cancel = this.createIconButton(Codicon.close, '取消运行中的传输', 'turbofile-statusbar-cancel');
+			this.renderDisposables.add(cancel);
+			cancel.element.disabled = runningTransfers.every(task => task.cancelRequested);
+			cancel.element.addEventListener('click', event => {
+				event.stopPropagation();
+				void this.cancelRunningTransfers(runningTransfers);
+			});
+			right.appendChild(cancel.element);
+		} else if (latest) {
+			right.appendChild(this.renderStatusbarItem(this.getTaskIcon(latest), latest.status === 'running' ? '进行中' : latest.status === 'success' ? '完成' : latest.status === 'canceled' ? '已取消' : '失败'));
+		} else {
+			right.appendChild(this.renderStatusbarItem(Codicon.info, '任务日志'));
+		}
+
+		content.appendChild(left);
+		content.appendChild(message);
+		content.appendChild(right);
+		taskbar.appendChild(content);
 		return taskbar;
 	}
 
-	private renderLiveTransferPanel(tasks: TurboFileTask[]): HTMLElement {
-		const transferItems = tasks.flatMap(task => this.getLiveTransferItems(task).map(item => ({ task, item })));
-		if (transferItems.length <= 1) {
-			const task = tasks[0];
-			const item = transferItems[0]?.item ?? this.createFallbackTransferItem(task);
-			return this.renderSingleLiveTransferPanel(task, item);
+	private renderStatusbarItem(icon: ThemeIcon, text: string, title?: string): HTMLElement {
+		const item = $('.turbofile-statusbar-item');
+		if (title) {
+			item.title = title;
 		}
-		return this.renderMultiLiveTransferPanel(tasks, transferItems);
+		item.appendChild(renderIcon(icon));
+		const label = $('span');
+		label.textContent = text;
+		item.appendChild(label);
+		return item;
 	}
 
-	private renderSingleLiveTransferPanel(task: TurboFileTask, item: TurboFileTaskTransferItem): HTMLElement {
-		const panel = $('.turbofile-live-transfer-panel');
-		panel.classList.add('is-single');
-		panel.appendChild(this.renderLiveTransferFileCard(task, item, true));
-		return panel;
+	private getLiveTransferStatusTitle(tasks: TurboFileTask[]): string {
+		const items = tasks.flatMap(task => this.getLiveTransferItems(task).map(item => ({ task, item })));
+		const active = items.find(({ item }) => item.status === 'running') ?? items.find(({ item }) => item.status === 'waiting') ?? items[0];
+		if (!active) {
+			return tasks.length > 1 ? `正在传输 ${tasks.length} 个任务` : tasks[0].label;
+		}
+		return items.length > 1 ? `正在传输：${active.item.name} · ${items.length} 项` : `正在传输：${active.item.name}`;
 	}
 
-	private renderMultiLiveTransferPanel(tasks: TurboFileTask[], transferItems: Array<{ task: TurboFileTask; item: TurboFileTaskTransferItem }>): HTMLElement {
-		const panel = $('.turbofile-live-transfer-panel');
-		panel.classList.add('is-multi');
+	private getLiveTransferStatusDetail(tasks: TurboFileTask[]): string {
 		const aggregate = this.getLiveTransferAggregate(tasks);
-
-		const header = $('.turbofile-live-transfer-header');
-		const title = $('.turbofile-live-transfer-title');
-		title.textContent = '多文件传输';
-		const count = $('.turbofile-live-transfer-count');
-		count.textContent = String(transferItems.length);
-		title.appendChild(count);
-		header.appendChild(title);
-
-		const summary = $('.turbofile-live-transfer-summary');
-		summary.appendChild(this.renderLiveTransferMetric('lightning-charge-fill', this.formatSpeed(aggregate.speedBytesPerSecond), '当前速度', 'success'));
-		summary.appendChild(this.renderLiveTransferMetric('clock', this.formatElapsed(this.getElapsedSince(aggregate.startedAt)), '已耗时', 'info'));
-		summary.appendChild(this.renderLiveTransferMetric('arrow-clockwise', this.formatRemaining(aggregate.remainingMs), '剩余时间', 'primary'));
-		summary.appendChild(this.renderLiveTransferMetric('archive', `${formatSize(aggregate.transferredBytes)} / ${formatSize(aggregate.totalBytes)}`, '已传输', 'info'));
-
-		const cancelAll = document.createElement('button');
-		cancelAll.className = 'turbofile-live-transfer-cancel-all';
-		cancelAll.type = 'button';
-		cancelAll.title = '取消全部传输';
-		cancelAll.appendChild(renderIcon(Codicon.close));
-		cancelAll.append('全部取消');
-		cancelAll.addEventListener('click', () => { void this.cancelRunningTransfers(tasks); });
-		summary.appendChild(cancelAll);
-		header.appendChild(summary);
-
-		const list = $('.turbofile-live-transfer-list');
-		list.appendChild(this.renderLiveTransferFileCard(tasks[0], this.createAggregateTransferItem(tasks, transferItems, aggregate), false));
-
-		const footer = $('.turbofile-live-transfer-footer');
-		footer.textContent = `${transferItems.filter(({ item }) => item.status === 'running').length || transferItems.filter(({ item }) => item.status === 'waiting').length} 个任务正在传输中`;
-		const total = $('.turbofile-live-transfer-total');
-		total.textContent = `总速度：${this.formatSpeed(aggregate.speedBytesPerSecond)}`;
-		footer.appendChild(total);
-
-		panel.appendChild(header);
-		panel.appendChild(list);
-		panel.appendChild(footer);
-		return panel;
-	}
-
-	private renderLiveTransferFileCard(task: TurboFileTask, item: TurboFileTaskTransferItem, showCancel: boolean): HTMLElement {
-		const card = $('.turbofile-live-transfer-card');
-		card.classList.add(`is-${item.status}`);
-
-		const top = $('.turbofile-live-transfer-card-top');
-		top.appendChild(this.renderLiveTransferFileIcon(item));
-
-		const identity = $('.turbofile-live-transfer-identity');
-		const name = $('.turbofile-live-transfer-name');
-		name.textContent = item.name;
-		const size = $('.turbofile-live-transfer-size');
-		size.textContent = item.displaySize || (item.rawSize > 0 || item.type !== 'directory' ? formatSize(item.rawSize) : '');
-		identity.appendChild(name);
-		identity.appendChild(size);
-		top.appendChild(identity);
-
-		const percent = $('.turbofile-live-transfer-percent');
-		percent.textContent = `${this.getLiveTransferPercent(item).toFixed(1)}%`;
-		top.appendChild(percent);
-
-		if (showCancel) {
-			const cancel = document.createElement('button');
-			cancel.className = 'turbofile-live-transfer-cancel';
-			cancel.type = 'button';
-			cancel.title = '取消传输';
-			cancel.disabled = !!task.cancelRequested;
-			cancel.appendChild(renderIcon(Codicon.close));
-			cancel.addEventListener('click', () => { void this.cancelTask(task); });
-			top.appendChild(cancel);
+		const parts = [
+			this.formatSpeed(aggregate.speedBytesPerSecond),
+			this.formatRemaining(aggregate.remainingMs),
+			`${formatSize(aggregate.transferredBytes)} / ${formatSize(aggregate.totalBytes)}`
+		];
+		if (tasks.length === 1) {
+			const protocol = this.getTransferProtocolLabel(tasks[0].strategy);
+			if (protocol) {
+				parts.push(protocol);
+			}
 		}
-
-		const progress = $('.turbofile-live-transfer-progress');
-		const progressValue = $('.turbofile-live-transfer-progress-value');
-		progressValue.style.width = `${this.getLiveTransferPercent(item)}%`;
-		progress.appendChild(progressValue);
-
-		const metrics = $('.turbofile-live-transfer-metrics');
-		metrics.appendChild(this.renderLiveTransferMetric('lightning-charge-fill', this.formatSpeed(item.speedBytesPerSecond), '当前速度', 'success'));
-		metrics.appendChild(this.renderLiveTransferMetric('clock', this.formatElapsed(this.getLiveTransferElapsedMs(task, item)), '已耗时', 'info'));
-		metrics.appendChild(this.renderLiveTransferMetric('arrow-clockwise', this.formatRemaining(item.remainingMs), '剩余时间', 'primary'));
-		metrics.appendChild(this.renderLiveTransferMetric('archive', `${formatSize(item.transferredBytes)} / ${formatSize(this.getLiveTransferItemTotal(item))}`, '已传输', 'info'));
-		metrics.appendChild(this.renderLiveTransferMetric('terminal', this.getTransferProtocolLabel(item.strategy ?? task.strategy) ?? '识别中', '传输协议', 'primary'));
-
-		const wave = $('.turbofile-live-transfer-wave');
-		wave.appendChild(this.renderLiveTransferSparkline(item.speedSamples));
-		const waveLabel = $('.turbofile-live-transfer-wave-label');
-		waveLabel.textContent = '速度波动';
-		wave.appendChild(waveLabel);
-		metrics.appendChild(wave);
-
-		card.appendChild(top);
-		card.appendChild(progress);
-		card.appendChild(metrics);
-		return card;
-	}
-
-	private renderLiveTransferMetric(icon: TurboFileBootstrapIcon, value: string, label: string, color: TurboFileIconColor): HTMLElement {
-		const metric = $('.turbofile-live-transfer-metric');
-		metric.appendChild(renderTurboFileIcon(icon, color));
-		const text = $('.turbofile-live-transfer-metric-text');
-		const valueNode = $('.turbofile-live-transfer-metric-value');
-		valueNode.textContent = value;
-		const labelNode = $('.turbofile-live-transfer-metric-label');
-		labelNode.textContent = label;
-		text.appendChild(valueNode);
-		text.appendChild(labelNode);
-		metric.appendChild(text);
-		return metric;
-	}
-
-	private renderLiveTransferFileIcon(item: TurboFileTaskTransferItem): HTMLElement {
-		const icon = $('.turbofile-live-transfer-file-icon');
-		const lowerName = item.name.toLowerCase();
-		if (lowerName.endsWith('.zip') || lowerName.endsWith('.7z') || lowerName.endsWith('.rar') || lowerName.endsWith('.tar') || lowerName.endsWith('.gz')) {
-			icon.classList.add('is-archive');
-			icon.appendChild(renderTurboFileIcon('file-earmark-zip'));
-			return icon;
-		}
-		if (lowerName.endsWith('.png') || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') || lowerName.endsWith('.webp') || lowerName.endsWith('.bmp')) {
-			icon.classList.add('is-image');
-			icon.appendChild(renderTurboFileIcon('file-earmark'));
-			return icon;
-		}
-		icon.classList.add('is-file');
-		icon.appendChild(renderTurboFileIcon('file-earmark'));
-		return icon;
-	}
-
-	private renderLiveTransferSparkline(samples: readonly number[]): SVGElement {
-		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-		svg.setAttribute('viewBox', '0 0 120 30');
-		svg.setAttribute('aria-hidden', 'true');
-		svg.classList.add('turbofile-live-transfer-sparkline');
-		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-		const normalized = samples.length >= 2 ? samples.slice(-24) : [1, 1, 1, 1, 1, 1];
-		const max = Math.max(...normalized, 1);
-		const points = normalized.map((value, index) => {
-			const x = normalized.length === 1 ? 0 : (index / (normalized.length - 1)) * 120;
-			const y = 26 - Math.max(0, Math.min(24, (value / max) * 22));
-			return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`;
-		});
-		path.setAttribute('d', points.join(' '));
-		svg.appendChild(path);
-		return svg;
+		return parts.join(' · ');
 	}
 
 	private getLiveTransferItems(task: TurboFileTask): TurboFileTaskTransferItem[] {
@@ -3022,26 +2938,6 @@ export class TurboFileEditor extends EditorPane {
 			remainingMs: task.remainingMs,
 			strategy: task.strategy,
 			speedSamples: task.speedSamples ?? []
-		};
-	}
-
-	private createAggregateTransferItem(tasks: TurboFileTask[], transferItems: Array<{ task: TurboFileTask; item: TurboFileTaskTransferItem }>, aggregate: { transferredBytes: number; totalBytes: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number }): TurboFileTaskTransferItem {
-		const running = transferItems.find(({ item }) => item.status === 'running') ?? transferItems.find(({ item }) => item.status === 'waiting') ?? transferItems[0];
-		const runningTask = tasks.find(task => task.status === 'running') ?? tasks[0];
-		return {
-			name: running?.item.status === 'running' ? `正在传输：${running.item.name}` : `多文件传输 ${transferItems.length} 项`,
-			type: running?.item.type ?? 'file',
-			displaySize: `${transferItems.length} 项`,
-			rawSize: aggregate.totalBytes,
-			status: runningTask.status === 'running' ? 'running' : runningTask.status,
-			progress: aggregate.totalBytes > 0 ? Math.round((aggregate.transferredBytes / aggregate.totalBytes) * 100) : runningTask.progress,
-			transferredBytes: aggregate.transferredBytes,
-			totalBytes: aggregate.totalBytes,
-			speedBytesPerSecond: aggregate.speedBytesPerSecond,
-			remainingMs: aggregate.remainingMs,
-			startedAt: aggregate.startedAt,
-			strategy: running?.item.strategy ?? runningTask.strategy,
-			speedSamples: runningTask.speedSamples ?? []
 		};
 	}
 
@@ -3079,38 +2975,12 @@ export class TurboFileEditor extends EditorPane {
 		return Math.max(item.totalBytes, item.rawSize, item.transferredBytes, 0);
 	}
 
-	private getLiveTransferPercent(item: TurboFileTaskTransferItem): number {
-		if (item.status === 'success') {
-			return 100;
-		}
-		const totalBytes = this.getLiveTransferItemTotal(item);
-		if (totalBytes > 0) {
-			return Math.max(0, Math.min(100, (item.transferredBytes / totalBytes) * 100));
-		}
-		return Math.max(0, Math.min(100, item.progress));
-	}
-
 	private formatSpeed(bytesPerSecond: number | undefined): string {
 		return bytesPerSecond && bytesPerSecond > 0 ? `${formatSize(bytesPerSecond)}/s` : '--';
 	}
 
 	private formatRemaining(milliseconds: number | undefined): string {
 		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
-	}
-
-	private formatElapsed(milliseconds: number | undefined): string {
-		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
-	}
-
-	private getLiveTransferElapsedMs(task: TurboFileTask, item: TurboFileTaskTransferItem): number | undefined {
-		return this.getElapsedSince(item.startedAt ?? task.startedAt, item.endedAt ?? task.endedAt);
-	}
-
-	private getElapsedSince(startedAt: number | undefined, endedAt?: number): number | undefined {
-		if (startedAt === undefined) {
-			return undefined;
-		}
-		return Math.max(0, (endedAt ?? Date.now()) - startedAt);
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
@@ -3174,52 +3044,6 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		return overlay;
-	}
-
-	private appendBottomAction(parent: HTMLElement, icon: ThemeIcon, label: string, title: string, primary: boolean, handler: () => void, disabled = false, extraClass = '', turboIcon?: TurboFileBootstrapIcon, iconColor?: TurboFileIconColor): void {
-		const button = document.createElement('button');
-		button.className = `turbofile-bottom-action${primary ? ' is-primary' : ''}${extraClass ? ` ${extraClass}` : ''}`;
-		button.type = 'button';
-		button.title = title;
-		button.disabled = disabled;
-		button.appendChild(turboIcon ? renderTurboFileIcon(turboIcon, iconColor) : renderIcon(icon));
-		button.append(label);
-		button.addEventListener('click', handler);
-		parent.appendChild(button);
-	}
-
-	private setTransferMode(mode: 'copy' | 'move'): void {
-		this.currentTransferMode = mode;
-		this.statusMessage = mode === 'copy' ? '已切换为复制模式。' : '已切换为剪切模式，开始传输后会清理源文件。';
-		this.render();
-	}
-
-	private getPrimaryTransferSides(): { sourceSide: 'left' | 'right'; targetSide: 'left' | 'right' } {
-		if (this.getSelectedTransferItems('left').length > 0) {
-			return { sourceSide: 'left', targetSide: 'right' };
-		}
-		if (this.getSelectedTransferItems('right').length > 0) {
-			return { sourceSide: 'right', targetSide: 'left' };
-		}
-		return { sourceSide: this.lastActiveSide, targetSide: this.getOppositeSide(this.lastActiveSide) };
-	}
-
-	private async copyFromPrimarySide(): Promise<void> {
-		const { sourceSide, targetSide } = this.getPrimaryTransferSides();
-		await this.transferSelected(sourceSide, targetSide);
-	}
-
-	private async moveFromPrimarySide(): Promise<void> {
-		const { sourceSide, targetSide } = this.getPrimaryTransferSides();
-		await this.moveSelected(sourceSide, targetSide);
-	}
-
-	private async startPrimaryTransfer(): Promise<void> {
-		if (this.currentTransferMode === 'move') {
-			await this.moveFromPrimarySide();
-			return;
-		}
-		await this.copyFromPrimarySide();
 	}
 
 	private clearFinishedTasks(): void {
@@ -5044,7 +4868,6 @@ export class TurboFileEditor extends EditorPane {
 
 	private togglePaneMaximized(side: 'left' | 'right'): void {
 		this.maximizedPane = this.maximizedPane === side ? undefined : side;
-		this.lastActiveSide = side;
 		this.fileListRenderedRange.left = undefined;
 		this.fileListRenderedRange.right = undefined;
 		this.render();
@@ -5288,10 +5111,6 @@ export class TurboFileEditor extends EditorPane {
 		});
 	}
 
-	private getOppositeSide(side: 'left' | 'right'): 'left' | 'right' {
-		return side === 'left' ? 'right' : 'left';
-	}
-
 	private getSideLabel(side: 'left' | 'right'): string {
 		return side === 'left' ? '左侧' : '右侧';
 	}
@@ -5507,7 +5326,6 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		this.lastActiveSide = side;
 		const state = this.paneStates[side];
 		const isToggle = !!event && (event.ctrlKey || event.metaKey);
 		const isRange = !!event?.shiftKey && !!state.selectionAnchorPath && !item.parent;
@@ -5574,7 +5392,6 @@ export class TurboFileEditor extends EditorPane {
 			: selectablePaths[0];
 		state.selectedPath = focusedPath;
 		state.selectionAnchorPath = focusedPath;
-		this.lastActiveSide = side;
 		this.statusMessage = selectablePaths.length
 			? `${this.getSideLabel(side)}已全选 ${selectablePaths.length} 项。`
 			: `${this.getSideLabel(side)}当前目录暂无可选项目。`;
