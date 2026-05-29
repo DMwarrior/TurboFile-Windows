@@ -6781,7 +6781,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (!isImageFile(item.name)) {
-			await this.openNativeDocument(side, item, device);
+			void this.openNativeDocument(side, item, device);
 			return;
 		}
 
@@ -8010,24 +8010,30 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const resource = device.id === LOCAL_WINDOWS_DEVICE_ID
-			? URI.file(item.path)
-			: this.ensureRemoteFileSystemProvider().registerFile(device, await this.getSshConnectionOptions(device), item);
-
 		this.previewState = undefined;
-		await this.editorService.openEditor({
-			resource,
-			options: {
-				pinned: true,
-				revealIfOpened: true,
-				override: DEFAULT_EDITOR_ASSOCIATION.id,
-				index: 0
-			}
-		});
-		this.statusMessage = `已用 VS Code 原生编辑器打开：${item.name}`;
-		this.render();
-	}
+		const reportOpenError = (error: unknown) => {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `打开失败：${message}`;
+			this.render();
+		};
 
+		try {
+			const resource = device.id === LOCAL_WINDOWS_DEVICE_ID
+				? URI.file(item.path)
+				: this.ensureRemoteFileSystemProvider().registerFile(device, await this.getSshConnectionOptions(device), item);
+
+			void this.editorService.openEditor({
+				resource,
+				options: {
+					pinned: true,
+					revealIfOpened: true,
+					override: DEFAULT_EDITOR_ASSOCIATION.id
+				}
+			}).catch(reportOpenError);
+		} catch (error) {
+			reportOpenError(error);
+		}
+	}
 
 	private async savePreview(): Promise<void> {
 		const preview = this.previewState;
