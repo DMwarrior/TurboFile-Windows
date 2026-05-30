@@ -2394,7 +2394,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 
 .turbofile-taskbar {
 	display: grid;
-	grid-template-rows: 2px minmax(0, 1fr);
+	grid-template-rows: minmax(0, 1fr);
 	box-sizing: border-box;
 	min-height: 24px;
 	height: 24px;
@@ -2417,9 +2417,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-statusbar-progress {
-	height: 2px;
-	background: color-mix(in srgb, var(--vscode-statusBar-foreground) 16%, transparent);
-	overflow: hidden;
+	display: none;
 }
 
 .turbofile-statusbar-progress-value {
