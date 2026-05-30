@@ -34,7 +34,7 @@ const REMOTE_DIRECTORY_LISTING_CACHE_MAX_ENTRIES = 256;
 const SFTP_TRANSFER_CONCURRENCY = 64;
 const SFTP_TRANSFER_CHUNK_SIZE = 255 * 1024;
 const SFTP_LARGE_FILE_THRESHOLD = 512 * 1024 * 1024;
-const SFTP_LARGE_TRANSFER_CONCURRENCY = 128;
+const SFTP_LARGE_TRANSFER_CONCURRENCY = 64;
 const SFTP_LARGE_TRANSFER_CHUNK_SIZE = 255 * 1024;
 const SFTP_COMPAT_TRANSFER_CONCURRENCY = 32;
 const SFTP_COMPAT_TRANSFER_CHUNK_SIZE = 32 * 1024;
@@ -55,6 +55,7 @@ const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_RSYNC_ROUTE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const DIRECT_RSYNC_ROUTE_UNAVAILABLE_CACHE_TTL_MS = 10 * 60 * 1000;
+const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 
 class TurboFileTransferCanceledError extends Error {
 	constructor() {
@@ -260,6 +261,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directRsyncRouteCache = new Map<string, IDirectRsyncRouteCacheEntry>();
 	private readonly directRsyncRoutePending = new Map<string, Promise<TurboFileDirectRsyncRouteMode>>();
+	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 
 	onDynamicSshTerminalData(sessionId: string): Event<string> {
@@ -877,14 +879,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (!executorConfigResult.ok) {
 			return undefined;
 		}
-		const remote = remoteEndpoint.connection;
-		const remoteUserHost = `${remote.username}@${remote.host}`;
-		const sshTransport = buildOptimizedRsyncSshCommand(remote.port || 22, !!remote.password);
-		const sshpassPrefix = buildSshpassPrefix(remote.password);
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		try {
 			this.throwIfTransferCanceled(request.progressId);
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, executorEndpoint.connection);
+			const sshTransport = buildOptimizedRsyncSshCommand(remote.port || 22, !!remote.password, sshBinary);
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
 			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch direct rsync transfer.', true, {
 				completedItems: 0,
 				totalItems: items.length,
@@ -988,7 +991,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			forwardedPort = await this.forwardIn(client, RSYNC_RELAY_BIND_HOST, 0);
 			const target = request.targetDirectory.connection;
 			const targetUserHost = `${target.username}@${RSYNC_RELAY_BIND_HOST}`;
-			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true);
+			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.source.connection);
+			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true, sshBinary);
 			const sshpassPrefix = buildSshpassPrefix(target.password);
 			if (!await this.canUseTargetRsyncThroughRelay(client, targetUserHost, forwardedPort, sshpassPrefix)) {
 				return undefined;
@@ -1585,14 +1589,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const remote = remoteEndpoint.connection;
-		const remoteUserHost = `${remote.username}@${remote.host}`;
-		const sshTransport = buildOptimizedRsyncSshCommand(remote.port || 22, !!remote.password);
-		const sshpassPrefix = buildSshpassPrefix(remote.password);
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		try {
 			this.throwIfTransferCanceled(request.progressId);
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, executorEndpoint.connection);
+			const sshTransport = buildOptimizedRsyncSshCommand(remote.port || 22, !!remote.password, sshBinary);
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
 
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 			const sourceIsDirectory = sourceType === 'directory';
@@ -1730,17 +1735,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const remoteUserHost = `${remote.connection.username}@${remote.connection.host}`;
-		const sshTransport = buildOptimizedRsyncSshCommand(remote.connection.port || 22, !!remote.connection.password);
-		const sshpassPrefix = buildSshpassPrefix(remote.connection.password);
 		const client = await this.connect(executorConfigResult.config).catch(() => undefined);
 		if (!client) {
 			return false;
 		}
 		try {
 			this.throwIfTransferCanceled(progressId);
+			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, executor.connection);
+			const sshTransport = buildOptimizedRsyncSshCommand(remote.connection.port || 22, !!remote.connection.password, sshBinary);
+			const sshpassPrefix = buildSshpassPrefix(remote.connection.password);
 			return await this.canExecutorUseDirectRsyncTransfer(client, remote.connection, remoteUserHost, sshTransport, sshpassPrefix);
 		} finally {
 			client.end();
+		}
+	}
+
+	private async resolveRemoteRsyncSshBinary(client: ISSHClient, connection: ITurboFileSshConnectionOptions): Promise<string> {
+		const cacheKey = getSshConnectionRouteKey(connection);
+		const cached = this.remoteRsyncSshBinaryCache.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+
+		try {
+			const output = await this.execRemoteBytes(client, [
+				'if [ -x /usr/bin/ssh.original ]; then printf %s /usr/bin/ssh.original;',
+				'elif [ -x /usr/bin/ssh.bak ]; then printf %s /usr/bin/ssh.bak;',
+				'else command -v ssh || printf %s ssh; fi'
+			].join(' '), { timeoutMs: 2000 });
+			const binary = output.toString('utf8').trim().split(/\r?\n/)[0];
+			const normalized = binary && /^[A-Za-z0-9_./-]+$/.test(binary) ? binary : 'ssh';
+			this.remoteRsyncSshBinaryCache.set(cacheKey, normalized);
+			return normalized;
+		} catch {
+			this.remoteRsyncSshBinaryCache.set(cacheKey, 'ssh');
+			return 'ssh';
 		}
 	}
 
@@ -1946,7 +1975,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			forwardedPort = await this.forwardIn(client, RSYNC_RELAY_BIND_HOST, 0);
 			const target = request.target.connection;
 			const targetUserHost = `${target.username}@${RSYNC_RELAY_BIND_HOST}`;
-			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true);
+			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.source.connection);
+			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true, sshBinary);
 			const sshpassPrefix = buildSshpassPrefix(target.password);
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 			const sourceIsDirectory = sourceType === 'directory';
@@ -2840,7 +2870,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const previous = this.transferProgressSnapshots.get(progressId);
 		const normalizedTransferred = Math.max(0, transferredBytes);
 		const normalizedTotal = Math.max(0, totalBytes);
-		if (!force && previous && now - previous.lastAt < 150 && normalizedTransferred < normalizedTotal) {
+		if (!force && previous && now - previous.lastAt < TRANSFER_PROGRESS_EVENT_INTERVAL_MS && normalizedTransferred < normalizedTotal) {
 			return;
 		}
 
@@ -4311,9 +4341,10 @@ function isSameSshConnection(left: ITurboFileSshConnectionOptions, right: ITurbo
 		&& left.username === right.username;
 }
 
-function buildOptimizedRsyncSshCommand(port: number, hasPassword = false): string {
+function buildOptimizedRsyncSshCommand(port: number, hasPassword = false, sshBinary = 'ssh'): string {
 	const parts = [
-		'ssh',
+		sshBinary,
+		'-T',
 		'-o Compression=no',
 		'-o Ciphers=aes128-ctr',
 		'-o ConnectTimeout=5',
@@ -4323,6 +4354,7 @@ function buildOptimizedRsyncSshCommand(port: number, hasPassword = false): strin
 		'-o ServerAliveCountMax=2',
 		'-o StrictHostKeyChecking=no',
 		'-o UserKnownHostsFile=/dev/null',
+		'-o LogLevel=ERROR',
 		'-o MACs=umac-64@openssh.com',
 		'-o ControlMaster=auto',
 		'-o ControlPersist=300',
@@ -4347,7 +4379,8 @@ function buildOptimizedSftpCommand(port: number, hasPassword = false): string {
 		'-o ServerAliveInterval=15',
 		'-o ServerAliveCountMax=2',
 		'-o StrictHostKeyChecking=no',
-		'-o UserKnownHostsFile=/dev/null'
+		'-o UserKnownHostsFile=/dev/null',
+		'-o LogLevel=ERROR'
 	];
 	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
 	if (port && port !== 22) {
@@ -4366,7 +4399,8 @@ function buildCompatibleSshCommand(port: number, hasPassword = false): string {
 		'-o ServerAliveInterval=15',
 		'-o ServerAliveCountMax=2',
 		'-o StrictHostKeyChecking=no',
-		'-o UserKnownHostsFile=/dev/null'
+		'-o UserKnownHostsFile=/dev/null',
+		'-o LogLevel=ERROR'
 	];
 	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
 	if (port && port !== 22) {
