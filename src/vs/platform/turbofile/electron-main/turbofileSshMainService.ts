@@ -89,6 +89,13 @@ interface ISSHForwardedTcpDetails {
 interface ISSHExecStream {
 	on(event: 'close', listener: (code: number | null, signal: string | null) => void): ISSHExecStream;
 	on(event: 'data', listener: (data: Buffer | string) => void): ISSHExecStream;
+	on(event: 'error', listener: (err: Error) => void): ISSHExecStream;
+	once(event: 'drain', listener: () => void): ISSHExecStream;
+	once(event: 'error', listener: (err: Error) => void): ISSHExecStream;
+	off(event: 'drain', listener: () => void): ISSHExecStream;
+	off(event: 'error', listener: (err: Error) => void): ISSHExecStream;
+	write(data: Buffer | string): boolean;
+	end(data?: Buffer | string): void;
 	close?(): void;
 	destroy?(): void;
 	stderr: {
@@ -707,7 +714,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		for (const protocol of getLocalCommandTransferProtocolOrder(request.target.preferredProtocol)) {
+		for (const protocol of getLocalCommandTransferProtocolOrder(request.target.preferredProtocol, request.target.connection)) {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
@@ -717,7 +724,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					return this.createTransferResult(true, 'rsync-upload', bytes, 'Local rsync upload completed.', startedAt);
 				}
 				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local SCP.', true);
-				await this.runLocalScpUpload(request);
+				await this.runLocalScpUpload(request, bytes, delta => {
+					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Uploading over local SCP.');
+				});
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true);
 				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt);
 			} catch (error) {
@@ -737,7 +746,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		for (const protocol of getLocalCommandTransferProtocolOrder(request.source.preferredProtocol)) {
+		for (const protocol of getLocalCommandTransferProtocolOrder(request.source.preferredProtocol, request.source.connection)) {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
@@ -747,7 +756,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					return this.createTransferResult(true, 'rsync-download', bytes, 'Local rsync download completed.', startedAt);
 				}
 				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local SCP.', true);
-				await this.runLocalScpDownload(request);
+				await this.runLocalScpDownload(request, bytes, delta => {
+					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Downloading over local SCP.');
+				});
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP download completed.', true);
 				return this.createTransferResult(true, 'scp-download', bytes, 'Local SCP download completed.', startedAt);
 			} catch (error) {
@@ -762,20 +773,111 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return undefined;
 	}
 
-	private async runLocalScpUpload(request: ITurboFileTransferRequest): Promise<void> {
+	private async runLocalScpUpload(request: ITurboFileTransferRequest, bytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
 		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
-		await runLocalCommand('scp.exe', buildLocalScpArgs(request.target.connection, request.source.path, formatScpRemoteSpec(request.target.connection, request.target.path)));
+		await this.uploadFileWithScpProtocol(request.target.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
 	}
 
-	private async runLocalScpDownload(request: ITurboFileTransferRequest): Promise<void> {
+	private async runLocalScpDownload(request: ITurboFileTransferRequest, bytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
 		await ensureLocalParentDirectory(request.target.path);
-		await runLocalCommand('scp.exe', buildLocalScpArgs(request.source.connection, formatScpRemoteSpec(request.source.connection, request.source.path), request.target.path));
+		await this.downloadFileWithScpProtocol(request.source.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
+	}
+
+	private async uploadFileWithScpProtocol(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, expectedBytes: number, onProgress?: (transferredBytes: number) => void, progressId?: string): Promise<void> {
+		const configResult = await this.createConnectConfig(connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		let client: ISSHClient | undefined;
+		try {
+			client = await this.connect(configResult.config);
+			const stream = await this.openScpExec(client, `scp -t ${quotePosixShellArg(remotePath)}`);
+			const reader = new ScpProtocolReader(stream);
+			const closePromise = waitForScpClose(stream);
+			const stat = await fsp.stat(localPath);
+			const totalBytes = stat.size || expectedBytes;
+			let transferredBytes = 0;
+
+			await readScpResponse(reader, 'start upload');
+			await writeScpData(stream, `C${formatScpMode(stat.mode)} ${totalBytes} ${sanitizeScpFileName(getTransferName(remotePath) || basename(localPath))}\n`);
+			await readScpResponse(reader, 'upload header');
+
+			for await (const chunk of createReadStream(localPath, { highWaterMark: 1024 * 1024 })) {
+				this.throwIfTransferCanceled(progressId);
+				const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+				await writeScpData(stream, buffer);
+				transferredBytes += buffer.byteLength;
+				onProgress?.(Math.min(transferredBytes, totalBytes));
+			}
+
+			await writeScpData(stream, Buffer.from([0]));
+			await readScpResponse(reader, 'complete upload');
+			stream.end();
+			await closePromise;
+		} finally {
+			client?.end();
+		}
+	}
+
+	private async downloadFileWithScpProtocol(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, expectedBytes: number, onProgress?: (transferredBytes: number) => void, progressId?: string): Promise<void> {
+		const configResult = await this.createConnectConfig(connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		let client: ISSHClient | undefined;
+		try {
+			client = await this.connect(configResult.config);
+			const stream = await this.openScpExec(client, `scp -f ${quotePosixShellArg(remotePath)}`);
+			const reader = new ScpProtocolReader(stream);
+			const closePromise = waitForScpClose(stream);
+
+			await writeScpData(stream, Buffer.from([0]));
+			const header = await readScpFileHeader(reader, stream);
+			const totalBytes = header.size || expectedBytes;
+			await ensureLocalParentDirectory(localPath);
+			await writeScpData(stream, Buffer.from([0]));
+			await readScpFilePayload(reader, localPath, totalBytes, transferredBytes => {
+				this.throwIfTransferCanceled(progressId);
+				onProgress?.(transferredBytes);
+			});
+			await readScpResponse(reader, 'complete download');
+			await writeScpData(stream, Buffer.from([0]));
+			stream.end();
+			await closePromise;
+		} finally {
+			client?.end();
+		}
+	}
+
+	private openScpExec(client: ISSHClient, command: string): Promise<ISSHExecStream> {
+		return new Promise((resolve, reject) => {
+			client.exec(command, (error, stream) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+
+				let stderr = '';
+				stream.stderr.on('data', data => {
+					stderr += data.toString();
+				});
+				stream.on('error', reject);
+				stream.on('close', code => {
+					if (code !== 0 && stderr.trim()) {
+						reject(new Error(stderr.trim()));
+					}
+				});
+				resolve(stream);
+			});
+		});
 	}
 
 	private async runLocalRsyncUpload(request: ITurboFileTransferRequest): Promise<void> {
@@ -4232,24 +4334,249 @@ function isWindowsClipboardPath(path: string): boolean {
 	return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]+\\[^\\]+/.test(path);
 }
 
+// Match WinSCP's SCP path: run remote "scp -t/-f" and speak the SCP wire protocol over the SSH channel.
+class ScpProtocolReader {
+	private readonly chunks: Buffer[] = [];
+	private readonly waiters: Array<() => void> = [];
+	private closed = false;
+	private streamError: Error | undefined;
+
+	constructor(stream: ISSHExecStream) {
+		stream.on('data', data => {
+			this.chunks.push(typeof data === 'string' ? Buffer.from(data) : data);
+			this.flushWaiters();
+		});
+		stream.on('error', error => {
+			this.streamError = error;
+			this.flushWaiters();
+		});
+		stream.on('close', () => {
+			this.closed = true;
+			this.flushWaiters();
+		});
+	}
+
+	async readByte(): Promise<number> {
+		const buffer = await this.readBytes(1);
+		return buffer[0];
+	}
+
+	async readLine(): Promise<string> {
+		const parts: Buffer[] = [];
+		for (;;) {
+			await this.waitForData();
+			const chunk = this.chunks[0];
+			const newlineIndex = chunk.indexOf(10);
+			if (newlineIndex >= 0) {
+				parts.push(this.takeFromFirstChunk(newlineIndex + 1));
+				return Buffer.concat(parts).toString('utf8').replace(/\n$/, '').replace(/\r$/, '');
+			}
+			parts.push(this.takeFromFirstChunk(chunk.byteLength));
+		}
+	}
+
+	async readBytes(byteLength: number): Promise<Buffer> {
+		const parts: Buffer[] = [];
+		let remaining = byteLength;
+		while (remaining > 0) {
+			await this.waitForData();
+			const chunk = this.takeFromFirstChunk(Math.min(remaining, this.chunks[0].byteLength));
+			parts.push(chunk);
+			remaining -= chunk.byteLength;
+		}
+		return Buffer.concat(parts, byteLength);
+	}
+
+	private async waitForData(): Promise<void> {
+		if (this.streamError) {
+			throw this.streamError;
+		}
+		if (this.chunks.length) {
+			return;
+		}
+		if (this.closed) {
+			throw new Error('SCP stream closed unexpectedly.');
+		}
+		await new Promise<void>(resolve => this.waiters.push(resolve));
+		if (this.streamError) {
+			throw this.streamError;
+		}
+		if (!this.chunks.length && this.closed) {
+			throw new Error('SCP stream closed unexpectedly.');
+		}
+	}
+
+	private takeFromFirstChunk(byteLength: number): Buffer {
+		const chunk = this.chunks[0];
+		if (byteLength >= chunk.byteLength) {
+			this.chunks.shift();
+			return chunk;
+		}
+		const head = chunk.subarray(0, byteLength);
+		this.chunks[0] = chunk.subarray(byteLength);
+		return head;
+	}
+
+	private flushWaiters(): void {
+		const waiters = this.waiters.splice(0);
+		for (const waiter of waiters) {
+			waiter();
+		}
+	}
+}
+
+async function readScpResponse(reader: ScpProtocolReader, context: string): Promise<void> {
+	const code = await reader.readByte();
+	if (code === 0) {
+		return;
+	}
+	const message = (await reader.readLine()).trim();
+	if (code === 1 || code === 2) {
+		throw new Error(message || `SCP failed during ${context}.`);
+	}
+	throw new Error(`Unexpected SCP response ${code} during ${context}${message ? `: ${message}` : ''}.`);
+}
+
+async function readScpFileHeader(reader: ScpProtocolReader, stream: ISSHExecStream): Promise<{ size: number; name: string }> {
+	for (;;) {
+		const marker = await reader.readByte();
+		if (marker === 1 || marker === 2) {
+			const message = (await reader.readLine()).trim();
+			throw new Error(message || 'SCP download failed.');
+		}
+		const line = await reader.readLine();
+		if (marker === 84 /* T */) {
+			await writeScpData(stream, Buffer.from([0]));
+			continue;
+		}
+		if (marker !== 67 /* C */) {
+			throw new Error(`Unexpected SCP file header: ${String.fromCharCode(marker)}${line}`);
+		}
+		const match = line.match(/^[0-7]{4}\s+(\d+)\s+(.+)$/);
+		if (!match) {
+			throw new Error(`Invalid SCP file header: C${line}`);
+		}
+		const size = Number(match[1]);
+		if (!Number.isFinite(size) || size < 0) {
+			throw new Error(`Invalid SCP file size: ${match[1]}`);
+		}
+		return { size, name: match[2] };
+	}
+}
+
+async function readScpFilePayload(reader: ScpProtocolReader, localPath: string, byteLength: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
+	const output = createWriteStream(localPath);
+	let transferredBytes = 0;
+	try {
+		while (transferredBytes < byteLength) {
+			const chunk = await reader.readBytes(Math.min(1024 * 1024, byteLength - transferredBytes));
+			await writeLocalStream(output, chunk);
+			transferredBytes += chunk.byteLength;
+			onProgress?.(transferredBytes);
+		}
+		await endLocalStream(output);
+	} catch (error) {
+		output.destroy();
+		throw error;
+	}
+}
+
+function writeScpData(stream: ISSHExecStream, data: Buffer | string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		try {
+			if (stream.write(data)) {
+				resolve();
+				return;
+			}
+			const cleanup = (): void => {
+				stream.off('drain', onDrain);
+				stream.off('error', onError);
+			};
+			const onDrain = (): void => {
+				cleanup();
+				resolve();
+			};
+			const onError = (error: Error): void => {
+				cleanup();
+				reject(error);
+			};
+			stream.once('drain', onDrain);
+			stream.once('error', onError);
+		} catch (error) {
+			reject(error);
+		}
+	});
+}
+
+function writeLocalStream(stream: ReturnType<typeof createWriteStream>, data: Buffer): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (stream.write(data)) {
+			resolve();
+			return;
+		}
+		const cleanup = (): void => {
+			stream.off('drain', onDrain);
+			stream.off('error', onError);
+		};
+		const onDrain = (): void => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error): void => {
+			cleanup();
+			reject(error);
+		};
+		stream.once('drain', onDrain);
+		stream.once('error', onError);
+	});
+}
+
+function endLocalStream(stream: ReturnType<typeof createWriteStream>): Promise<void> {
+	return new Promise((resolve, reject) => {
+		stream.once('error', reject);
+		stream.end(resolve);
+	});
+}
+
+function waitForScpClose(stream: ISSHExecStream): Promise<void> {
+	return new Promise((resolve, reject) => {
+		stream.on('close', code => {
+			if (code === 0 || code === null) {
+				resolve();
+				return;
+			}
+			reject(new Error(`SCP command failed with exit code ${code}.`));
+		});
+		stream.on('error', reject);
+	});
+}
+
+function formatScpMode(mode: number): string {
+	return (mode & 0o777).toString(8).padStart(4, '0');
+}
+
+function sanitizeScpFileName(name: string): string {
+	return name.replace(/[\r\n]/g, '_') || 'payload';
+}
+
 function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): ITurboFileTransferResult['strategy'] {
 	if (source.kind === 'local' && target.kind === 'local') {
 		return 'local-copy';
 	}
 	if (source.kind === 'local') {
-		if (target.preferredProtocol === 'rsync') {
+		if (target.preferredProtocol === 'rsync' && canUseLocalRsyncCommand(target.connection)) {
 			return 'rsync-upload';
 		}
-		if (target.preferredProtocol === 'scp') {
+		if (target.preferredProtocol !== 'sftp') {
 			return 'scp-upload';
 		}
 		return 'sftp-upload';
 	}
 	if (target.kind === 'local') {
-		if (source.preferredProtocol === 'rsync') {
+		if (source.preferredProtocol === 'rsync' && canUseLocalRsyncCommand(source.connection)) {
 			return 'rsync-download';
 		}
-		if (source.preferredProtocol === 'scp') {
+		if (source.preferredProtocol !== 'sftp') {
 			return 'scp-download';
 		}
 		return 'sftp-download';
@@ -4263,37 +4590,26 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 	return 'sftp-direct';
 }
 
-function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined): Array<'scp' | 'rsync'> {
+function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined, connection: ITurboFileSshConnectionOptions | undefined): Array<'scp' | 'rsync'> {
 	if (preferredProtocol === 'rsync') {
-		return ['rsync', 'scp'];
+		return canUseLocalRsyncCommand(connection) ? ['rsync', 'scp'] : ['scp'];
 	}
 	if (preferredProtocol === 'scp') {
 		return ['scp'];
 	}
-	return [];
+	return preferredProtocol === 'sftp' ? [] : ['scp'];
+}
+
+function canUseLocalRsyncCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
+	if (!connection) {
+		return false;
+	}
+	return !!connection.privateKeyPath && !connection.password;
 }
 
 function isRecoverableLocalCommandTransferError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error/i.test(message);
-}
-
-function buildLocalScpArgs(connection: ITurboFileSshConnectionOptions, source: string, target: string): string[] {
-	const args = [
-		'-q',
-		'-o', 'BatchMode=yes',
-		'-o', 'StrictHostKeyChecking=accept-new',
-		'-o', 'Compression=no',
-		'-o', 'LogLevel=ERROR'
-	];
-	if (connection.privateKeyPath) {
-		args.push('-i', connection.privateKeyPath);
-	}
-	if (connection.port && connection.port !== 22) {
-		args.push('-P', String(connection.port));
-	}
-	args.push(source, target);
-	return args;
 }
 
 function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions): string {
@@ -4312,10 +4628,6 @@ function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions)
 		parts.push(`-p ${connection.port}`);
 	}
 	return parts.join(' ');
-}
-
-function formatScpRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
-	return `${connection.username}@${connection.host}:${remotePath}`;
 }
 
 function formatRsyncRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {

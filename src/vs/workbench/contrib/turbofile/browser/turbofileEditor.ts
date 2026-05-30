@@ -47,7 +47,7 @@ import { ITerminalProfileService } from '../../terminal/common/terminal.js';
 import { ColorThemeData } from '../../../services/themes/common/colorThemeData.js';
 import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWorkbenchColorTheme, IWorkbenchThemeService, ThemeSettings, ThemeSettingDefaults } from '../../../services/themes/common/workbenchThemeService.js';
 import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
-import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol } from '../common/turbofileTypes.js';
+import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -675,7 +675,7 @@ export class TurboFileEditor extends EditorPane {
 				shell: true,
 				archive: true
 			},
-			preferredTransferProtocol: 'sftp'
+			preferredTransferProtocol: defaultTurboFileTransferProtocol
 		};
 		this.paneStates = {
 			left: {
@@ -1010,10 +1010,10 @@ export class TurboFileEditor extends EditorPane {
 			case 'rsync':
 				return device.capabilities.rsync ? 'rsync 极速模式（可用）' : 'rsync 极速模式（未通过检测）';
 			case 'scp':
-				return device.capabilities.scp ? 'SCP 兼容模式（可用）' : 'SCP 兼容模式（未通过检测）';
+				return device.capabilities.scp ? 'SCP 默认极速（可用）' : 'SCP 默认极速（未通过检测）';
 			case 'sftp':
 			default:
-				return 'SFTP 默认稳定';
+				return 'SFTP 稳定模式';
 		}
 	}
 
@@ -1767,12 +1767,12 @@ export class TurboFileEditor extends EditorPane {
 
 		const capabilities = this.toDeviceCapabilities(result.capabilities);
 		this.deviceStore.updateDeviceCapabilities(device.id, capabilities);
-		return this.getProtocolCheckResult(this.normalizeTransferProtocol(device.preferredTransferProtocol ?? 'sftp'), result.capabilities);
+		return this.getProtocolCheckResult(this.normalizeTransferProtocol(device.preferredTransferProtocol ?? defaultTurboFileTransferProtocol), result.capabilities);
 	}
 
 	private async detectDraftProtocolCapabilities(draft: TurboFileDeviceDraft, editingDevice: TurboFileDevice | undefined): Promise<TurboFileProtocolCheckResult | undefined> {
 		if (draft.preferredTransferProtocol === 'sftp') {
-			return { status: 'success', message: 'SFTP 默认稳定，无需额外检测。', missingDependencies: [] };
+			return { status: 'success', message: 'SFTP 稳定模式，无需额外检测。', missingDependencies: [] };
 		}
 
 		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptionsFromDraft(draft, editingDevice));
@@ -1780,7 +1780,7 @@ export class TurboFileEditor extends EditorPane {
 			return { status: 'error', message: `协议能力检测失败：${result.message}`, missingDependencies: [] };
 		}
 
-		return this.getProtocolCheckResult(this.normalizeTransferProtocol(draft.preferredTransferProtocol ?? 'sftp'), result.capabilities);
+		return this.getProtocolCheckResult(this.normalizeTransferProtocol(draft.preferredTransferProtocol ?? defaultTurboFileTransferProtocol), result.capabilities);
 	}
 
 	private getProtocolCheckResult(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileProtocolCheckResult | undefined {
@@ -3261,6 +3261,12 @@ export class TurboFileEditor extends EditorPane {
 		if (detail.includes('direct sftp')) {
 			return 'sftp-direct';
 		}
+		if (detail.includes('scp upload')) {
+			return 'scp-upload';
+		}
+		if (detail.includes('scp download')) {
+			return 'scp-download';
+		}
 		if (detail.includes('sftp upload')) {
 			return 'sftp-upload';
 		}
@@ -3320,19 +3326,19 @@ export class TurboFileEditor extends EditorPane {
 			return 'local-copy';
 		}
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (targetDevice.preferredTransferProtocol === 'rsync') {
+			if (targetDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(targetDevice)) {
 				return 'rsync-upload';
 			}
-			if (targetDevice.preferredTransferProtocol === 'scp') {
+			if (targetDevice.preferredTransferProtocol !== 'sftp') {
 				return 'scp-upload';
 			}
 			return 'sftp-upload';
 		}
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (sourceDevice.preferredTransferProtocol === 'rsync') {
+			if (sourceDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(sourceDevice)) {
 				return 'rsync-download';
 			}
-			if (sourceDevice.preferredTransferProtocol === 'scp') {
+			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
 				return 'scp-download';
 			}
 			return 'sftp-download';
@@ -3348,6 +3354,10 @@ export class TurboFileEditor extends EditorPane {
 			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
 		}
 		return 'sftp-direct';
+	}
+
+	private canUseLocalRsyncCommand(device: TurboFileDevice): boolean {
+		return device.authType === 'privateKey' && !!device.privateKeyPath;
 	}
 
 	private formatTransferProgressDetail(phase: ITurboFileTransferProgressEvent['phase'], transferredBytes: number, totalBytes: number): string {
@@ -9210,7 +9220,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private normalizeTransferProtocol(value: string): TurboFileTransferProtocol {
-		return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : 'sftp';
+		return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
 	}
 
 	private renderDeviceForm(): HTMLElement {
@@ -9280,7 +9290,7 @@ export class TurboFileEditor extends EditorPane {
 				if (capabilityResult) {
 					this.deviceConnectionMessages.set(savedDevice.id, capabilityResult);
 				} else if (savedDevice.preferredTransferProtocol === 'sftp') {
-					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: 'SFTP 默认稳定，无需额外检测。' });
+					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: 'SFTP 稳定模式，无需额外检测。' });
 				}
 				this.deviceFormMessage = `${editingDevice ? '已更新' : '已保存'}设备：${savedDevice.name}${capabilityResult ? `，${capabilityResult.message}` : ''}`;
 				this.statusMessage = `${this.deviceFormMessage}。可在设备下拉菜单中选择。`;
@@ -9351,14 +9361,14 @@ export class TurboFileEditor extends EditorPane {
 		select.id = 'turbofile-device-preferredTransferProtocol';
 		select.name = 'preferredTransferProtocol';
 		for (const [value, text] of [
-			['sftp', 'SFTP 默认稳定'],
+			['scp', 'SCP 默认极速'],
+			['sftp', 'SFTP 稳定模式'],
 			['rsync', 'rsync 极速模式'],
-			['scp', 'SCP 兼容模式']
 		] as [string, string][]) {
 			const option = document.createElement('option');
 			option.value = value;
 			option.textContent = text;
-			option.selected = (editingDevice?.preferredTransferProtocol ?? 'sftp') === value;
+			option.selected = (editingDevice?.preferredTransferProtocol ?? defaultTurboFileTransferProtocol) === value;
 			select.appendChild(option);
 		}
 		this.bindDeviceFormControl(select);
@@ -9373,7 +9383,7 @@ export class TurboFileEditor extends EditorPane {
 		status.style.gridColumn = '1 / -1';
 		status.style.minHeight = '18px';
 		status.style.color = 'var(--vscode-descriptionForeground)';
-		status.textContent = select.value === 'sftp' ? 'SFTP 默认稳定，无需额外检测。' : '选择后将自动检测协议能力。';
+		status.textContent = select.value === 'sftp' ? 'SFTP 稳定模式，无需额外检测。' : '选择后将自动检测协议能力。';
 
 		let lastMissingDependencies: readonly TurboFileTransferDependency[] = [];
 		let detectionRun = 0;
@@ -9393,7 +9403,7 @@ export class TurboFileEditor extends EditorPane {
 			lastMissingDependencies = [];
 			setInstallVisible(false);
 			if (protocol === 'sftp') {
-				setStatus('idle', 'SFTP 默认稳定，无需额外检测。');
+				setStatus('idle', 'SFTP 稳定模式，无需额外检测。');
 				return;
 			}
 			const draft = this.readDeviceDraft(parent as HTMLFormElement, status);
@@ -9411,7 +9421,7 @@ export class TurboFileEditor extends EditorPane {
 					return;
 				}
 				if (!result) {
-					setStatus('idle', 'SFTP 默认稳定，无需额外检测。');
+					setStatus('idle', 'SFTP 稳定模式，无需额外检测。');
 					setInstallVisible(false);
 					return;
 				}
@@ -9533,7 +9543,7 @@ export class TurboFileEditor extends EditorPane {
 			passphrase: String(formData.get('passphrase') || '') || undefined,
 			defaultPath: String(formData.get('defaultPath') || '') || undefined,
 			platform: String(formData.get('platform') || 'unknown') as TurboFileDevicePlatform,
-			preferredTransferProtocol: this.normalizeTransferProtocol(String(formData.get('preferredTransferProtocol') || 'sftp'))
+			preferredTransferProtocol: this.normalizeTransferProtocol(String(formData.get('preferredTransferProtocol') || defaultTurboFileTransferProtocol))
 		};
 	}
 }
