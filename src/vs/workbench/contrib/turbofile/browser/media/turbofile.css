@@ -277,12 +277,12 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	height: 100%;
 	min-height: 0;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 48px;
+	grid-template-rows: minmax(0, 1fr) 24px;
 	overflow: hidden;
 }
 
 .turbofile-transfer-page.has-live-transfer {
-	grid-template-rows: minmax(0, 1fr) 48px;
+	grid-template-rows: minmax(0, 1fr) 24px;
 }
 
 .turbofile-transfer-page.is-terminal-focused {
@@ -2394,9 +2394,10 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 
 .turbofile-taskbar {
 	display: grid;
-	grid-template-rows: 2px 46px;
-	min-height: 48px;
-	height: 48px;
+	grid-template-rows: 2px minmax(0, 1fr);
+	box-sizing: border-box;
+	min-height: 24px;
+	height: 24px;
 	padding: 0;
 	border-top: 1px solid var(--vscode-statusBar-border, var(--vscode-panel-border));
 	color: var(--vscode-statusBar-foreground);
@@ -2437,9 +2438,9 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-height: 0;
 	display: grid;
 	grid-template-columns: auto minmax(0, 1fr) auto;
-	gap: 14px;
+	gap: 12px;
 	align-items: center;
-	padding: 0 10px;
+	padding: 0 8px;
 }
 
 .turbofile-statusbar-section {
@@ -2460,7 +2461,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	align-items: center;
 	gap: 5px;
 	font-size: 12px;
-	line-height: 18px;
+	line-height: 20px;
 	color: inherit;
 	opacity: 0.94;
 }
@@ -2473,10 +2474,11 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 
 .turbofile-statusbar-message {
 	min-width: 0;
-	display: grid;
-	grid-template-rows: 18px 16px;
-	align-content: center;
-	gap: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	white-space: nowrap;
+	overflow: hidden;
 }
 
 .turbofile-statusbar-message-title,
@@ -2490,19 +2492,19 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 .turbofile-statusbar-message-title {
 	font-size: 12px;
 	font-weight: 600;
-	line-height: 18px;
+	line-height: 20px;
 	color: inherit;
 }
 
 .turbofile-statusbar-message-detail {
 	font-size: 11px;
-	line-height: 16px;
+	line-height: 20px;
 	color: color-mix(in srgb, var(--vscode-statusBar-foreground) 76%, transparent);
 }
 
 .turbofile-statusbar-cancel {
-	width: 24px;
-	height: 24px;
+	width: 20px;
+	height: 20px;
 	border: 0;
 	border-radius: 4px;
 	display: inline-flex;
