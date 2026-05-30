@@ -14,7 +14,7 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferDependency } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -501,6 +501,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				const stat = await fsp.stat(request.source.path);
 				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
+				if (!stat.isDirectory()) {
+					const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt);
+					if (commandResult?.ok) {
+						this.clearRemoteDirectoryListingCache(request.target);
+						return commandResult;
+					}
+				}
 				this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP upload.', true);
 				let transferredBytes = 0;
 				const onDelta = (delta: number): void => {
@@ -525,7 +532,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true);
 				this.clearRemoteDirectoryListingCache(request.target);
-				return this.createTransferResult(true, strategy, bytes, 'SFTP upload completed.', startedAt);
+				return this.createTransferResult(true, 'sftp-upload', bytes, 'SFTP upload completed.', startedAt);
 			}
 
 			if (request.source.kind === 'ssh' && request.target.kind === 'local') {
@@ -536,6 +543,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bytes = sourceType === 'directory'
 					? Math.max(0, request.expectedBytes ?? 0)
 					: Math.max(0, request.expectedBytes ?? 0);
+				if (sourceType !== 'directory') {
+					if (bytes <= 0) {
+						bytes = await this.withSftp(request.source, async sftp => (await this.remoteStat(sftp, request.source.path)).size, request.progressId).catch(() => bytes);
+					}
+					const commandResult = await this.trySshToLocalCommandTransfer(request, bytes, startedAt);
+					if (commandResult?.ok) {
+						return commandResult;
+					}
+				}
 				let transferredBytes = 0;
 				const onDelta = (delta: number): void => {
 					this.throwIfTransferCanceled(request.progressId);
@@ -561,7 +577,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP download completed.', true);
-				return this.createTransferResult(true, strategy, bytes, 'SFTP download completed.', startedAt);
+				return this.createTransferResult(true, 'sftp-download', bytes, 'SFTP download completed.', startedAt);
 			}
 
 			if (request.strategyHint !== 'relay') {
@@ -683,6 +699,112 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			this.scheduleTransferProgressCleanup(request.progressId);
 		}
+	}
+
+	private async tryLocalToSshCommandTransfer(request: ITurboFileTransferRequest, bytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
+			return undefined;
+		}
+
+		for (const protocol of getLocalCommandTransferProtocolOrder(request.target.preferredProtocol)) {
+			this.throwIfTransferCanceled(request.progressId);
+			try {
+				if (protocol === 'rsync') {
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true);
+					await this.runLocalRsyncUpload(request);
+					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync upload completed.', true);
+					return this.createTransferResult(true, 'rsync-upload', bytes, 'Local rsync upload completed.', startedAt);
+				}
+				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local SCP.', true);
+				await this.runLocalScpUpload(request);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true);
+				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt);
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				if (!isRecoverableLocalCommandTransferError(error)) {
+					return undefined;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private async trySshToLocalCommandTransfer(request: ITurboFileTransferRequest, bytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'local' || !request.source.connection) {
+			return undefined;
+		}
+
+		for (const protocol of getLocalCommandTransferProtocolOrder(request.source.preferredProtocol)) {
+			this.throwIfTransferCanceled(request.progressId);
+			try {
+				if (protocol === 'rsync') {
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true);
+					await this.runLocalRsyncDownload(request);
+					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync download completed.', true);
+					return this.createTransferResult(true, 'rsync-download', bytes, 'Local rsync download completed.', startedAt);
+				}
+				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local SCP.', true);
+				await this.runLocalScpDownload(request);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP download completed.', true);
+				return this.createTransferResult(true, 'scp-download', bytes, 'Local SCP download completed.', startedAt);
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				if (!isRecoverableLocalCommandTransferError(error)) {
+					return undefined;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private async runLocalScpUpload(request: ITurboFileTransferRequest): Promise<void> {
+		if (request.target.kind !== 'ssh' || !request.target.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
+		await runLocalCommand('scp.exe', buildLocalScpArgs(request.target.connection, request.source.path, formatScpRemoteSpec(request.target.connection, request.target.path)));
+	}
+
+	private async runLocalScpDownload(request: ITurboFileTransferRequest): Promise<void> {
+		if (request.source.kind !== 'ssh' || !request.source.connection) {
+			throw new Error('Missing SSH source.');
+		}
+		await ensureLocalParentDirectory(request.target.path);
+		await runLocalCommand('scp.exe', buildLocalScpArgs(request.source.connection, formatScpRemoteSpec(request.source.connection, request.source.path), request.target.path));
+	}
+
+	private async runLocalRsyncUpload(request: ITurboFileTransferRequest): Promise<void> {
+		if (request.target.kind !== 'ssh' || !request.target.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
+		await runLocalCommand('rsync.exe', [
+			'-a',
+			'--whole-file',
+			'-e',
+			buildLocalRsyncSshTransport(request.target.connection),
+			toRsyncLocalPath(request.source.path),
+			formatRsyncRemoteSpec(request.target.connection, request.target.path)
+		]);
+	}
+
+	private async runLocalRsyncDownload(request: ITurboFileTransferRequest): Promise<void> {
+		if (request.source.kind !== 'ssh' || !request.source.connection) {
+			throw new Error('Missing SSH source.');
+		}
+		await ensureLocalParentDirectory(request.target.path);
+		await runLocalCommand('rsync.exe', [
+			'-a',
+			'--whole-file',
+			'-e',
+			buildLocalRsyncSshTransport(request.source.connection),
+			formatRsyncRemoteSpec(request.source.connection, request.source.path),
+			toRsyncLocalPath(request.target.path)
+		]);
 	}
 
 	async transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult> {
@@ -4080,9 +4202,21 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		return 'local-copy';
 	}
 	if (source.kind === 'local') {
+		if (target.preferredProtocol === 'rsync') {
+			return 'rsync-upload';
+		}
+		if (target.preferredProtocol === 'scp') {
+			return 'scp-upload';
+		}
 		return 'sftp-upload';
 	}
 	if (target.kind === 'local') {
+		if (source.preferredProtocol === 'rsync') {
+			return 'rsync-download';
+		}
+		if (source.preferredProtocol === 'scp') {
+			return 'scp-download';
+		}
 		return 'sftp-download';
 	}
 	if (source.connection && target.connection && isSameSshConnection(source.connection, target.connection)) {
@@ -4092,6 +4226,82 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		return 'rsync-direct';
 	}
 	return 'sftp-direct';
+}
+
+function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined): Array<'scp' | 'rsync'> {
+	if (preferredProtocol === 'rsync') {
+		return ['rsync', 'scp'];
+	}
+	if (preferredProtocol === 'scp') {
+		return ['scp'];
+	}
+	return [];
+}
+
+function isRecoverableLocalCommandTransferError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error/i.test(message);
+}
+
+function buildLocalScpArgs(connection: ITurboFileSshConnectionOptions, source: string, target: string): string[] {
+	const args = [
+		'-q',
+		'-o', 'BatchMode=yes',
+		'-o', 'StrictHostKeyChecking=accept-new',
+		'-o', 'Compression=no',
+		'-o', 'LogLevel=ERROR'
+	];
+	if (connection.privateKeyPath) {
+		args.push('-i', connection.privateKeyPath);
+	}
+	if (connection.port && connection.port !== 22) {
+		args.push('-P', String(connection.port));
+	}
+	args.push(source, target);
+	return args;
+}
+
+function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions): string {
+	const parts = [
+		'ssh',
+		'-T',
+		'-o BatchMode=yes',
+		'-o StrictHostKeyChecking=accept-new',
+		'-o Compression=no',
+		'-o LogLevel=ERROR'
+	];
+	if (connection.privateKeyPath) {
+		parts.push(`-i ${quoteLocalShellArg(toOpenSshLocalPath(connection.privateKeyPath))}`);
+	}
+	if (connection.port && connection.port !== 22) {
+		parts.push(`-p ${connection.port}`);
+	}
+	return parts.join(' ');
+}
+
+function formatScpRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
+	return `${connection.username}@${connection.host}:${remotePath}`;
+}
+
+function formatRsyncRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
+	return `${connection.username}@${connection.host}:${remotePath}`;
+}
+
+function toRsyncLocalPath(path: string): string {
+	const normalized = path.replace(/\\/g, '/');
+	const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
+	if (driveMatch) {
+		return `/cygdrive/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+	}
+	return normalized;
+}
+
+function toOpenSshLocalPath(path: string): string {
+	return path.replace(/\\/g, '/');
+}
+
+function quoteLocalShellArg(value: string): string {
+	return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
 function getDirectRsyncRouteCacheKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions): string {

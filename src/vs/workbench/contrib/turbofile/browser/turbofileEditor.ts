@@ -3276,6 +3276,12 @@ export class TurboFileEditor extends EditorPane {
 			case 'sftp-upload':
 			case 'sftp-download':
 				return '直连 sftp';
+			case 'scp-upload':
+			case 'scp-download':
+				return '直连 scp';
+			case 'rsync-upload':
+			case 'rsync-download':
+				return '直连 rsync';
 			case 'rsync-relay':
 				return '中转 rsync';
 			case 'sftp-relay':
@@ -3298,9 +3304,21 @@ export class TurboFileEditor extends EditorPane {
 			return 'local-copy';
 		}
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			if (targetDevice.preferredTransferProtocol === 'rsync') {
+				return 'rsync-upload';
+			}
+			if (targetDevice.preferredTransferProtocol === 'scp') {
+				return 'scp-upload';
+			}
 			return 'sftp-upload';
 		}
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			if (sourceDevice.preferredTransferProtocol === 'rsync') {
+				return 'rsync-download';
+			}
+			if (sourceDevice.preferredTransferProtocol === 'scp') {
+				return 'scp-download';
+			}
 			return 'sftp-download';
 		}
 		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
