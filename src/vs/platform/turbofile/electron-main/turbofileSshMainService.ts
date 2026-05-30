@@ -29,7 +29,7 @@ const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
 const REMOTE_DIRECTORY_SFTP_IDLE_MS = 5 * 60 * 1000;
-const REMOTE_DIRECTORY_LISTING_CACHE_TTL_MS = 2000;
+const REMOTE_DIRECTORY_LISTING_CACHE_TTL_MS = 30 * 1000;
 const REMOTE_DIRECTORY_LISTING_CACHE_MAX_ENTRIES = 256;
 const SFTP_TRANSFER_CONCURRENCY = 64;
 const SFTP_TRANSFER_CHUNK_SIZE = 255 * 1024;
@@ -56,6 +56,7 @@ const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_RSYNC_ROUTE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const DIRECT_RSYNC_ROUTE_UNAVAILABLE_CACHE_TTL_MS = 10 * 60 * 1000;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
+const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 class TurboFileTransferCanceledError extends Error {
 	constructor() {
@@ -410,11 +411,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh = false): Promise<ITurboFileDirectoryListing> {
-		const configResult = await this.createConnectConfig(options);
-		if (!configResult.ok) {
-			throw new Error(configResult.message);
-		}
-
 		const cacheKey = this.getRemoteDirectoryListingCacheKey(options, path);
 		if (!refresh) {
 			const cached = this.getRemoteDirectoryListingCache(cacheKey);
@@ -423,9 +419,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 
+		const configResult = await this.createConnectConfig(options);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
 		const session = await this.getDirectorySftpSession(options, configResult.config);
 		try {
-			const listing = await this.readRemoteDirectoryWithFallback(session.sftp, options, path);
+			const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path);
 			this.touchDirectorySftpSession(session.key);
 			const result = {
 				path: listing.path,
@@ -3635,19 +3636,53 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return parsed;
 	}
 
-	private async readRemoteDirectoryWithFallback(sftp: ISFTPWrapper, options: ITurboFileSshConnectionOptions, remotePath: string): Promise<IRemoteDirectoryReadResult> {
+	private async readRemoteDirectoryWithFallback(sftp: ISFTPWrapper, client: ISSHClient, options: ITurboFileSshConnectionOptions, remotePath: string): Promise<IRemoteDirectoryReadResult> {
 		try {
-			return { path: remotePath, entries: await this.readRemoteDirectory(sftp, remotePath) };
+			return { path: remotePath, entries: await this.readRemoteDirectoryFast(client, sftp, remotePath) };
 		} catch (firstError) {
 			for (const fallbackPath of getRemoteDirectoryFallbackPaths(options, remotePath)) {
 				try {
-					return { path: fallbackPath, entries: await this.readRemoteDirectory(sftp, fallbackPath) };
+					return { path: fallbackPath, entries: await this.readRemoteDirectoryFast(client, sftp, fallbackPath) };
 				} catch {
 					// Try the next SFTP-visible spelling for devices with chrooted home paths.
 				}
 			}
 			throw firstError;
 		}
+	}
+
+	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
+		try {
+			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), { timeoutMs: 8000 }));
+		} catch {
+			return this.readRemoteDirectory(sftp, remotePath);
+		}
+	}
+
+	private parseFastRemoteDirectoryEntries(output: Buffer): ISFTPFileEntry[] {
+		const text = output.toString('utf8');
+		if (!text) {
+			return [];
+		}
+
+		const parts = text.split('\0');
+		const entries: ISFTPFileEntry[] = [];
+		for (let index = 0; index + 3 < parts.length; index += 4) {
+			const filename = parts[index];
+			if (!filename || filename === '.' || filename === '..') {
+				continue;
+			}
+			const kind = parts[index + 1];
+			const size = Number(parts[index + 2]);
+			const modifiedSeconds = Number(parts[index + 3]);
+			const type: TurboFileFileType = kind === 'd' ? 'directory' : kind === 'f' ? 'file' : kind === 'l' ? 'symlink' : 'unknown';
+			entries.push({
+				filename,
+				longname: type === 'directory' ? 'd' : type === 'symlink' ? 'l' : '-',
+				attrs: createFastDirectoryEntryStats(type, Number.isFinite(size) ? size : 0, Number.isFinite(modifiedSeconds) ? Math.floor(modifiedSeconds) : 0)
+			});
+		}
+		return entries;
 	}
 
 	private readRemoteDirectory(sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
@@ -4739,6 +4774,11 @@ function buildPosixHumanSizeCommand(path: string): string {
 	return `du -sh -- ${quotedPath} 2>/dev/null | awk 'NR==1 {print $1; exit}'`;
 }
 
+function buildPosixFastDirectoryListCommand(path: string): string {
+	const quotedPath = quotePosixShellArg(path);
+	return `LC_ALL=C find ${quotedPath} -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0%s\\0%T@\\0'`;
+}
+
 function parseSizeCommandOutput(output: string): number {
 	const match = output.trim().match(/\d+/);
 	if (!match) {
@@ -5177,5 +5217,15 @@ function compareFileEntries(a: ITurboFileFileEntry, b: ITurboFileFileEntry): num
 	if (a.type !== 'directory' && b.type === 'directory') {
 		return 1;
 	}
-	return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+	return FILE_ENTRY_NAME_COLLATOR.compare(a.name, b.name);
+}
+
+function createFastDirectoryEntryStats(type: TurboFileFileType, size: number, mtime: number): ISFTPStats {
+	return {
+		size,
+		mtime,
+		isDirectory: () => type === 'directory',
+		isFile: () => type === 'file',
+		isSymbolicLink: () => type === 'symlink'
+	};
 }

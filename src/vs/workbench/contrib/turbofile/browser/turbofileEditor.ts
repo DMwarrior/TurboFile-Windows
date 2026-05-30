@@ -376,6 +376,7 @@ const FILE_LIST_DEFAULT_VIEWPORT_HEIGHT = 720;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
 const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
+const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
@@ -2402,6 +2403,7 @@ export class TurboFileEditor extends EditorPane {
 	private renderFileListSlice(side: 'left' | 'right', list: HTMLElement, range: TurboFileFileListRange): void {
 		const state = this.paneStates[side];
 		clearNode(list);
+		const visibleItems = this.getVisibleFileItems(state);
 
 		if (range.topSpacerHeight > 0) {
 			const topSpacer = $('.turbofile-file-list-spacer');
@@ -2409,7 +2411,7 @@ export class TurboFileEditor extends EditorPane {
 			list.appendChild(topSpacer);
 		}
 
-		for (const item of this.getVisibleFileItems(state).slice(range.startIndex, range.endIndex)) {
+		for (const item of visibleItems.slice(range.startIndex, range.endIndex)) {
 			list.appendChild(this.renderFileRow(side, item, this.isItemSelected(side, item)));
 		}
 
@@ -2422,8 +2424,22 @@ export class TurboFileEditor extends EditorPane {
 		this.fileListRenderedRange[side] = {
 			startIndex: range.startIndex,
 			endIndex: range.endIndex,
-			total: this.getVisibleFileItems(state).length
+			total: visibleItems.length
 		};
+		this.prefetchRenderedDirectoryRows(side, visibleItems, range);
+	}
+
+	private prefetchRenderedDirectoryRows(side: 'left' | 'right', items: TurboFileFileItem[], range: TurboFileFileListRange): void {
+		let prefetched = 0;
+		for (const item of items.slice(range.startIndex, range.endIndex + PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT)) {
+			if (!item.path || item.parent || !item.directory) {
+				continue;
+			}
+			this.prefetchPaneDirectory(side, item.path);
+			if (++prefetched >= PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT) {
+				return;
+			}
+		}
 	}
 
 	private getFileListRange(state: TurboFilePaneState): TurboFileFileListRange {
