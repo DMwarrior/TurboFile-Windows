@@ -2840,7 +2840,6 @@ export class TurboFileEditor extends EditorPane {
 		const meta = $('.turbofile-task-meta.turbofile-statusbar-message-detail');
 		if (runningTransfers.length) {
 			title.textContent = this.getLiveTransferStatusTitle(runningTransfers);
-			meta.textContent = this.getLiveTransferStatusDetail(runningTransfers);
 		} else if (latest) {
 			title.textContent = this.formatTaskLine(latest);
 			meta.textContent = latest.detail;
@@ -2849,7 +2848,9 @@ export class TurboFileEditor extends EditorPane {
 			meta.textContent = '暂无传输任务，最近日志会显示在这里。';
 		}
 		message.appendChild(title);
-		message.appendChild(meta);
+		if (meta.textContent) {
+			message.appendChild(meta);
+		}
 
 		const right = $('.turbofile-statusbar-section.is-right');
 		if (runningTransfers.length && liveSummary) {
@@ -2900,22 +2901,6 @@ export class TurboFileEditor extends EditorPane {
 			return tasks.length > 1 ? `正在传输 ${tasks.length} 个任务` : tasks[0].label;
 		}
 		return items.length > 1 ? `正在传输：${active.item.name} · ${items.length} 项` : `正在传输：${active.item.name}`;
-	}
-
-	private getLiveTransferStatusDetail(tasks: TurboFileTask[]): string {
-		const aggregate = this.getLiveTransferAggregate(tasks);
-		const parts = [
-			this.formatSpeed(aggregate.speedBytesPerSecond),
-			this.formatRemaining(aggregate.remainingMs),
-			`${formatSize(aggregate.transferredBytes)} / ${formatSize(aggregate.totalBytes)}`
-		];
-		if (tasks.length === 1) {
-			const protocol = this.getTransferProtocolLabel(tasks[0].strategy);
-			if (protocol) {
-				parts.push(protocol);
-			}
-		}
-		return parts.join(' · ');
 	}
 
 	private getLiveTransferItems(task: TurboFileTask): TurboFileTaskTransferItem[] {
