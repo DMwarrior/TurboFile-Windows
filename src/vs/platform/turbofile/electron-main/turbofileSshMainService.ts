@@ -260,6 +260,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly terminalSessions = new Map<string, ITurboFileSshTerminalMainSession>();
 	private readonly transferProgressEmitters = new Map<string, Emitter<ITurboFileTransferProgressEvent>>();
 	private readonly transferProgressSnapshots = new Map<string, ITransferProgressSnapshot>();
+	private readonly transferDataStartTimes = new Map<string, number>();
 	private readonly transferCancellationRequests = new Set<string>();
 	private readonly transferCancelHandlers = new Map<string, Set<() => void>>();
 	private readonly directorySftpSessions = new Map<string, Promise<IRemoteDirectorySftpSession>>();
@@ -498,11 +499,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					transferredBytes += delta;
 					this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'transfer', 'Copying locally.');
 				};
+				this.markTransferDataStarted(request.progressId);
 				await this.copyLocalPath(request.source.path, request.target.path, onDelta, request.progressId);
 				this.throwIfTransferCanceled(request.progressId);
 				const bytes = Math.max(totalBytes, transferredBytes);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local copy completed.', true);
-				return this.createTransferResult(true, strategy, bytes, 'Local copy completed.', startedAt);
+				return this.createTransferResult(true, strategy, bytes, 'Local copy completed.', startedAt, request.progressId);
 			}
 
 			if (request.source.kind === 'local' && request.target.kind === 'ssh') {
@@ -529,18 +531,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				};
 				if (stat.isDirectory()) {
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and uploading directory over SFTP.', true);
+					this.markTransferDataStarted(request.progressId);
 					await this.uploadDirectoryConcurrent(request.target, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
 					await this.withSftp(request.target, async sftp => {
 						this.throwIfTransferCanceled(request.progressId);
 						await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
+						this.markTransferDataStarted(request.progressId);
 						await this.fastPutWithFallback(sftp, request.source.path, request.target.path, bytes, onDelta, request.progressId);
 					}, request.progressId);
 				}
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true);
 				this.clearRemoteDirectoryListingCache(request.target);
-				return this.createTransferResult(true, 'sftp-upload', bytes, 'SFTP upload completed.', startedAt);
+				return this.createTransferResult(true, 'sftp-upload', bytes, 'SFTP upload completed.', startedAt, request.progressId);
 			}
 
 			if (request.source.kind === 'ssh' && request.target.kind === 'local') {
@@ -572,6 +576,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				};
 				if (sourceType === 'directory') {
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and downloading directory over SFTP.', true);
+					this.markTransferDataStarted(request.progressId);
 					await this.downloadDirectoryConcurrent(request.source, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
 					await this.withSftp(request.source, async sftp => {
@@ -580,12 +585,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 							bytes = (await this.remoteStat(sftp, request.source.path)).size;
 						}
 						this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true);
+						this.markTransferDataStarted(request.progressId);
 						await this.fastGetWithFallback(sftp, request.source.path, request.target.path, bytes, onDelta, request.progressId);
 					}, request.progressId);
 				}
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP download completed.', true);
-				return this.createTransferResult(true, 'sftp-download', bytes, 'SFTP download completed.', startedAt);
+				return this.createTransferResult(true, 'sftp-download', bytes, 'SFTP download completed.', startedAt, request.progressId);
 			}
 
 			if (request.strategyHint !== 'relay') {
@@ -653,8 +659,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						this.fireTransferProgress(request, downloadedBytes, relayTotalBytes, 'relay-download', 'Downloading to relay cache.');
 					};
 					if (sourceType === 'directory') {
+						this.markTransferDataStarted(request.progressId);
 						await this.downloadDirectory(sftp, request.source.path, relayPath, onDownloadDelta, request.progressId);
 					} else {
+						this.markTransferDataStarted(request.progressId);
 						await this.fastGetWithFallback(sftp, request.source.path, relayPath, bytes, onDownloadDelta, request.progressId);
 					}
 				}, request.progressId);
@@ -678,7 +686,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, bytes * 2, bytes * 2, 'complete', 'SFTP relay completed.', true);
 				this.clearRemoteDirectoryListingCache(request.target);
-				return this.createTransferResult(true, strategy, bytes, 'SFTP relay completed.', startedAt);
+				return this.createTransferResult(true, strategy, bytes, 'SFTP relay completed.', startedAt, request.progressId);
 			} finally {
 				await fsp.rm(relayRoot, { recursive: true, force: true }).catch(() => undefined);
 			}
@@ -719,16 +727,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			try {
 				if (protocol === 'rsync') {
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true);
+					this.markTransferDataStarted(request.progressId);
 					await this.runLocalRsyncUpload(request);
 					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync upload completed.', true);
-					return this.createTransferResult(true, 'rsync-upload', bytes, 'Local rsync upload completed.', startedAt);
+					return this.createTransferResult(true, 'rsync-upload', bytes, 'Local rsync upload completed.', startedAt, request.progressId);
 				}
 				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local SCP.', true);
 				await this.runLocalScpUpload(request, bytes, delta => {
 					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Uploading over local SCP.');
 				});
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true);
-				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt);
+				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt, request.progressId);
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
@@ -751,16 +760,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			try {
 				if (protocol === 'rsync') {
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true);
+					this.markTransferDataStarted(request.progressId);
 					await this.runLocalRsyncDownload(request);
 					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync download completed.', true);
-					return this.createTransferResult(true, 'rsync-download', bytes, 'Local rsync download completed.', startedAt);
+					return this.createTransferResult(true, 'rsync-download', bytes, 'Local rsync download completed.', startedAt, request.progressId);
 				}
 				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local SCP.', true);
 				await this.runLocalScpDownload(request, bytes, delta => {
 					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Downloading over local SCP.');
 				});
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP download completed.', true);
-				return this.createTransferResult(true, 'scp-download', bytes, 'Local SCP download completed.', startedAt);
+				return this.createTransferResult(true, 'scp-download', bytes, 'Local SCP download completed.', startedAt, request.progressId);
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
@@ -809,6 +819,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await writeScpData(stream, `C${formatScpMode(stat.mode)} ${totalBytes} ${sanitizeScpFileName(getTransferName(remotePath) || basename(localPath))}\n`);
 			await readScpResponse(reader, 'upload header');
 
+			this.markTransferDataStarted(progressId);
 			for await (const chunk of createReadStream(localPath, { highWaterMark: 1024 * 1024 })) {
 				this.throwIfTransferCanceled(progressId);
 				const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
@@ -844,6 +855,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const totalBytes = header.size || expectedBytes;
 			await ensureLocalParentDirectory(localPath);
 			await writeScpData(stream, Buffer.from([0]));
+			this.markTransferDataStarted(progressId);
 			await readScpFilePayload(reader, localPath, totalBytes, transferredBytes => {
 				this.throwIfTransferCanceled(progressId);
 				onProgress?.(transferredBytes);
@@ -919,7 +931,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(request.progressId);
 		}
 		if (!items.length) {
-			return this.createBatchTransferResult(false, strategy, 0, 'No transfer items.', 0, 0, [], startedAt);
+			return this.createBatchTransferResult(false, strategy, 0, 'No transfer items.', 0, 0, [], startedAt, request.progressId);
 		}
 
 		const expectedBytes = this.getBatchExpectedBytes(request, items);
@@ -952,7 +964,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					if (operation === 'move') {
 						const cleanupFailures = await this.deleteBatchSources(request.source, items);
 						if (cleanupFailures.length) {
-							return this.createBatchTransferResult(false, directRsync.strategy, directRsync.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt);
+							return this.createBatchTransferResult(false, directRsync.strategy, directRsync.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
 						}
 					}
 					return directRsync;
@@ -966,7 +978,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					if (operation === 'move') {
 						const cleanupFailures = await this.deleteBatchSources(request.source, items);
 						if (cleanupFailures.length) {
-							return this.createBatchTransferResult(false, relayRsync.strategy, relayRsync.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt);
+							return this.createBatchTransferResult(false, relayRsync.strategy, relayRsync.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
 						}
 					}
 					return relayRsync;
@@ -982,7 +994,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				name: items[0].displayName ?? items[0].targetName,
 				path: items[0].sourcePath,
 				message: error instanceof Error ? error.message : String(error)
-			}], startedAt, canceled);
+			}], startedAt, request.progressId, canceled);
 		} finally {
 			if (request.progressId) {
 				this.transferCancellationRequests.delete(request.progressId);
@@ -1011,6 +1023,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (operation === 'copy') {
 			await ensureLocalDirectory(request.targetDirectory.path);
 			let transferredBytes = 0;
+			this.markTransferDataStarted(request.progressId);
 			for (const [index, item] of items.entries()) {
 				this.throwIfTransferCanceled(request.progressId);
 				const currentName = item.displayName ?? item.targetName;
@@ -1036,10 +1049,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		} else if (platform() === 'win32' || looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
 			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
+			this.markTransferDataStarted(request.progressId);
 			await runLocalPowerShellScript(buildLocalWindowsBatchScript(sources, request.targetDirectory.path, operation));
 		} else {
 			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
 			await ensureLocalDirectory(request.targetDirectory.path);
+			this.markTransferDataStarted(request.progressId);
 			await runLocalCommand('mv', ['-f', ...sources, request.targetDirectory.path]);
 		}
 		this.throwIfTransferCanceled(request.progressId);
@@ -1047,7 +1062,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			completedItems: items.length,
 			totalItems: items.length
 		});
-		return this.createBatchTransferResult(true, operation === 'move' ? 'local-copy' : 'local-copy', totalBytes, 'Batch local transfer completed.', items.length, 0, [], startedAt);
+		return this.createBatchTransferResult(true, operation === 'move' ? 'local-copy' : 'local-copy', totalBytes, 'Batch local transfer completed.', items.length, 0, [], startedAt, request.progressId);
 	}
 
 	private async getLocalBatchTransferSize(items: readonly ITurboFileBatchTransferItem[], expectedBytes: number): Promise<number> {
@@ -1068,6 +1083,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const command = looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)
 			? buildWindowsBatchCommand(sources, request.targetDirectory.path, operation)
 			: buildPosixBatchCommand(sources, request.targetDirectory.path, operation);
+		this.markTransferDataStarted(request.progressId);
 		await this.withSshClient(request.source, client => this.execRemote(client, command));
 		this.throwIfTransferCanceled(request.progressId);
 		this.fireTransferProgress(request, expectedBytes, expectedBytes, 'complete', 'Batch remote native transfer completed.', true, {
@@ -1076,7 +1092,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		this.clearRemoteDirectoryListingCache(request.source);
 		this.clearRemoteDirectoryListingCache(request.targetDirectory);
-		return this.createBatchTransferResult(true, 'remote-copy', expectedBytes, 'Batch remote native transfer completed.', items.length, 0, [], startedAt);
+		return this.createBatchTransferResult(true, 'remote-copy', expectedBytes, 'Batch remote native transfer completed.', items.length, 0, [], startedAt, request.progressId);
 	}
 
 	private async tryDirectBatchRsyncTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
@@ -1146,6 +1162,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			};
 			await this.execRemote(client, mkdirCommand);
 			this.throwIfTransferCanceled(request.progressId);
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = expectedBytes > 0 ? expectedBytes : lastRsyncBytes;
@@ -1154,7 +1171,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length
 			});
 			this.clearRemoteDirectoryListingCache(request.targetDirectory);
-			return this.createBatchTransferResult(true, 'rsync-direct', bytes, 'Batch direct rsync completed.', items.length, 0, [], startedAt);
+			return this.createBatchTransferResult(true, 'rsync-direct', bytes, 'Batch direct rsync completed.', items.length, 0, [], startedAt, request.progressId);
 		} catch {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -1248,6 +1265,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 			};
 			await this.execRemote(client, mkdirCommand);
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = expectedBytes > 0 ? expectedBytes : lastRsyncBytes;
@@ -1256,7 +1274,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length
 			});
 			this.clearRemoteDirectoryListingCache(request.targetDirectory);
-			return this.createBatchTransferResult(true, 'rsync-relay', bytes, 'Batch rsync relay completed.', items.length, 0, [], startedAt);
+			return this.createBatchTransferResult(true, 'rsync-relay', bytes, 'Batch rsync relay completed.', items.length, 0, [], startedAt, request.progressId);
 		} catch {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -1291,6 +1309,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const workerLimit = items.some(item => item.sourceType === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
 
 		try {
+			this.markTransferDataStarted(request.progressId);
 			await mapLimit(items, workerLimit, async (item, index) => {
 				this.throwIfTransferCanceled(request.progressId);
 				const childProgressId = `${request.progressId ?? 'turbofile-batch'}-${index}-${randomUUID()}`;
@@ -1340,10 +1359,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length
 			});
 			const failed = failures.length;
-			return this.createBatchTransferResult(failed === 0, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), bytes, failed === 0 ? 'Batch transfer completed.' : `Batch transfer completed with ${failed} failure(s).`, successfulItems.length, failed, failures, startedAt);
+			return this.createBatchTransferResult(failed === 0, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), bytes, failed === 0 ? 'Batch transfer completed.' : `Batch transfer completed with ${failed} failure(s).`, successfulItems.length, failed, failures, startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
-				return this.createBatchTransferResult(false, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), completedBytes, TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, true);
+				return this.createBatchTransferResult(false, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), completedBytes, TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, request.progressId, true);
 			}
 			throw error;
 		} finally {
@@ -1391,8 +1410,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return joinRemotePath(targetDirectory.path, targetName);
 	}
 
-	private createBatchTransferResult(ok: boolean, strategy: ITurboFileTransferResult['strategy'], bytes: number, message: string, completed: number, failed: number, failures: ITurboFileBatchTransferFailure[], startedAt: number, canceled = false): ITurboFileBatchTransferResult {
-		const durationMs = Math.max(1, Date.now() - startedAt);
+	private createBatchTransferResult(ok: boolean, strategy: ITurboFileTransferResult['strategy'], bytes: number, message: string, completed: number, failed: number, failures: ITurboFileBatchTransferFailure[], startedAt: number, progressId?: string, canceled = false): ITurboFileBatchTransferResult {
+		const durationMs = this.getTransferDurationMs(progressId, startedAt);
 		return {
 			ok,
 			strategy,
@@ -1776,12 +1795,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			: buildPosixCopyCommand(request.source.path, request.target.path);
 
 		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true);
+		this.markTransferDataStarted(request.progressId);
 		await this.execRemoteCopyWithProgress(request, command, bytes, sourceType);
 		this.throwIfTransferCanceled(request.progressId);
 		if (bytes === 0 && expectedBytes === 0) {
 			bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
 		}
-		return this.createTransferResult(true, 'remote-copy', bytes, 'Remote copy completed.', startedAt);
+		return this.createTransferResult(true, 'remote-copy', bytes, 'Remote copy completed.', startedAt, request.progressId);
 	}
 
 	private async tryDirectRsyncTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
@@ -1872,6 +1892,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			await this.execRemote(client, mkdirCommand);
 			this.throwIfTransferCanceled(request.progressId);
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
 			this.throwIfTransferCanceled(request.progressId);
 
@@ -1879,7 +1900,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bytes = lastRsyncBytes;
 			}
 
-			return this.createTransferResult(true, 'rsync-direct', bytes, 'Direct rsync completed.', startedAt);
+			return this.createTransferResult(true, 'rsync-direct', bytes, 'Direct rsync completed.', startedAt, request.progressId);
 		} catch {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -2052,11 +2073,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			await this.execRemote(client, mkdirCommand);
 			this.throwIfTransferCanceled(request.progressId);
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, putCommand);
 			this.throwIfTransferCanceled(request.progressId);
 
 			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SFTP transfer completed.', true);
-			return this.createTransferResult(true, 'sftp-direct', bytes, 'Direct SFTP completed.', startedAt);
+			return this.createTransferResult(true, 'sftp-direct', bytes, 'Direct SFTP completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -2131,12 +2153,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
 			this.fireTransferProgress(request, 0, expectedBytes, 'rsync-direct', 'Parallel rsync directory transfer in progress.', true);
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, parallelCommand);
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = await this.getRemotePathSizeByCommand(request.target).catch(() => expectedBytes);
 			const totalBytes = bytes > 0 ? bytes : expectedBytes;
 			this.fireTransferProgress(request, totalBytes, totalBytes, 'rsync-direct', 'Parallel rsync directory transfer completed.', true);
-			return this.createTransferResult(true, 'rsync-direct-parallel', totalBytes, 'Parallel rsync directory completed.', startedAt);
+			return this.createTransferResult(true, 'rsync-direct-parallel', totalBytes, 'Parallel rsync directory completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -2249,12 +2272,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'relay-upload', 'Rsync relay transfer in progress.');
 			};
 
+			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
 			this.throwIfTransferCanceled(request.progressId);
 			if (bytes === 0 && lastRsyncBytes > 0) {
 				bytes = lastRsyncBytes;
 			}
-			return this.createTransferResult(true, 'rsync-relay', bytes, 'Rsync relay completed.', startedAt);
+			return this.createTransferResult(true, 'rsync-relay', bytes, 'Rsync relay completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
@@ -2330,6 +2354,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			let streamedBytes = 0;
 			try {
+				this.markTransferDataStarted(request.progressId);
 				await this.relayRemoteFileInParallel(sourceSftp, targetSftp, request.source.path, request.target.path, bytes, delta => {
 					streamedBytes += delta;
 					this.fireTransferProgress(request, Math.min(streamedBytes * 2, totalBytes), totalBytes, 'relay-upload', 'Parallel SFTP relay in progress.');
@@ -2338,7 +2363,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				unregisterCancel();
 			}
 			this.throwIfTransferCanceled(request.progressId);
-			return this.createTransferResult(true, 'sftp-relay', bytes, 'SFTP parallel relay completed.', startedAt);
+			return this.createTransferResult(true, 'sftp-relay', bytes, 'SFTP parallel relay completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw error;
@@ -3040,8 +3065,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return options;
 	}
 
-	private createTransferResult(ok: true, strategy: ITurboFileTransferResult['strategy'], bytes: number, message: string, startedAt: number): ITurboFileTransferResult {
-		const durationMs = Math.max(1, Date.now() - startedAt);
+	private createTransferResult(ok: true, strategy: ITurboFileTransferResult['strategy'], bytes: number, message: string, startedAt: number, progressId?: string): ITurboFileTransferResult {
+		const durationMs = this.getTransferDurationMs(progressId, startedAt);
 		return {
 			ok,
 			strategy,
@@ -3050,6 +3075,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			durationMs,
 			averageBytesPerSecond: Math.round(bytes / (durationMs / 1000))
 		};
+	}
+
+	private markTransferDataStarted(progressId: string | undefined): void {
+		if (!progressId || this.transferDataStartTimes.has(progressId)) {
+			return;
+		}
+		this.transferDataStartTimes.set(progressId, Date.now());
+	}
+
+	private getTransferDurationMs(progressId: string | undefined, fallbackStartedAt: number): number {
+		const startedAt = progressId ? this.transferDataStartTimes.get(progressId) ?? fallbackStartedAt : fallbackStartedAt;
+		return Math.max(1, Date.now() - startedAt);
 	}
 
 	private isTransferCanceled(progressId: string | undefined): boolean {
@@ -3100,6 +3137,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		this.transferProgressSnapshots.set(progressId, { lastAt: now, lastBytes: normalizedTransferred });
+		if (phase !== 'prepare' && phase !== 'complete' && normalizedTransferred > 0) {
+			this.markTransferDataStarted(progressId);
+		}
 		this.getTransferProgressEmitter(progressId).fire({
 			progressId,
 			transferredBytes: normalizedTransferred,
@@ -3126,6 +3166,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		setTimeout(() => {
 			this.transferProgressSnapshots.delete(progressId);
+			this.transferDataStartTimes.delete(progressId);
 			const emitter = this.transferProgressEmitters.get(progressId);
 			if (emitter) {
 				this.transferProgressEmitters.delete(progressId);

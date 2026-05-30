@@ -297,6 +297,7 @@ interface TurboFileTaskTransferItem {
 	displaySize: string;
 	rawSize: number;
 	status: TurboFileTransferItemStatus;
+	transferStartedAt?: number;
 	progress: number;
 	transferredBytes: number;
 	totalBytes: number;
@@ -319,8 +320,11 @@ interface TurboFileTask {
 	detail: string;
 	status: TurboFileTaskStatus;
 	startedAt: number;
+	transferStartedAt?: number;
 	endedAt?: number;
+	durationMs?: number;
 	bytes?: number;
+	averageBytesPerSecond?: number;
 	transferredBytes?: number;
 	totalBytes?: number;
 	strategy?: string;
@@ -344,6 +348,8 @@ interface TurboFileTransferExecutionResult {
 	readonly message: string;
 	readonly bytes: number;
 	readonly strategy?: string;
+	readonly durationMs?: number;
+	readonly averageBytesPerSecond?: number;
 	readonly canceled?: boolean;
 }
 
@@ -3189,8 +3195,15 @@ export class TurboFileEditor extends EditorPane {
 		const now = Date.now();
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
+		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete' && transferredBytes > 0;
+		if (isDataPhase && task.transferStartedAt === undefined) {
+			task.transferStartedAt = now;
+		}
 		if (activeItem) {
 			activeItem.startedAt ??= task.startedAt;
+			if (isDataPhase && activeItem.transferStartedAt === undefined) {
+				activeItem.transferStartedAt = now;
+			}
 			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
 			activeItem.transferredBytes = transferredBytes;
 			activeItem.totalBytes = totalBytes;
@@ -3378,12 +3391,15 @@ export class TurboFileEditor extends EditorPane {
 		return phaseLabel;
 	}
 
-	private finishTask(task: TurboFileTask, status: Exclude<TurboFileTaskStatus, 'running'>, detail: string, options: { bytes?: number; strategy?: string; error?: string } = {}): void {
+	private finishTask(task: TurboFileTask, status: Exclude<TurboFileTaskStatus, 'running'>, detail: string, options: { bytes?: number; strategy?: string; error?: string; durationMs?: number; averageBytesPerSecond?: number } = {}): void {
 		task.status = status;
 		task.detail = detail;
 		task.endedAt = Date.now();
+		task.durationMs = options.durationMs ?? task.durationMs;
 		task.progress = status === 'canceled' ? Math.max(task.progress, 0) : 100;
 		task.bytes = options.bytes;
+		task.averageBytesPerSecond = options.averageBytesPerSecond
+			?? (options.bytes !== undefined && task.durationMs !== undefined && task.durationMs > 0 ? Math.round(options.bytes / (task.durationMs / 1000)) : task.averageBytesPerSecond);
 		if (options.bytes !== undefined) {
 			task.transferredBytes = options.bytes;
 			task.totalBytes = options.bytes;
@@ -3427,7 +3443,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getTaskMetrics(task: TurboFileTask): string {
-		const duration = formatDuration((task.endedAt ?? Date.now()) - task.startedAt);
+		const timingStartedAt = task.transferStartedAt ?? task.startedAt;
+		const elapsedMs = task.durationMs ?? ((task.endedAt ?? Date.now()) - timingStartedAt);
+		const duration = formatDuration(elapsedMs);
 		const parts = [duration];
 		if (task.status === 'running' && task.totalBytes !== undefined && task.transferredBytes !== undefined) {
 			if (task.totalBytes > 0) {
@@ -3435,16 +3453,20 @@ export class TurboFileEditor extends EditorPane {
 			} else if (task.transferredBytes > 0) {
 				parts.push(formatSize(task.transferredBytes));
 			}
-			const runningThroughput = formatThroughput(task.transferredBytes, Date.now() - task.startedAt);
+			const runningThroughput = formatThroughput(task.transferredBytes, Date.now() - timingStartedAt);
 			if (runningThroughput) {
 				parts.push(runningThroughput);
 			}
 		}
 		if (task.bytes !== undefined) {
 			parts.push(formatSize(task.bytes));
-			const throughput = formatThroughput(task.bytes, (task.endedAt ?? Date.now()) - task.startedAt);
-			if (throughput) {
-				parts.push(throughput);
+			if (task.averageBytesPerSecond && task.averageBytesPerSecond > 0) {
+				parts.push(`${formatSize(task.averageBytesPerSecond)}/s`);
+			} else {
+				const throughput = formatThroughput(task.bytes, elapsedMs);
+				if (throughput) {
+					parts.push(throughput);
+				}
 			}
 		}
 		if (task.strategy) {
@@ -6419,16 +6441,20 @@ export class TurboFileEditor extends EditorPane {
 			});
 
 			if (result.ok) {
+				if (options.task && result.durationMs !== undefined) {
+					options.task.durationMs = (options.task.durationMs ?? 0) + result.durationMs;
+					options.task.averageBytesPerSecond = undefined;
+				}
 				if (options.refreshTarget) {
 					if (options.task) {
 						this.updateTask(options.task, `正在刷新目标目录：${targetDevice.name}`, 90);
 					}
 					await this.refreshPane(targetSide, { force: true });
 				}
-				return { ok: true, message: result.message, bytes: result.bytes, strategy: result.strategy };
+				return { ok: true, message: result.message, bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond };
 			}
 
-			return { ok: false, message: result.message, bytes: result.bytes, strategy: result.strategy, canceled: result.canceled };
+			return { ok: false, message: result.message, bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond, canceled: result.canceled };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return { ok: false, message, bytes: 0 };
@@ -6511,14 +6537,14 @@ export class TurboFileEditor extends EditorPane {
 			]);
 
 			if (result.canceled) {
-				this.finishTask(task, 'canceled', `已取消批量传输：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy });
+				this.finishTask(task, 'canceled', `已取消批量传输：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
 				return false;
 			}
 			if (!result.ok) {
-				this.finishTask(task, 'error', `批量传输完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message });
+				this.finishTask(task, 'error', `批量传输完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
 				return false;
 			}
-			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy });
+			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
