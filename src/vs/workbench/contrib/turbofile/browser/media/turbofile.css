@@ -102,20 +102,16 @@
 }
 
 body.turbofile-theme-switching .monaco-workbench,
+body.turbofile-theme-switching .monaco-workbench *,
 body.turbofile-theme-switching .part.editor,
 body.turbofile-theme-switching .part.sidebar,
+body.turbofile-theme-switching .part.activitybar,
+body.turbofile-theme-switching .part.titlebar,
 body.turbofile-theme-switching .part.panel,
 body.turbofile-theme-switching .part.statusbar,
 body.turbofile-theme-switching .turbofile-workbench,
 body.turbofile-theme-switching .turbofile-workbench * {
-	transition:
-		background-color 160ms ease,
-		background 160ms ease,
-		color 160ms ease,
-		border-color 160ms ease,
-		box-shadow 160ms ease,
-		fill 160ms ease,
-		stroke 160ms ease;
+	transition: none !important;
 }
 
 .turbofile-editor-shell {
