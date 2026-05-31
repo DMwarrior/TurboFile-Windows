@@ -3500,7 +3500,7 @@ export class TurboFileEditor extends EditorPane {
 		if (task.bytes !== undefined) {
 			parts.push(formatSize(task.bytes));
 			if (task.averageBytesPerSecond && task.averageBytesPerSecond > 0) {
-				parts.push(`${formatSize(task.averageBytesPerSecond)}/s`);
+				parts.push(`${formatTransferRate(task.averageBytesPerSecond)}/s`);
 			} else {
 				const throughput = formatThroughput(task.bytes, elapsedMs);
 				if (throughput) {
