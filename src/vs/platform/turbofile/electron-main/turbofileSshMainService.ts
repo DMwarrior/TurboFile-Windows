@@ -55,6 +55,7 @@ const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_RSYNC_ROUTE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const DIRECT_RSYNC_ROUTE_UNAVAILABLE_CACHE_TTL_MS = 10 * 60 * 1000;
+const DIRECT_SCP_PROBE_TIMEOUT_SECONDS = 8;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
@@ -246,10 +247,21 @@ interface IImageThumbnailCacheMetadata {
 }
 
 type TurboFileDirectRsyncRouteMode = 'source-push' | 'target-pull' | 'unavailable';
+type TurboFileDirectScpRouteMode = TurboFileDirectRsyncRouteMode;
 
 interface IDirectRsyncRouteCacheEntry {
 	readonly mode: TurboFileDirectRsyncRouteMode;
 	readonly checkedAt: number;
+}
+
+interface IDirectScpRouteCacheEntry {
+	readonly mode: TurboFileDirectScpRouteMode;
+	readonly checkedAt: number;
+}
+
+interface IRemoteScpCredential {
+	readonly identityPath?: string;
+	readonly cleanupCommand?: string;
 }
 
 export class TurboFileSshMainService implements ITurboFileSshService {
@@ -272,6 +284,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directRsyncRouteCache = new Map<string, IDirectRsyncRouteCacheEntry>();
 	private readonly directRsyncRoutePending = new Map<string, Promise<TurboFileDirectRsyncRouteMode>>();
+	private readonly directScpRouteCache = new Map<string, IDirectScpRouteCacheEntry>();
+	private readonly directScpRoutePending = new Map<string, Promise<TurboFileDirectScpRouteMode>>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 
@@ -608,6 +622,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					this.fireTransferProgress(request, directResult.bytes, directResult.bytes, 'complete', 'Direct rsync completed.', true);
 					this.clearRemoteDirectoryListingCache(request.target);
 					return directResult;
+				}
+			}
+
+			if (request.strategyHint !== 'relay') {
+				const directScpResult = await this.tryDirectScpTransfer(request, startedAt);
+				this.throwIfTransferCanceled(request.progressId);
+				if (directScpResult?.ok) {
+					this.fireTransferProgress(request, directScpResult.bytes, directScpResult.bytes, 'complete', 'Direct SCP completed.', true);
+					this.clearRemoteDirectoryListingCache(request.target);
+					return directScpResult;
 				}
 			}
 
@@ -2084,6 +2108,212 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.directRsyncRouteCache.delete(getDirectRsyncRouteCacheKey(source.connection, target.connection));
 	}
 
+	private async tryDirectScpTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
+			return undefined;
+		}
+		if (request.strategyHint === 'relay') {
+			return undefined;
+		}
+		if (request.source.preferredProtocol === 'sftp' || request.target.preferredProtocol === 'sftp') {
+			return undefined;
+		}
+		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+		this.throwIfTransferCanceled(request.progressId);
+
+		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+		if (sourceType !== 'file') {
+			return undefined;
+		}
+
+		const bytes = Math.max(0, request.expectedBytes ?? 0) || await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
+		if (bytes <= 0) {
+			return undefined;
+		}
+
+		const route = await this.resolveDirectScpRoute(request.source, request.target, request.progressId);
+		if (route === 'unavailable') {
+			return undefined;
+		}
+
+		const executorEndpoint = route === 'source-push' ? request.source : request.target;
+		const remoteEndpoint = route === 'source-push' ? request.target : request.source;
+		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
+			return undefined;
+		}
+
+		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
+		if (!executorConfigResult.ok) {
+			return undefined;
+		}
+
+		const client = await this.connect(executorConfigResult.config);
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		let credential: IRemoteScpCredential | undefined;
+		const stopGrowthTiming = this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection, request.target.path, 0, bytes, transferredBytes => {
+			this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.');
+		});
+		try {
+			this.throwIfTransferCanceled(request.progressId);
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
+			const targetParentPath = getRemoteParentPath(request.target.path);
+			const mkdirCommand = route === 'source-push'
+				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(targetParentPath)} && rm -f ${quotePosixShellArg(request.target.path)}`)}`
+				: `mkdir -p ${quotePosixShellArg(targetParentPath)} && rm -f ${quotePosixShellArg(request.target.path)}`;
+			const sourceArg = route === 'source-push' ? request.source.path : `${remoteUserHost}:${request.source.path}`;
+			const targetArg = route === 'source-push' ? `${remoteUserHost}:${request.target.path}` : request.target.path;
+			const scpCommand = `${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`;
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true);
+			await this.execRemote(client, mkdirCommand);
+			this.throwIfTransferCanceled(request.progressId);
+			this.markTransferDataStarted(request.progressId);
+			await this.execRemote(client, scpCommand);
+			this.throwIfTransferCanceled(request.progressId);
+			const targetSize = await this.withDirectorySftp(request.target, async sftp => (await this.remoteStat(sftp, request.target.path)).size).catch(() => 0);
+			if (targetSize !== bytes) {
+				await this.withDirectorySftp(request.target, sftp => this.unlinkRemote(sftp, request.target.path)).catch(() => undefined);
+				throw new Error(`Direct SCP size mismatch: expected ${bytes}, got ${targetSize}.`);
+			}
+			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SCP transfer completed.', true);
+			return this.createTransferResult(true, 'scp-direct', bytes, 'Direct SCP completed.', startedAt, request.progressId);
+		} catch {
+			if (this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			this.clearDirectScpRouteCache(request.source, request.target);
+			return undefined;
+		} finally {
+			stopGrowthTiming();
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+			}
+			unregisterCancel();
+			client.end();
+		}
+	}
+
+	private async resolveDirectScpRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
+		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
+			return 'unavailable';
+		}
+
+		const cacheKey = getDirectScpRouteCacheKey(source.connection, target.connection);
+		const cached = this.directScpRouteCache.get(cacheKey);
+		const now = Date.now();
+		const cacheTtl = cached?.mode === 'unavailable' ? DIRECT_RSYNC_ROUTE_UNAVAILABLE_CACHE_TTL_MS : DIRECT_RSYNC_ROUTE_CACHE_TTL_MS;
+		if (cached && now - cached.checkedAt < cacheTtl) {
+			return cached.mode;
+		}
+
+		const pending = this.directScpRoutePending.get(cacheKey);
+		if (pending) {
+			return pending;
+		}
+
+		const probe = this.probeDirectScpRoute(source, target, progressId).then(mode => {
+			this.directScpRouteCache.set(cacheKey, { mode, checkedAt: Date.now() });
+			return mode;
+		}).finally(() => {
+			this.directScpRoutePending.delete(cacheKey);
+		});
+		this.directScpRoutePending.set(cacheKey, probe);
+		return probe;
+	}
+
+	private async probeDirectScpRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
+		this.throwIfTransferCanceled(progressId);
+		if (await this.canDirectScpExecutorReach(source, target, progressId)) {
+			return 'source-push';
+		}
+		this.throwIfTransferCanceled(progressId);
+		if (await this.canDirectScpExecutorReach(target, source, progressId)) {
+			return 'target-pull';
+		}
+		return 'unavailable';
+	}
+
+	private async canDirectScpExecutorReach(executor: ITurboFileTransferEndpoint, remote: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<boolean> {
+		if (executor.kind !== 'ssh' || remote.kind !== 'ssh' || !executor.connection || !remote.connection) {
+			return false;
+		}
+
+		const executorConfigResult = await this.createConnectConfig(executor.connection);
+		if (!executorConfigResult.ok) {
+			return false;
+		}
+
+		const client = await this.connect(executorConfigResult.config).catch(() => undefined);
+		if (!client) {
+			return false;
+		}
+		let credential: IRemoteScpCredential | undefined;
+		try {
+			this.throwIfTransferCanceled(progressId);
+			credential = await this.prepareRemoteScpCredential(client, remote.connection);
+			return await this.canExecutorUseDirectScpTransfer(client, remote.connection, credential);
+		} catch {
+			return false;
+		} finally {
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+			}
+			client.end();
+		}
+	}
+
+	private async canExecutorUseDirectScpTransfer(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions, credential: IRemoteScpCredential | undefined): Promise<boolean> {
+		const remoteUserHost = `${remoteConnection.username}@${remoteConnection.host}`;
+		const sshpassPrefix = buildSshpassPrefix(remoteConnection.password);
+		const checks = [
+			'command -v ssh >/dev/null 2>&1',
+			'command -v scp >/dev/null 2>&1'
+		];
+		if (remoteConnection.password) {
+			checks.push('command -v sshpass >/dev/null 2>&1');
+		}
+		checks.push(`${sshpassPrefix}${buildDirectScpSshCommand(remoteConnection.port || 22, !!remoteConnection.password, credential?.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg('true')}`);
+
+		try {
+			await this.execRemote(client, withPosixTimeout(checks.join(' && '), DIRECT_SCP_PROBE_TIMEOUT_SECONDS));
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async prepareRemoteScpCredential(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions): Promise<IRemoteScpCredential> {
+		if (remoteConnection.password) {
+			return {};
+		}
+		const privateKey = remoteConnection.privateKey ?? await this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined);
+		if (!privateKey) {
+			return {};
+		}
+
+		const identityPath = `/tmp/turbofile-scp-${randomUUID()}.key`;
+		const marker = `__TURBOFILE_SCP_KEY_${randomUUID().replace(/-/g, '')}__`;
+		const normalizedKey = privateKey.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n?$/, '\n');
+		const setupCommand = `umask 077; cat > ${quotePosixShellArg(identityPath)} <<'${marker}'\n${normalizedKey}${marker}\nchmod 600 ${quotePosixShellArg(identityPath)}`;
+		await this.execRemote(client, setupCommand);
+		return {
+			identityPath,
+			cleanupCommand: `rm -f ${quotePosixShellArg(identityPath)}`
+		};
+	}
+
+	private clearDirectScpRouteCache(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): void {
+		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
+			return;
+		}
+		this.directScpRouteCache.delete(getDirectScpRouteCacheKey(source.connection, target.connection));
+	}
+
 	private async tryDirectSftpTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
 			return undefined;
@@ -2419,6 +2649,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				unregisterCancel();
 			}
 			this.throwIfTransferCanceled(request.progressId);
+			const targetStat = await this.remoteStat(targetSftp, request.target.path).catch(() => undefined);
+			if (!targetStat || targetStat.size !== bytes) {
+				await this.unlinkRemote(targetSftp, request.target.path).catch(() => undefined);
+				throw new Error(`SFTP relay size mismatch: expected ${bytes}, got ${targetStat?.size ?? 0}.`);
+			}
 			return this.createTransferResult(true, 'sftp-relay', bytes, 'SFTP parallel relay completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
@@ -2790,13 +3025,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const position = index * SFTP_RELAY_CHUNK_SIZE;
 				const length = Math.min(SFTP_RELAY_CHUNK_SIZE, bytes - position);
 				const buffer = Buffer.allocUnsafe(length);
-				const bytesRead = await this.readRemoteFileChunk(sourceSftp, sourceHandle, buffer, length, position);
-				this.throwIfTransferCanceled(progressId);
-				if (bytesRead <= 0) {
-					return;
+				let bytesReadTotal = 0;
+				while (bytesReadTotal < length) {
+					const bytesRead = await this.readRemoteFileChunk(sourceSftp, sourceHandle, buffer.subarray(bytesReadTotal), length - bytesReadTotal, position + bytesReadTotal);
+					this.throwIfTransferCanceled(progressId);
+					if (bytesRead <= 0) {
+						throw new Error(`Unexpected EOF while relaying ${sourcePath} at ${position + bytesReadTotal}.`);
+					}
+					bytesReadTotal += bytesRead;
 				}
-				await this.writeRemoteFileChunk(targetSftp, targetHandle!, buffer, bytesRead, position);
-				onDelta?.(bytesRead);
+				await this.writeRemoteFileChunk(targetSftp, targetHandle!, buffer, bytesReadTotal, position);
+				onDelta?.(bytesReadTotal);
 			});
 		} finally {
 			if (targetHandle) {
@@ -4781,6 +5020,9 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 	if (source.supportsRsync === true && target.supportsRsync === true) {
 		return 'rsync-direct';
 	}
+	if (source.preferredProtocol !== 'sftp' && target.preferredProtocol !== 'sftp') {
+		return 'scp-direct';
+	}
 	return 'sftp-direct';
 }
 
@@ -4912,6 +5154,10 @@ function getDirectRsyncRouteCacheKey(source: ITurboFileSshConnectionOptions, tar
 	return `${getSshConnectionRouteKey(source)}=>${getSshConnectionRouteKey(target)}`;
 }
 
+function getDirectScpRouteCacheKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions): string {
+	return `${getSshConnectionRouteKey(source)}=>${getSshConnectionRouteKey(target)}`;
+}
+
 function getSshConnectionRouteKey(connection: ITurboFileSshConnectionOptions): string {
 	const auth = connection.password ? 'password' : connection.privateKeyPath || connection.privateKey ? 'privateKey' : 'agent';
 	return `${connection.username}@${connection.host}:${connection.port || 22}:${auth}`;
@@ -5013,6 +5259,11 @@ function getTransferName(path: string): string {
 
 function quotePosixShellArg(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function withPosixTimeout(command: string, seconds: number): string {
+	const timeoutSeconds = Math.max(1, Math.floor(seconds));
+	return `if command -v timeout >/dev/null 2>&1; then timeout ${timeoutSeconds}s sh -c ${quotePosixShellArg(command)}; else ${command}; fi`;
 }
 
 function normalizeTransferDependencies(packages: readonly TurboFileTransferDependency[]): TurboFileTransferDependency[] {
@@ -5199,6 +5450,57 @@ function buildOptimizedSftpCommand(port: number, hasPassword = false): string {
 	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
 	if (port && port !== 22) {
 		parts.push(`-P ${port}`);
+	}
+	return parts.join(' ');
+}
+
+function buildDirectScpCommand(port: number, hasPassword = false, identityPath?: string): string {
+	const parts = [
+		'scp',
+		'-q',
+		'-o Compression=no',
+		'-o IPQoS=throughput',
+		'-o RekeyLimit=16G',
+		'-o ConnectTimeout=5',
+		'-o ConnectionAttempts=1',
+		'-o NumberOfPasswordPrompts=1',
+		'-o ServerAliveInterval=15',
+		'-o ServerAliveCountMax=2',
+		'-o StrictHostKeyChecking=no',
+		'-o UserKnownHostsFile=/dev/null',
+		'-o LogLevel=ERROR'
+	];
+	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (identityPath) {
+		parts.push(`-i ${quotePosixShellArg(identityPath)}`);
+	}
+	if (port && port !== 22) {
+		parts.push(`-P ${port}`);
+	}
+	return parts.join(' ');
+}
+
+function buildDirectScpSshCommand(port: number, hasPassword = false, identityPath?: string): string {
+	const parts = [
+		'ssh',
+		'-o Compression=no',
+		'-o IPQoS=throughput',
+		'-o RekeyLimit=16G',
+		'-o ConnectTimeout=5',
+		'-o ConnectionAttempts=1',
+		'-o NumberOfPasswordPrompts=1',
+		'-o ServerAliveInterval=15',
+		'-o ServerAliveCountMax=2',
+		'-o StrictHostKeyChecking=no',
+		'-o UserKnownHostsFile=/dev/null',
+		'-o LogLevel=ERROR'
+	];
+	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (identityPath) {
+		parts.push(`-i ${quotePosixShellArg(identityPath)}`);
+	}
+	if (port && port !== 22) {
+		parts.push(`-p ${port}`);
 	}
 	return parts.join(' ');
 }

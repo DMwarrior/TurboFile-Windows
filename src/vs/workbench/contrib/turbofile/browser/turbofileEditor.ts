@@ -3313,6 +3313,9 @@ export class TurboFileEditor extends EditorPane {
 		if (detail.includes('direct sftp')) {
 			return 'sftp-direct';
 		}
+		if (detail.includes('direct scp')) {
+			return 'scp-direct';
+		}
 		if (detail.includes('scp upload')) {
 			return 'scp-upload';
 		}
@@ -3347,6 +3350,8 @@ export class TurboFileEditor extends EditorPane {
 				return '直连 rsync';
 			case 'sftp-direct':
 				return '直连 sftp';
+			case 'scp-direct':
+				return '直连 scp';
 			case 'sftp-upload':
 			case 'sftp-download':
 				return '直连 sftp';
@@ -3404,6 +3409,11 @@ export class TurboFileEditor extends EditorPane {
 			&& sourceDevice.capabilities.rsync
 			&& targetDevice.capabilities.rsync) {
 			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
+		}
+		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)
+			&& sourceDevice.preferredTransferProtocol !== 'sftp'
+			&& targetDevice.preferredTransferProtocol !== 'sftp') {
+			return 'scp-direct';
 		}
 		return 'sftp-direct';
 	}
