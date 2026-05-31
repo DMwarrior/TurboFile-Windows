@@ -782,11 +782,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
-		const initialRemoteSize = await this.withSftp(request.target, async sftp => {
+		const initialRemoteSize = await this.withDirectorySftp(request.target, async sftp => {
+			this.throwIfTransferCanceled(request.progressId);
 			await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
 			await this.unlinkRemote(sftp, request.target.path).catch(() => undefined);
 			return 0;
-		}, request.progressId);
+		});
 		if (canUseNativeOpenSshScpCommand(request.target.connection)) {
 			try {
 				await this.uploadFileWithNativeOpenSshScp(request.target.connection, request.source.path, request.target.path, initialRemoteSize, bytes, onProgress, request.progressId);
@@ -3195,18 +3196,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void): () => void {
 		let monitorClient: ISSHClient | undefined;
 		let monitorSftp: ISFTPWrapper | undefined;
+		let reusableDirectorySessionKey: string | undefined;
 		let stopped = false;
 		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, async () => {
 			if (stopped) {
 				return 0;
 			}
-			if (!monitorClient) {
-				const configResult = await this.createConnectConfig(connection);
-				if (!configResult.ok) {
-					return 0;
+			if (!monitorSftp) {
+				const reusableDirectorySession = await this.getReusableDirectorySftpSession(connection);
+				if (reusableDirectorySession && !reusableDirectorySession.closed) {
+					reusableDirectorySessionKey = reusableDirectorySession.key;
+					monitorSftp = reusableDirectorySession.sftp;
+				} else {
+					const configResult = await this.createConnectConfig(connection);
+					if (!configResult.ok) {
+						return 0;
+					}
+					monitorClient = await this.connect(configResult.config);
+					monitorSftp = await this.openSftp(monitorClient);
 				}
-				monitorClient = await this.connect(configResult.config);
-				monitorSftp = await this.openSftp(monitorClient);
 			}
 			const stat = monitorSftp ? await this.remoteStat(monitorSftp, path).catch(() => undefined) : undefined;
 			return stat?.size ?? 0;
@@ -3214,10 +3222,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return () => {
 			stopped = true;
 			stopGrowthTiming();
-			monitorSftp?.end();
-			monitorClient?.end();
+			if (reusableDirectorySessionKey) {
+				this.touchDirectorySftpSession(reusableDirectorySessionKey);
+			} else {
+				monitorSftp?.end();
+				monitorClient?.end();
+			}
 			monitorSftp = undefined;
 			monitorClient = undefined;
+			reusableDirectorySessionKey = undefined;
 		};
 	}
 
@@ -4804,6 +4817,8 @@ async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnecti
 		'-O',
 		'-o', 'StrictHostKeyChecking=accept-new',
 		'-o', 'Compression=no',
+		'-o', 'IPQoS=throughput',
+		'-o', 'RekeyLimit=16G',
 		'-o', 'LogLevel=ERROR'
 	];
 	let env: NodeJS.ProcessEnv | undefined;
