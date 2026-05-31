@@ -782,7 +782,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
-		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
+		const initialRemoteSize = await this.withSftp(request.target, async sftp => {
+			await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
+			return this.remoteStat(sftp, request.target.path).then(stat => stat.size).catch(() => 0);
+		}, request.progressId);
+		if (canUseNativeOpenSshScpCommand(request.target.connection)) {
+			try {
+				await this.uploadFileWithNativeOpenSshScp(request.target.connection, request.source.path, request.target.path, initialRemoteSize, request.progressId);
+				return;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw error;
+				}
+				this.clearTransferDataTiming(request.progressId);
+			}
+		}
 		await this.uploadFileWithScpProtocol(request.target.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
 	}
 
@@ -791,7 +805,48 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Missing SSH source.');
 		}
 		await ensureLocalParentDirectory(request.target.path);
+		if (canUseNativeOpenSshScpCommand(request.source.connection)) {
+			const initialLocalSize = await fsp.stat(request.target.path).then(stat => stat.size).catch(() => 0);
+			try {
+				await this.downloadFileWithNativeOpenSshScp(request.source.connection, request.source.path, request.target.path, initialLocalSize, request.progressId);
+				return;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw error;
+				}
+				this.clearTransferDataTiming(request.progressId);
+			}
+		}
 		await this.downloadFileWithScpProtocol(request.source.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
+	}
+
+	private async uploadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, initialRemoteSize: number, progressId?: string): Promise<void> {
+		const stopGrowthTiming = this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize);
+		try {
+			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
+				...args,
+				localPath,
+				formatNativeScpRemoteSpec(connection, remotePath)
+			], { env }));
+		} finally {
+			stopGrowthTiming();
+		}
+	}
+
+	private async downloadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, initialLocalSize: number, progressId?: string): Promise<void> {
+		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, async () => {
+			const stat = await fsp.stat(localPath).catch(() => undefined);
+			return stat?.size ?? 0;
+		}, initialLocalSize);
+		try {
+			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
+				...args,
+				formatNativeScpRemoteSpec(connection, remotePath),
+				localPath
+			], { env }));
+		} finally {
+			stopGrowthTiming();
+		}
 	}
 
 	private async uploadFileWithScpProtocol(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, expectedBytes: number, onProgress?: (transferredBytes: number) => void, progressId?: string): Promise<void> {
@@ -3082,7 +3137,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.transferDataStartTimes.set(progressId, Date.now());
 	}
 
-	private beginTransferGrowthTiming(progressId: string | undefined, probeSize: () => Promise<number>): () => void {
+	private clearTransferDataTiming(progressId: string | undefined): void {
+		if (!progressId) {
+			return;
+		}
+		this.transferDataStartTimes.delete(progressId);
+		this.transferFirstPositiveProgressTimes.delete(progressId);
+		this.transferGrowthMonitoredProgressIds.delete(progressId);
+	}
+
+	private beginTransferGrowthTiming(progressId: string | undefined, probeSize: () => Promise<number>, baselineSize = 0): () => void {
 		if (!progressId) {
 			return () => undefined;
 		}
@@ -3093,7 +3157,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			while (!stopped && !this.transferDataStartTimes.has(progressId)) {
 				try {
 					const size = await probeSize();
-					if (size > 0) {
+					if (size > 0 && size !== baselineSize) {
 						this.markTransferDataStarted(progressId);
 						break;
 					}
@@ -3126,7 +3190,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return Number.isFinite(size) && size > 0 ? size : 0;
 	}
 
-	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string): () => void {
+	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string, baselineSize = 0): () => void {
 		let monitorClient: ISSHClient | undefined;
 		let stopped = false;
 		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, async () => {
@@ -3141,7 +3205,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				monitorClient = await this.connect(configResult.config);
 			}
 			return this.getRemoteFileSizeByClient(monitorClient, path);
-		});
+		}, baselineSize);
 		return () => {
 			stopped = true;
 			stopGrowthTiming();
@@ -4717,6 +4781,66 @@ function canUseLocalRsyncCommand(connection: ITurboFileSshConnectionOptions | un
 	return !!connection.privateKeyPath && !connection.password;
 }
 
+function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
+	if (!connection) {
+		return false;
+	}
+	return !!connection.password || !!connection.privateKeyPath || !!connection.privateKey || !connection.passphrase;
+}
+
+async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnectionOptions, task: (args: string[], env?: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+	let tempPrivateKeyPath: string | undefined;
+	let tempPasswordPath: string | undefined;
+	let tempAskPassPath: string | undefined;
+	const args = [
+		'-q',
+		'-o', 'StrictHostKeyChecking=accept-new',
+		'-o', 'Compression=no',
+		'-o', 'LogLevel=ERROR'
+	];
+	let env: NodeJS.ProcessEnv | undefined;
+	const askPassSecret = connection.password ?? connection.passphrase;
+	if (askPassSecret) {
+		tempPasswordPath = join(tmpdir(), `turbofile-native-scp-${randomUUID()}.secret`);
+		tempAskPassPath = join(tmpdir(), `turbofile-native-scp-${randomUUID()}.cmd`);
+		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
+		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
+		env = {
+			...process.env,
+			SSH_ASKPASS: tempAskPassPath,
+			SSH_ASKPASS_REQUIRE: 'force',
+			DISPLAY: 'turbofile'
+		};
+		args.push('-o', 'NumberOfPasswordPrompts=1');
+	} else {
+		args.push('-o', 'BatchMode=yes');
+	}
+	if (connection.port && connection.port !== 22) {
+		args.push('-P', String(connection.port));
+	}
+	if (connection.privateKeyPath) {
+		args.push('-i', toOpenSshLocalPath(connection.privateKeyPath));
+	} else if (connection.privateKey) {
+		tempPrivateKeyPath = join(tmpdir(), `turbofile-native-scp-${randomUUID()}.key`);
+		await fsp.writeFile(tempPrivateKeyPath, connection.privateKey, { mode: 0o600 });
+		args.push('-i', toOpenSshLocalPath(tempPrivateKeyPath));
+	}
+
+	try {
+		return await task(args, env);
+	} finally {
+		await Promise.all([
+			tempPrivateKeyPath ? fsp.rm(tempPrivateKeyPath, { force: true }).catch(() => undefined) : undefined,
+			tempPasswordPath ? fsp.rm(tempPasswordPath, { force: true }).catch(() => undefined) : undefined,
+			tempAskPassPath ? fsp.rm(tempAskPassPath, { force: true }).catch(() => undefined) : undefined
+		]);
+	}
+}
+
+function formatNativeScpRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
+	return `${connection.username}@${connection.host}:${remotePath}`;
+}
+
 function isRecoverableLocalCommandTransferError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error/i.test(message);
@@ -4911,9 +5035,9 @@ function buildTransferDependencyInstallCommand(packages: readonly TurboFileTrans
 	].join(' ');
 }
 
-function runLocalCommand(command: string, args: string[]): Promise<void> {
+function runLocalCommand(command: string, args: string[], options: { readonly env?: NodeJS.ProcessEnv } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
-		execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (error, _stdout, stderr) => {
+		execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024, env: options.env }, (error, _stdout, stderr) => {
 			if (error) {
 				reject(new Error(formatLocalCommandError(stderr, error.message)));
 				return;
