@@ -389,6 +389,8 @@ const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
 const TURBOFILE_BROWSER_FONT_FAMILY_STORAGE_KEY = 'turbofile.browser.fontFamily';
 const TURBOFILE_UI_FONT_SIZE_STORAGE_KEY = 'turbofile.ui.fontSize';
 const TURBOFILE_UI_FONT_FAMILY_STORAGE_KEY = 'turbofile.ui.fontFamily';
+const TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY = 'turbofile.localWindows.defaultPath';
+const TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY = 'turbofile.localWindows.preferredTransferProtocol';
 const TURBOFILE_UI_DEFAULT_FONT_SIZE = 14;
 const TURBOFILE_DEFAULT_FONT_FAMILY = '"Archivo", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif';
 const TURBOFILE_UI_DEFAULT_FONT_FAMILY = TURBOFILE_DEFAULT_FONT_FAMILY;
@@ -606,7 +608,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly paneDeviceSnapshots = new Map<string, TurboFilePaneDeviceSnapshot>();
 	private activePage: TurboFileWorkbenchPage = 'transfer';
 	private isTaskLogVisible = false;
-	private readonly localWindowsDevice: TurboFileDevice;
+	private localWindowsDevice: TurboFileDevice;
 	private readonly paneStates: Record<'left' | 'right', TurboFilePaneState>;
 	private readonly paneRequestSeq: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly paneDoubleClickState: Record<'left' | 'right', TurboFilePaneDoubleClickState> = {
@@ -664,25 +666,7 @@ export class TurboFileEditor extends EditorPane {
 		super((new.target as typeof TurboFileEditor).ID, group, telemetryService, workbenchThemeService, storageService);
 
 		const localWindowsDefaultPath = this.getLocalWindowsDefaultPath();
-		this.localWindowsDevice = {
-			id: LOCAL_WINDOWS_DEVICE_ID,
-			name: 'Windows',
-			host: 'localhost',
-			port: 0,
-			username: 'local',
-			authType: 'password',
-			defaultPath: localWindowsDefaultPath,
-			platform: 'windows',
-			capabilities: {
-				ssh: false,
-				sftp: false,
-				scp: false,
-				rsync: false,
-				shell: true,
-				archive: true
-			},
-			preferredTransferProtocol: defaultTurboFileTransferProtocol
-		};
+		this.localWindowsDevice = this.createLocalWindowsDevice();
 		this.paneStates = {
 			left: {
 				deviceId: LOCAL_WINDOWS_DEVICE_ID,
@@ -987,8 +971,8 @@ export class TurboFileEditor extends EditorPane {
 
 		const actions = $('.turbofile-page-card-actions');
 		actions.appendChild(this.createPageButton(Codicon.send, '连接', () => { void this.testDeviceConnection(device); }));
+		actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			actions.appendChild(this.createPageButton(Codicon.edit, '编辑', () => this.showEditDeviceForm(device)));
 			actions.appendChild(this.createPageButton(Codicon.trash, '删除', () => { void this.deleteDeviceFromPage(device); }));
 		}
 		card.appendChild(actions);
@@ -1659,9 +1643,6 @@ export class TurboFileEditor extends EditorPane {
 
 
 	private showEditDeviceForm(device: TurboFileDevice): void {
-		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
-			return;
-		}
 		this.activePage = 'devices';
 		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
@@ -8936,6 +8917,53 @@ export class TurboFileEditor extends EditorPane {
 		return [this.localWindowsDevice, ...this.devices];
 	}
 
+	private createLocalWindowsDevice(): TurboFileDevice {
+		const defaultPath = this.getConfiguredLocalWindowsDefaultPath();
+		return {
+			id: LOCAL_WINDOWS_DEVICE_ID,
+			name: 'Windows',
+			host: 'localhost',
+			port: 0,
+			username: 'local',
+			authType: 'password',
+			defaultPath,
+			platform: 'windows',
+			capabilities: {
+				ssh: false,
+				sftp: false,
+				scp: true,
+				rsync: false,
+				shell: true,
+				archive: true
+			},
+			preferredTransferProtocol: this.getConfiguredLocalWindowsTransferProtocol()
+		};
+	}
+
+	private getConfiguredLocalWindowsDefaultPath(): string {
+		const savedPath = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY, StorageScope.PROFILE);
+		return savedPath || this.getLocalWindowsDefaultPath();
+	}
+
+	private getConfiguredLocalWindowsTransferProtocol(): TurboFileTransferProtocol {
+		const protocol = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, StorageScope.PROFILE);
+		return protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
+	}
+
+	private saveLocalWindowsDevice(draft: TurboFileDeviceDraft): TurboFileDevice {
+		const defaultPath = draft.defaultPath?.trim() || this.getLocalWindowsDefaultPath();
+		const preferredTransferProtocol = draft.preferredTransferProtocol === 'sftp' ? 'sftp' : 'scp';
+		this.storageService.store(TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY, defaultPath, StorageScope.PROFILE, StorageTarget.MACHINE);
+		this.storageService.store(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, preferredTransferProtocol, StorageScope.PROFILE, StorageTarget.MACHINE);
+		this.localWindowsDevice = {
+			...this.localWindowsDevice,
+			name: draft.name.trim() || 'Windows',
+			defaultPath,
+			preferredTransferProtocol
+		};
+		return this.localWindowsDevice;
+	}
+
 	private getLocalWindowsDefaultPath(): string {
 		return this.environmentService.userHome.fsPath || LOCAL_WINDOWS_FALLBACK_PATH;
 	}
@@ -9254,31 +9282,43 @@ export class TurboFileEditor extends EditorPane {
 		const form = document.createElement('form');
 		form.className = 'turbofile-device-form';
 		this.bindDeviceFormEventIsolation(form);
-		const editingDevice = this.editingDeviceId ? this.devices.find(device => device.id === this.editingDeviceId) : undefined;
+		const editingDevice = this.editingDeviceId ? this.getAllDevices().find(device => device.id === this.editingDeviceId) : undefined;
 		const isEditing = !!editingDevice;
+		const isEditingLocalWindows = editingDevice?.id === LOCAL_WINDOWS_DEVICE_ID;
 
 		const title = $('.turbofile-device-form-title');
-		title.textContent = isEditing ? '编辑 SSH 设备' : '添加 SSH 设备';
+		title.textContent = isEditingLocalWindows ? '编辑本机 Windows' : isEditing ? '编辑 SSH 设备' : '添加 SSH 设备';
 		form.appendChild(title);
 
-		this.appendInputField(form, 'name', '设备名称', 'Linux Server', 'text', false, editingDevice?.name);
-		this.appendInputField(form, 'host', 'IP / 主机名', '192.168.10.15', 'text', false, editingDevice?.host);
-		this.appendInputField(form, 'port', '端口', '22', 'number', false, String(editingDevice?.port || 22));
-		this.appendInputField(form, 'username', '用户名', 'root', 'text', false, editingDevice?.username);
-		this.appendSelectField(form, 'platform', '系统类型', [
-			['linux', 'Linux'],
-			['wsl', 'WSL'],
-			['unknown', 'Unknown']
-		], editingDevice?.platform ?? 'linux');
-		this.appendSelectField(form, 'authType', '认证方式', [
-			['password', '密码'],
-			['privateKey', '私钥']
-		], editingDevice?.authType ?? 'password');
-		this.appendProtocolField(form, editingDevice);
-		this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
-		this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\User\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
-		this.appendInputField(form, 'passphrase', '私钥口令', isEditing ? '留空保持原私钥口令' : '', 'password', true);
-		this.appendInputField(form, 'defaultPath', '默认目录', '/home', 'text', true, editingDevice?.defaultPath);
+		if (isEditingLocalWindows) {
+			this.appendInputField(form, 'name', '设备名称', 'Windows', 'text', false, editingDevice.name);
+			this.appendHiddenInput(form, 'host', editingDevice.host);
+			this.appendHiddenInput(form, 'port', String(editingDevice.port || 0));
+			this.appendHiddenInput(form, 'username', editingDevice.username || 'local');
+			this.appendHiddenInput(form, 'platform', 'windows');
+			this.appendHiddenInput(form, 'authType', 'password');
+			this.appendProtocolField(form, editingDevice);
+			this.appendInputField(form, 'defaultPath', '默认目录', this.getLocalWindowsDefaultPath(), 'text', true, editingDevice.defaultPath || this.getLocalWindowsDefaultPath());
+		} else {
+			this.appendInputField(form, 'name', '设备名称', 'Linux Server', 'text', false, editingDevice?.name);
+			this.appendInputField(form, 'host', 'IP / 主机名', '192.168.10.15', 'text', false, editingDevice?.host);
+			this.appendInputField(form, 'port', '端口', '22', 'number', false, String(editingDevice?.port || 22));
+			this.appendInputField(form, 'username', '用户名', 'root', 'text', false, editingDevice?.username);
+			this.appendSelectField(form, 'platform', '系统类型', [
+				['linux', 'Linux'],
+				['wsl', 'WSL'],
+				['unknown', 'Unknown']
+			], editingDevice?.platform ?? 'linux');
+			this.appendSelectField(form, 'authType', '认证方式', [
+				['password', '密码'],
+				['privateKey', '私钥']
+			], editingDevice?.authType ?? 'password');
+			this.appendProtocolField(form, editingDevice);
+			this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
+			this.appendInputField(form, 'privateKeyPath', '私钥路径', 'C:\\Users\\User\\.ssh\\id_rsa', 'text', true, editingDevice?.privateKeyPath);
+			this.appendInputField(form, 'passphrase', '私钥口令', isEditing ? '留空保持原私钥口令' : '', 'password', true);
+			this.appendInputField(form, 'defaultPath', '默认目录', '/home', 'text', true, editingDevice?.defaultPath);
+		}
 
 		const message = $('.turbofile-device-form-message');
 		message.textContent = this.deviceFormMessage;
@@ -9308,13 +9348,17 @@ export class TurboFileEditor extends EditorPane {
 
 			message.textContent = draft.preferredTransferProtocol === 'sftp' ? '正在保存设备...' : '正在保存并检测协议能力...';
 			try {
-				let savedDevice = editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
-				const capabilityResult = await this.detectAndStoreDeviceCapabilities(savedDevice);
-				savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
-				this.devices = this.deviceStore.loadDevices();
+				let savedDevice = isEditingLocalWindows ? this.saveLocalWindowsDevice(draft) : editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
+				const capabilityResult = isEditingLocalWindows ? undefined : await this.detectAndStoreDeviceCapabilities(savedDevice);
+				if (!isEditingLocalWindows) {
+					savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
+					this.devices = this.deviceStore.loadDevices();
+				}
 				this.ensurePaneDeviceSelection();
 				if (capabilityResult) {
 					this.deviceConnectionMessages.set(savedDevice.id, capabilityResult);
+				} else if (isEditingLocalWindows) {
+					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: '本机配置已保存，Windows 与服务器互传会按所选协议执行。' });
 				} else if (savedDevice.preferredTransferProtocol === 'sftp') {
 					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: 'SFTP 稳定模式，无需额外检测。' });
 				}
@@ -9371,7 +9415,16 @@ export class TurboFileEditor extends EditorPane {
 		parent.appendChild(field);
 	}
 
+	private appendHiddenInput(parent: HTMLElement, name: string, value: string): void {
+		const input = document.createElement('input');
+		input.type = 'hidden';
+		input.name = name;
+		input.value = value;
+		parent.appendChild(input);
+	}
+
 	private appendProtocolField(parent: HTMLElement, editingDevice?: TurboFileDevice): void {
+		const isLocalWindowsDevice = editingDevice?.id === LOCAL_WINDOWS_DEVICE_ID || editingDevice?.platform === 'windows';
 		const field = $('.turbofile-device-field.is-wide');
 		const labelElement = document.createElement('label');
 		labelElement.textContent = '传输协议';
@@ -9386,11 +9439,12 @@ export class TurboFileEditor extends EditorPane {
 		const select = document.createElement('select');
 		select.id = 'turbofile-device-preferredTransferProtocol';
 		select.name = 'preferredTransferProtocol';
-		for (const [value, text] of [
+		const protocolOptions: [string, string][] = [
 			['scp', 'SCP 默认极速'],
 			['sftp', 'SFTP 稳定模式'],
-			['rsync', 'rsync 极速模式'],
-		] as [string, string][]) {
+			['rsync', 'rsync 极速模式']
+		];
+		for (const [value, text] of isLocalWindowsDevice ? protocolOptions.filter(([value]) => value !== 'rsync') : protocolOptions) {
 			const option = document.createElement('option');
 			option.value = value;
 			option.textContent = text;
@@ -9409,7 +9463,7 @@ export class TurboFileEditor extends EditorPane {
 		status.style.gridColumn = '1 / -1';
 		status.style.minHeight = '18px';
 		status.style.color = 'var(--vscode-descriptionForeground)';
-		status.textContent = select.value === 'sftp' ? 'SFTP 稳定模式，无需额外检测。' : '选择后将自动检测协议能力。';
+		status.textContent = isLocalWindowsDevice ? '本机协议用于 Windows 与服务器互传，无需 SSH 检测。' : select.value === 'sftp' ? 'SFTP 稳定模式，无需额外检测。' : '选择后将自动检测协议能力。';
 
 		let lastMissingDependencies: readonly TurboFileTransferDependency[] = [];
 		let detectionRun = 0;
@@ -9428,6 +9482,10 @@ export class TurboFileEditor extends EditorPane {
 			const protocol = this.normalizeTransferProtocol(select.value);
 			lastMissingDependencies = [];
 			setInstallVisible(false);
+			if (isLocalWindowsDevice) {
+				setStatus('idle', '本机协议用于 Windows 与服务器互传，无需 SSH 检测。');
+				return;
+			}
 			if (protocol === 'sftp') {
 				setStatus('idle', 'SFTP 稳定模式，无需额外检测。');
 				return;
@@ -9504,8 +9562,10 @@ export class TurboFileEditor extends EditorPane {
 		});
 
 		row.appendChild(select);
-		row.appendChild(detect);
-		row.appendChild(install);
+		if (!isLocalWindowsDevice) {
+			row.appendChild(detect);
+			row.appendChild(install);
+		}
 		row.appendChild(status);
 		field.appendChild(labelElement);
 		field.appendChild(row);
