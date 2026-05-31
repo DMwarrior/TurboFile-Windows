@@ -2281,17 +2281,20 @@ export class TurboFileEditor extends EditorPane {
 		input.value = currentPath;
 		input.spellcheck = false;
 		display.appendChild(input);
+		let committed = false;
 		input.addEventListener('keydown', event => {
 			if (event.key === 'Enter') {
 				event.preventDefault();
+				committed = true;
 				void this.commitPathInlineEdit(side, input.value);
 			} else if (event.key === 'Escape') {
 				event.preventDefault();
+				committed = true;
 				this.render();
 			}
 		});
 		input.addEventListener('blur', () => {
-			if (display.isConnected) {
+			if (!committed && display.isConnected) {
 				this.render();
 			}
 		});
