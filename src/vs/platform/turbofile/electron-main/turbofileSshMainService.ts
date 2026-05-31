@@ -782,12 +782,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
-		await this.withSftp(request.target, async sftp => {
+		const initialRemoteSize = await this.withSftp(request.target, async sftp => {
 			await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
+			await this.unlinkRemote(sftp, request.target.path).catch(() => undefined);
+			return 0;
 		}, request.progressId);
 		if (canUseNativeOpenSshScpCommand(request.target.connection)) {
 			try {
-				await this.uploadFileWithNativeOpenSshScp(request.target.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
+				await this.uploadFileWithNativeOpenSshScp(request.target.connection, request.source.path, request.target.path, initialRemoteSize, bytes, onProgress, request.progressId);
 				return;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
@@ -805,8 +807,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		await ensureLocalParentDirectory(request.target.path);
 		if (canUseNativeOpenSshScpCommand(request.source.connection)) {
+			await fsp.rm(request.target.path, { force: true }).catch(() => undefined);
+			const initialLocalSize = 0;
 			try {
-				await this.downloadFileWithNativeOpenSshScp(request.source.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
+				await this.downloadFileWithNativeOpenSshScp(request.source.connection, request.source.path, request.target.path, initialLocalSize, bytes, onProgress, request.progressId);
 				return;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
@@ -818,50 +822,32 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		await this.downloadFileWithScpProtocol(request.source.connection, request.source.path, request.target.path, bytes, onProgress, request.progressId);
 	}
 
-	private async uploadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
-		const tempRemotePath = getRemoteTransferTempPath(remotePath);
-		let completed = false;
-		const stopGrowthTiming = this.beginRemoteFileGrowthTiming(progressId, connection, tempRemotePath, 0, expectedBytes, onProgress);
+	private async uploadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, initialRemoteSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
+		const stopGrowthTiming = this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize, expectedBytes, onProgress);
 		try {
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
 				...args,
 				localPath,
-				formatNativeScpRemoteSpec(connection, tempRemotePath)
+				formatNativeScpRemoteSpec(connection, remotePath)
 			], { env }));
-			await this.withSftp({ kind: 'ssh', path: remotePath, connection }, async sftp => {
-				await this.unlinkRemote(sftp, remotePath).catch(() => undefined);
-				await this.renameRemote(sftp, tempRemotePath, remotePath);
-			}, progressId);
-			completed = true;
 		} finally {
 			stopGrowthTiming();
-			if (!completed) {
-				await this.withSftp({ kind: 'ssh', path: tempRemotePath, connection }, sftp => this.unlinkRemote(sftp, tempRemotePath).catch(() => undefined), progressId).catch(() => undefined);
-			}
 		}
 	}
 
-	private async downloadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
-		const tempLocalPath = getLocalTransferTempPath(localPath);
-		let completed = false;
+	private async downloadFileWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, initialLocalSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
 		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, async () => {
-			const stat = await fsp.stat(tempLocalPath).catch(() => undefined);
+			const stat = await fsp.stat(localPath).catch(() => undefined);
 			return stat?.size ?? 0;
-		}, 0, expectedBytes, onProgress);
+		}, initialLocalSize, expectedBytes, onProgress);
 		try {
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
 				...args,
 				formatNativeScpRemoteSpec(connection, remotePath),
-				tempLocalPath
+				localPath
 			], { env }));
-			await fsp.rm(localPath, { force: true }).catch(() => undefined);
-			await fsp.rename(tempLocalPath, localPath);
-			completed = true;
 		} finally {
 			stopGrowthTiming();
-			if (!completed) {
-				await fsp.rm(tempLocalPath, { force: true }).catch(() => undefined);
-			}
 		}
 	}
 
@@ -3206,17 +3192,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return Math.max(1, Date.now() - startedAt);
 	}
 
-	private async getRemoteFileSizeByClient(client: ISSHClient, path: string): Promise<number> {
-		const command = looksLikeWindowsPath(path)
-			? `powershell -NoProfile -NonInteractive -Command "$p=${quotePowerShellLiteral(path)}; if (Test-Path -LiteralPath $p) { [int64](Get-Item -LiteralPath $p).Length } else { 0 }"`
-			: `stat -c %s -- ${quotePosixShellArg(path)} 2>/dev/null || printf 0`;
-		const output = await this.execRemoteBytes(client, command, { timeoutMs: 1000 });
-		const size = Number(output.toString().trim().split(/\s+/).pop() ?? '0');
-		return Number.isFinite(size) && size > 0 ? size : 0;
-	}
-
 	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void): () => void {
 		let monitorClient: ISSHClient | undefined;
+		let monitorSftp: ISFTPWrapper | undefined;
 		let stopped = false;
 		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, async () => {
 			if (stopped) {
@@ -3228,13 +3206,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					return 0;
 				}
 				monitorClient = await this.connect(configResult.config);
+				monitorSftp = await this.openSftp(monitorClient);
 			}
-			return this.getRemoteFileSizeByClient(monitorClient, path);
+			const stat = monitorSftp ? await this.remoteStat(monitorSftp, path).catch(() => undefined) : undefined;
+			return stat?.size ?? 0;
 		}, baselineSize, expectedBytes, onProgress);
 		return () => {
 			stopped = true;
 			stopGrowthTiming();
+			monitorSftp?.end();
 			monitorClient?.end();
+			monitorSftp = undefined;
 			monitorClient = undefined;
 		};
 	}
@@ -4106,18 +4088,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private renameRemote(sftp: ISFTPWrapper, sourcePath: string, targetPath: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			sftp.rename(sourcePath, targetPath, error => {
-				if (error) {
-					reject(error);
-					return;
-				}
-				resolve();
-			});
-		});
-	}
-
 	private fastGet(sftp: ISFTPWrapper, remotePath: string, localPath: string, options?: ISFTPTransferOptions): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const callback = (error: Error | undefined): void => {
@@ -4831,6 +4801,7 @@ async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnecti
 	let tempAskPassPath: string | undefined;
 	const args = [
 		'-q',
+		'-O',
 		'-o', 'StrictHostKeyChecking=accept-new',
 		'-o', 'Compression=no',
 		'-o', 'LogLevel=ERROR'
@@ -5023,15 +4994,6 @@ function getTransferName(path: string): string {
 		return path.substring(slash + 1);
 	}
 	return basename(path);
-}
-
-function getRemoteTransferTempPath(path: string): string {
-	const name = getTransferName(path) || 'payload';
-	return joinRemotePath(getRemoteParentPath(path), `.${name}.turbofile-${randomUUID()}.tmp`);
-}
-
-function getLocalTransferTempPath(path: string): string {
-	return join(dirname(path), `.${basename(path)}.turbofile-${randomUUID()}.tmp`);
 }
 
 function quotePosixShellArg(value: string): string {

@@ -3022,7 +3022,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private formatSpeed(bytesPerSecond: number | undefined): string {
-		return bytesPerSecond && bytesPerSecond > 0 ? `${formatSize(bytesPerSecond)}/s` : '--';
+		return bytesPerSecond && bytesPerSecond > 0 ? `${formatTransferRate(bytesPerSecond)}/s` : '--';
 	}
 
 	private formatRemaining(milliseconds: number | undefined): string {
@@ -10385,7 +10385,22 @@ function formatThroughput(bytes: number, milliseconds: number): string {
 	if (bytes <= 0 || milliseconds <= 0) {
 		return '';
 	}
-	return `${formatSize((bytes / milliseconds) * 1000)}/s`;
+	return `${formatTransferRate((bytes / milliseconds) * 1000)}/s`;
+}
+
+function formatTransferRate(bytesPerSecond: number): string {
+	if (bytesPerSecond < 1000) {
+		return `${Math.round(bytesPerSecond)} B`;
+	}
+	const kb = bytesPerSecond / 1000;
+	if (kb < 1000) {
+		return `${kb.toFixed(1)} KB`;
+	}
+	const mb = kb / 1000;
+	if (mb < 1000) {
+		return `${mb.toFixed(1)} MB`;
+	}
+	return `${(mb / 1000).toFixed(1)} GB`;
 }
 
 function formatDate(timestamp: number): string {
