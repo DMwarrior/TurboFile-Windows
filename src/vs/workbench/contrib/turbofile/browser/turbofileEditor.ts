@@ -761,6 +761,7 @@ export class TurboFileEditor extends EditorPane {
 		this.updateInputRunningTaskCount();
 		await super.setInput(input, options, context, token);
 		if (!token.isCancellationRequested) {
+			this.syncActiveTerminalForCurrentPage();
 			this.notifyActivePageChanged();
 			this.render();
 		}
@@ -776,6 +777,7 @@ export class TurboFileEditor extends EditorPane {
 		document.body.classList.toggle('turbofile-main-editor-visible', visible);
 		this.updateTransferTabsVisibility();
 		if (visible) {
+			this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
 			this.ensureTitlebarThemeToggle();
 		} else {
@@ -8574,6 +8576,24 @@ export class TurboFileEditor extends EditorPane {
 		this.clearTerminalBindingForInstance(instance.instanceId);
 		turboFileTerminalBindingByPageId.set(pageInstanceId, instance.instanceId);
 		turboFilePageBindingByTerminalId.set(instance.instanceId, pageInstanceId);
+	}
+
+	private syncActiveTerminalForCurrentPage(): void {
+		if (!this.isEditorVisible) {
+			return;
+		}
+
+		const pageInstanceId = this.currentInput?.instanceId;
+		if (!pageInstanceId) {
+			return;
+		}
+
+		const instance = this.getBoundTerminalForPage(pageInstanceId);
+		if (!instance) {
+			return;
+		}
+
+		this.terminalService.setActiveInstance(instance);
 	}
 
 	private clearTerminalBindingForPage(pageInstanceId: string): void {
