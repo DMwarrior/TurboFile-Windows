@@ -2844,9 +2844,10 @@ export class TurboFileEditor extends EditorPane {
 		const meta = $('.turbofile-task-meta.turbofile-statusbar-message-detail');
 		if (runningTransfers.length) {
 			title.textContent = this.getLiveTransferStatusTitle(runningTransfers);
+			meta.textContent = '';
 		} else if (latest) {
 			title.textContent = this.formatTaskLine(latest);
-			meta.textContent = latest.detail;
+			meta.textContent = '';
 		} else {
 			title.textContent = this.statusMessage;
 			meta.textContent = '暂无传输任务，最近日志会显示在这里。';
