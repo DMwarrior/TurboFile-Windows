@@ -115,6 +115,7 @@ interface TurboFilePaneDoubleClickState {
 
 const turboFileTerminalPageByTerminalId = new Map<number, string>();
 const turboFileLastActiveTerminalByPageId = new Map<string, number>();
+const turboFileTerminalPanelHiddenByPageId = new Set<string>();
 
 interface TurboFileImageGridImage {
 	readonly item: TurboFileFileItem;
@@ -633,6 +634,7 @@ export class TurboFileEditor extends EditorPane {
 	private remoteFileSystemProvider: TurboFileRemoteFileSystemProvider | undefined;
 	private taskbarHiddenForTerminal = false;
 	private terminalRevealInProgress = false;
+	private terminalPanelVisibilityInProgress = false;
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
@@ -709,7 +711,8 @@ export class TurboFileEditor extends EditorPane {
 		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => this.handleWorkbenchCommand(command)));
 		this._register(this.terminalService.onDidDisposeInstance(instance => this.clearTerminalBindingForInstance(instance.instanceId)));
 		this._register(this.layoutService.onDidChangePartVisibility(event => {
-			if (event.partId === Parts.PANEL_PART && !event.visible && !this.terminalRevealInProgress) {
+			if (event.partId === Parts.PANEL_PART && !event.visible && !this.terminalRevealInProgress && !this.terminalPanelVisibilityInProgress) {
+				this.rememberTerminalPanelHiddenForCurrentPage();
 				this.restoreTaskbarAfterTerminal();
 			}
 		}));
@@ -8487,6 +8490,7 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 		const title = this.getTerminalTitle(side, device);
 		try {
+			turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
 			await this.revealBoundTerminalsForPage(pageInstanceId, undefined, false);
 			if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
 				const defaultProfile = this.terminalProfileService.getDefaultProfile();
@@ -8543,6 +8547,35 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private rememberTerminalPanelHiddenForCurrentPage(): void {
+		if (!this.isEditorVisible) {
+			return;
+		}
+		const pageInstanceId = this.currentInput?.instanceId;
+		if (!pageInstanceId || this.getBoundTerminalsForPage(pageInstanceId).length === 0) {
+			return;
+		}
+		turboFileTerminalPanelHiddenByPageId.add(pageInstanceId);
+	}
+
+	private runTerminalPanelVisibilityChange<T>(callback: () => T): T {
+		this.terminalPanelVisibilityInProgress = true;
+		try {
+			return callback();
+		} finally {
+			this.terminalPanelVisibilityInProgress = false;
+		}
+	}
+
+	private async runTerminalPanelVisibilityChangeAsync<T>(callback: () => Promise<T>): Promise<T> {
+		this.terminalPanelVisibilityInProgress = true;
+		try {
+			return await callback();
+		} finally {
+			this.terminalPanelVisibilityInProgress = false;
+		}
+	}
+
 	private bindTerminalToPage(pageInstanceId: string, instance: ITerminalInstance): void {
 		this.clearTerminalBindingForInstance(instance.instanceId);
 		turboFileTerminalPageByTerminalId.set(instance.instanceId, pageInstanceId);
@@ -8589,7 +8622,7 @@ export class TurboFileEditor extends EditorPane {
 		const pageTerminals = this.getBoundTerminalsForPage(pageInstanceId);
 		if (pageTerminals.length === 0) {
 			this.restoreTaskbarAfterTerminal();
-			this.terminalGroupService.hidePanel();
+			this.runTerminalPanelVisibilityChange(() => this.terminalGroupService.hidePanel());
 			return;
 		}
 
@@ -8603,13 +8636,18 @@ export class TurboFileEditor extends EditorPane {
 			: undefined;
 		activeInstance = activeInstance ?? lastActiveInstance ?? pageTerminals[0];
 		turboFileLastActiveTerminalByPageId.set(pageInstanceId, activeInstance.instanceId);
+		if (!focus && turboFileTerminalPanelHiddenByPageId.has(pageInstanceId)) {
+			this.restoreTaskbarAfterTerminal();
+			this.runTerminalPanelVisibilityChange(() => this.terminalGroupService.hidePanel());
+			return;
+		}
 		this.taskbarHiddenForTerminal = true;
 		this.terminalService.setActiveInstance(activeInstance);
 		if (focus) {
-			await this.terminalService.focusInstance(activeInstance);
+			await this.runTerminalPanelVisibilityChangeAsync(() => this.terminalService.focusInstance(activeInstance));
 			return;
 		}
-		await this.terminalGroupService.showPanel(false);
+		await this.runTerminalPanelVisibilityChangeAsync(() => this.terminalGroupService.showPanel(false));
 	}
 
 	private async syncActiveTerminalForCurrentPage(): Promise<void> {
@@ -8637,6 +8675,7 @@ export class TurboFileEditor extends EditorPane {
 				turboFileLastActiveTerminalByPageId.set(pageInstanceId, nextTerminal.instanceId);
 			} else {
 				turboFileLastActiveTerminalByPageId.delete(pageInstanceId);
+				turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
 			}
 		}
 	}
