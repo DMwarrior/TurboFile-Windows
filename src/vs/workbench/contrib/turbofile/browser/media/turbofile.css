@@ -128,22 +128,22 @@ body.turbofile-theme-switching .turbofile-workbench * {
 	overflow: hidden;
 }
 
-.turbofile-shell .monaco-workbench,
-.turbofile-shell .part.editor,
-.turbofile-shell .part.sidebar,
-.turbofile-shell .part.panel,
-.turbofile-shell .part.statusbar {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench,
+body.turbofile-shell.turbofile-main-editor-visible .part.editor,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar,
+body.turbofile-shell.turbofile-main-editor-visible .part.panel,
+body.turbofile-shell.turbofile-main-editor-visible .part.statusbar {
 	background-color: var(--vscode-activityBar-background) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.panel,
-body.turbofile-shell .monaco-workbench .part.panel > .content,
-body.turbofile-shell .monaco-workbench .part.panel .composite.title,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-wrapper,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-outer-container,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-tabs,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-tab,
-body.turbofile-shell .monaco-workbench .part.panel .xterm {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel > .content,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .composite.title,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-wrapper,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-outer-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tabs,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tab,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
@@ -1506,36 +1506,36 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	color: var(--vscode-descriptionForeground);
 }
 
-.turbofile-shell .part.sidebar .composite.title,
-.turbofile-shell .part.sidebar .pane-header {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .composite.title,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .pane-header {
 	display: none !important;
 }
 
-.turbofile-shell .part.sidebar {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar {
 	position: relative;
 	border-right: 0 !important;
 	box-shadow: none !important;
 	overflow: hidden;
 }
 
-body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .monaco-sash.vertical {
 	display: none !important;
 }
 
-.turbofile-shell .part.sidebar .content,
-.turbofile-shell .part.sidebar .composite,
-.turbofile-shell .part.sidebar .split-view-view,
-.turbofile-shell .part.sidebar .pane,
-.turbofile-shell .part.sidebar .pane-body {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .content,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .composite,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .split-view-view,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .pane,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .pane-body {
 	min-height: 0;
 	height: 100% !important;
 }
 
-.turbofile-shell .part.sidebar .content .turbofile-page-nav {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar .content .turbofile-page-nav {
 	display: none;
 }
 
-.turbofile-shell .part.sidebar > .turbofile-page-nav {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar > .turbofile-page-nav {
 	position: fixed;
 	left: 0;
 	top: 35px;
@@ -1545,7 +1545,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	height: auto;
 }
 
-.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	width: 152px;
 }
 

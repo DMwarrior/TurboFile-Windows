@@ -723,9 +723,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async ensureTurboFileChrome(): Promise<void> {
-		if (this.configurationService.getValue<boolean>('workbench.statusBar.visible') !== false) {
-			await this.configurationService.updateValue('workbench.statusBar.visible', false, ConfigurationTarget.USER);
-		}
+		// Keep native editor chrome controlled by layout state instead of permanently mutating user settings.
 	}
 
 	private async ensureDefaultSshDevices(): Promise<void> {

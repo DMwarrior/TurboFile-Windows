@@ -189,6 +189,7 @@ class TurboFileRouteView extends ViewPane {
 class TurboFileStartupContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.turbofile.startup';
 	private isOpeningTurboFilePage = false;
+	private shellMode: 'turbofile' | 'native' | undefined;
 	private readonly activePagesByInstanceId = new Map<string, TurboFileWorkbenchPage>();
 
 	constructor(
@@ -225,21 +226,51 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		this._register(this.editorService.onDidActiveEditorChange(() => {
 			const activeInput = this.getActiveTurboFileEditorInput();
 			turboFileActivePage = activeInput ? this.activePagesByInstanceId.get(activeInput.instanceId) ?? 'transfer' : 'transfer';
+			this.updateShellForActiveEditor();
 			this.renderNavigation();
 		}));
 	}
 
 	private configureShell(): void {
+		this.activateTurboFileShell();
+	}
+
+	private updateShellForActiveEditor(): void {
+		if (this.getActiveTurboFileEditorInput()) {
+			this.activateTurboFileShell();
+			return;
+		}
+		this.restoreNativeShell();
+	}
+
+	private activateTurboFileShell(): void {
+		this.shellMode = 'turbofile';
 		if (this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
 			this.layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
 		}
 		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
 		}
+		if (this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
+			this.layoutService.setPartHidden(true, Parts.STATUSBAR_PART);
+		}
 		this.resizeTurboFileSideBar();
-		this.layoutService.setPartHidden(false, Parts.STATUSBAR_PART);
 		this.layoutService.layout();
-		this.renderNavigation();
+	}
+
+	private restoreNativeShell(): void {
+		this.shellMode = 'native';
+		if (!this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
+			this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
+		}
+		if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
+			this.layoutService.setPartHidden(false, Parts.STATUSBAR_PART);
+		}
+		if (this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
+			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+		}
+		this.layoutService.layout();
+		this.removeNavigation();
 	}
 
 	private async openTurboFilePage(page: TurboFileWorkbenchPage, _hideSideBar: boolean): Promise<void> {
@@ -255,6 +286,9 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			}
 			if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 				this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
+			}
+			if (this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
+				this.layoutService.setPartHidden(true, Parts.STATUSBAR_PART);
 			}
 			this.resizeTurboFileSideBar();
 			this.layoutService.layout();
@@ -310,10 +344,9 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			return;
 		}
 
-		for (const existing of Array.from(sideBar.children)) {
-			if (existing.classList.contains('turbofile-page-nav')) {
-				existing.remove();
-			}
+		this.removeNavigation(sideBar);
+		if (this.shellMode !== 'turbofile') {
+			return;
 		}
 
 		const nav = $('nav.turbofile-page-nav.turbofile-app-nav');
@@ -365,6 +398,17 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		nav.appendChild(toggle);
 
 		sideBar.appendChild(nav);
+	}
+
+	private removeNavigation(sideBar = document.querySelector<HTMLElement>('.part.sidebar')): void {
+		if (!sideBar) {
+			return;
+		}
+		for (const existing of Array.from(sideBar.children)) {
+			if (existing.classList.contains('turbofile-page-nav')) {
+				existing.remove();
+			}
+		}
 	}
 
 	private renderNewTransferButton(): HTMLButtonElement {
