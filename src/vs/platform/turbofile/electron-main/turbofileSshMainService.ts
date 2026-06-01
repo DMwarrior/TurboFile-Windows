@@ -133,6 +133,7 @@ interface ISFTPWrapper {
 	fastGet(remotePath: string, localPath: string, callback: (err: Error | undefined) => void): void;
 	fastPut(localPath: string, remotePath: string, options: ISFTPTransferOptions, callback: (err: Error | undefined) => void): void;
 	fastPut(localPath: string, remotePath: string, callback: (err: Error | undefined) => void): void;
+	createReadStream?(path: string, options?: { readonly highWaterMark?: number }): NodeJS.ReadableStream;
 	open(path: string, flags: string, callback: (err: Error | undefined, handle: Buffer) => void): void;
 	read(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (err: Error | undefined, bytesRead: number, buffer: Buffer, position: number) => void): void;
 	write(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (err: Error | undefined) => void): void;
@@ -3610,6 +3611,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (size <= 0) {
 			return Buffer.alloc(0);
 		}
+		if (sftp.createReadStream) {
+			try {
+				return await this.readRemoteFileBufferStream(sftp, remotePath, size);
+			} catch {
+				// Some embedded SFTP servers advertise streams but fail at runtime; keep the older
+				// positioned-read path as a compatibility fallback.
+			}
+		}
 
 		const handle = await this.openRemoteFile(sftp, remotePath, 'r');
 		try {
@@ -3627,6 +3636,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} finally {
 			await this.closeRemoteFile(sftp, handle);
 		}
+	}
+
+	private readRemoteFileBufferStream(sftp: ISFTPWrapper, remotePath: string, size: number): Promise<Buffer> {
+		return new Promise((resolve, reject) => {
+			const stream = sftp.createReadStream?.(remotePath, {
+				highWaterMark: REMOTE_DIRECT_READ_CHUNK_BYTES
+			});
+			if (!stream) {
+				reject(new Error('SFTP read stream is unavailable.'));
+				return;
+			}
+
+			const chunks: Buffer[] = [];
+			let total = 0;
+			let settled = false;
+			const finish = (callback: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				callback();
+			};
+			stream.on('data', chunk => {
+				const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
+				total += buffer.byteLength;
+				if (total > size) {
+					(stream as unknown as { destroy?: () => void }).destroy?.();
+					finish(() => reject(new Error('Remote file stream exceeded expected size.')));
+					return;
+				}
+				chunks.push(buffer);
+			});
+			stream.on('error', error => finish(() => reject(error)));
+			stream.on('end', () => finish(() => resolve(Buffer.concat(chunks, total))));
+		});
 	}
 
 	private async readImageBuffer(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions): Promise<IImageBufferResult> {
