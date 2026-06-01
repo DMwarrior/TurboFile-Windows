@@ -8480,9 +8480,7 @@ export class TurboFileEditor extends EditorPane {
 			this.terminalRevealInProgress = true;
 			this.render();
 			try {
-				await this.terminalGroupService.showPanel(true);
-				this.terminalService.setActiveInstance(existingTerminal);
-				await this.terminalService.focusInstance(existingTerminal);
+				await this.revealBoundTerminalForPage(pageInstanceId, true);
 				this.statusMessage = `已切换到当前页终端：${existingTerminal.title}`;
 				this.render();
 				return;
@@ -8516,6 +8514,7 @@ export class TurboFileEditor extends EditorPane {
 					} : undefined
 				});
 				this.bindTerminalToPage(pageInstanceId, instance);
+				await this.revealBoundTerminalForPage(pageInstanceId, true);
 				this.statusMessage = `已打开本地终端：${title}`;
 				this.render();
 				return;
@@ -8532,6 +8531,7 @@ export class TurboFileEditor extends EditorPane {
 				}
 			});
 			this.bindTerminalToPage(pageInstanceId, instance);
+			await this.revealBoundTerminalForPage(pageInstanceId, true);
 			this.statusMessage = `已打开内置 SSH 终端：${title}`;
 			this.render();
 		} catch (error) {
@@ -8578,6 +8578,46 @@ export class TurboFileEditor extends EditorPane {
 		turboFilePageBindingByTerminalId.set(instance.instanceId, pageInstanceId);
 	}
 
+	private getBoundTerminalInstances(exceptInstanceId?: number): ITerminalInstance[] {
+		const instances: ITerminalInstance[] = [];
+		const seen = new Set<number>();
+		for (const terminalInstanceId of turboFileTerminalBindingByPageId.values()) {
+			if (terminalInstanceId === exceptInstanceId || seen.has(terminalInstanceId)) {
+				continue;
+			}
+			seen.add(terminalInstanceId);
+			const instance = this.terminalService.getInstanceFromId(terminalInstanceId);
+			if (!instance || instance.isDisposed) {
+				this.clearTerminalBindingForInstance(terminalInstanceId);
+				continue;
+			}
+			instances.push(instance);
+		}
+		return instances;
+	}
+
+	private async revealBoundTerminalForPage(pageInstanceId: string, focus: boolean): Promise<void> {
+		const instance = this.getBoundTerminalForPage(pageInstanceId);
+		for (const candidate of this.getBoundTerminalInstances(instance?.instanceId)) {
+			this.terminalService.moveToBackground(candidate);
+		}
+
+		if (!instance) {
+			this.restoreTaskbarAfterTerminal();
+			this.terminalGroupService.hidePanel();
+			return;
+		}
+
+		await this.terminalService.showBackgroundTerminal(instance, true);
+		this.taskbarHiddenForTerminal = true;
+		this.terminalService.setActiveInstance(instance);
+		if (focus) {
+			await this.terminalService.focusInstance(instance);
+			return;
+		}
+		await this.terminalGroupService.showPanel(false);
+	}
+
 	private async syncActiveTerminalForCurrentPage(): Promise<void> {
 		if (!this.isEditorVisible) {
 			return;
@@ -8587,17 +8627,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!pageInstanceId) {
 			return;
 		}
-
-		const instance = this.getBoundTerminalForPage(pageInstanceId);
-		if (!instance) {
-			this.restoreTaskbarAfterTerminal();
-			this.terminalGroupService.hidePanel();
-			return;
-		}
-
-		this.taskbarHiddenForTerminal = true;
-		this.terminalService.setActiveInstance(instance);
-		await this.terminalGroupService.showPanel(false);
+		await this.revealBoundTerminalForPage(pageInstanceId, false);
 	}
 
 	private clearTerminalBindingForPage(pageInstanceId: string): void {
