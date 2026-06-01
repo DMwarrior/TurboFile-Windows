@@ -113,8 +113,19 @@ interface TurboFilePaneDoubleClickState {
 	suppressNativePath?: string;
 }
 
-const turboFileTerminalBindingByPageId = new Map<string, number>();
-const turboFilePageBindingByTerminalId = new Map<number, string>();
+type TurboFileTerminalSide = 'left' | 'right';
+
+interface ITurboFileTerminalBinding {
+	readonly pageInstanceId: string;
+	readonly side: TurboFileTerminalSide;
+}
+
+function turboFileTerminalBindingKey(pageInstanceId: string, side: TurboFileTerminalSide): string {
+	return `${pageInstanceId}::${side}`;
+}
+
+const turboFileTerminalBindingByPageKey = new Map<string, number>();
+const turboFilePageBindingByTerminalId = new Map<number, ITurboFileTerminalBinding>();
 
 interface TurboFileImageGridImage {
 	readonly item: TurboFileFileItem;
@@ -8474,13 +8485,13 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const existingTerminal = this.getBoundTerminalForPage(pageInstanceId);
+		const existingTerminal = this.getBoundTerminalForPage(pageInstanceId, side);
 		if (existingTerminal) {
 			this.taskbarHiddenForTerminal = true;
 			this.terminalRevealInProgress = true;
 			this.render();
 			try {
-				await this.revealBoundTerminalForPage(pageInstanceId, true);
+				await this.revealBoundTerminalsForPage(pageInstanceId, side, true);
 				this.statusMessage = `已切换到当前页终端：${existingTerminal.title}`;
 				this.render();
 				return;
@@ -8513,8 +8524,8 @@ export class TurboFileEditor extends EditorPane {
 						icon: defaultProfile.icon ?? Codicon.terminal
 					} : undefined
 				});
-				this.bindTerminalToPage(pageInstanceId, instance);
-				await this.revealBoundTerminalForPage(pageInstanceId, true);
+				this.bindTerminalToPage(pageInstanceId, side, instance);
+				await this.revealBoundTerminalsForPage(pageInstanceId, side, true);
 				this.statusMessage = `已打开本地终端：${title}`;
 				this.render();
 				return;
@@ -8530,8 +8541,8 @@ export class TurboFileEditor extends EditorPane {
 					customPtyImplementation: (id, cols, rows) => new TurboFileSshTerminalProcess(id, cols, rows, this.sshService, connection, state.path)
 				}
 			});
-			this.bindTerminalToPage(pageInstanceId, instance);
-			await this.revealBoundTerminalForPage(pageInstanceId, true);
+			this.bindTerminalToPage(pageInstanceId, side, instance);
+			await this.revealBoundTerminalsForPage(pageInstanceId, side, true);
 			this.statusMessage = `已打开内置 SSH 终端：${title}`;
 			this.render();
 		} catch (error) {
@@ -8556,33 +8567,44 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private getBoundTerminalForPage(pageInstanceId: string): ITerminalInstance | undefined {
-		const terminalInstanceId = turboFileTerminalBindingByPageId.get(pageInstanceId);
+	private getBoundTerminalForPage(pageInstanceId: string, side: TurboFileTerminalSide): ITerminalInstance | undefined {
+		const terminalInstanceId = turboFileTerminalBindingByPageKey.get(turboFileTerminalBindingKey(pageInstanceId, side));
 		if (terminalInstanceId === undefined) {
 			return undefined;
 		}
 
 		const instance = this.terminalService.getInstanceFromId(terminalInstanceId);
 		if (!instance || instance.isDisposed) {
-			this.clearTerminalBindingForPage(pageInstanceId);
+			this.clearTerminalBindingForPageSide(pageInstanceId, side);
 			return undefined;
 		}
 
 		return instance;
 	}
 
-	private bindTerminalToPage(pageInstanceId: string, instance: ITerminalInstance): void {
-		this.clearTerminalBindingForPage(pageInstanceId);
+	private bindTerminalToPage(pageInstanceId: string, side: TurboFileTerminalSide, instance: ITerminalInstance): void {
+		this.clearTerminalBindingForPageSide(pageInstanceId, side);
 		this.clearTerminalBindingForInstance(instance.instanceId);
-		turboFileTerminalBindingByPageId.set(pageInstanceId, instance.instanceId);
-		turboFilePageBindingByTerminalId.set(instance.instanceId, pageInstanceId);
+		turboFileTerminalBindingByPageKey.set(turboFileTerminalBindingKey(pageInstanceId, side), instance.instanceId);
+		turboFilePageBindingByTerminalId.set(instance.instanceId, { pageInstanceId, side });
 	}
 
-	private getBoundTerminalInstances(exceptInstanceId?: number): ITerminalInstance[] {
+	private getBoundTerminalsForPage(pageInstanceId: string): ITerminalInstance[] {
+		const instances: ITerminalInstance[] = [];
+		for (const side of ['left', 'right'] as const) {
+			const instance = this.getBoundTerminalForPage(pageInstanceId, side);
+			if (instance) {
+				instances.push(instance);
+			}
+		}
+		return instances;
+	}
+
+	private getBoundTerminalsForOtherPages(pageInstanceId: string): ITerminalInstance[] {
 		const instances: ITerminalInstance[] = [];
 		const seen = new Set<number>();
-		for (const terminalInstanceId of turboFileTerminalBindingByPageId.values()) {
-			if (terminalInstanceId === exceptInstanceId || seen.has(terminalInstanceId)) {
+		for (const [terminalInstanceId, binding] of [...turboFilePageBindingByTerminalId]) {
+			if (binding.pageInstanceId === pageInstanceId || seen.has(terminalInstanceId)) {
 				continue;
 			}
 			seen.add(terminalInstanceId);
@@ -8596,23 +8618,27 @@ export class TurboFileEditor extends EditorPane {
 		return instances;
 	}
 
-	private async revealBoundTerminalForPage(pageInstanceId: string, focus: boolean): Promise<void> {
-		const instance = this.getBoundTerminalForPage(pageInstanceId);
-		for (const candidate of this.getBoundTerminalInstances(instance?.instanceId)) {
+	private async revealBoundTerminalsForPage(pageInstanceId: string, activeSide: TurboFileTerminalSide | undefined, focus: boolean): Promise<void> {
+		for (const candidate of this.getBoundTerminalsForOtherPages(pageInstanceId)) {
 			this.terminalService.moveToBackground(candidate);
 		}
 
-		if (!instance) {
+		const pageTerminals = this.getBoundTerminalsForPage(pageInstanceId);
+		if (pageTerminals.length === 0) {
 			this.restoreTaskbarAfterTerminal();
 			this.terminalGroupService.hidePanel();
 			return;
 		}
 
-		await this.terminalService.showBackgroundTerminal(instance, true);
+		for (const instance of pageTerminals) {
+			await this.terminalService.showBackgroundTerminal(instance, true);
+		}
+
+		const activeInstance = (activeSide && this.getBoundTerminalForPage(pageInstanceId, activeSide)) || pageTerminals[0];
 		this.taskbarHiddenForTerminal = true;
-		this.terminalService.setActiveInstance(instance);
+		this.terminalService.setActiveInstance(activeInstance);
 		if (focus) {
-			await this.terminalService.focusInstance(instance);
+			await this.terminalService.focusInstance(activeInstance);
 			return;
 		}
 		await this.terminalGroupService.showPanel(false);
@@ -8627,30 +8653,33 @@ export class TurboFileEditor extends EditorPane {
 		if (!pageInstanceId) {
 			return;
 		}
-		await this.revealBoundTerminalForPage(pageInstanceId, false);
+		await this.revealBoundTerminalsForPage(pageInstanceId, undefined, false);
 	}
 
-	private clearTerminalBindingForPage(pageInstanceId: string): void {
-		const terminalInstanceId = turboFileTerminalBindingByPageId.get(pageInstanceId);
+	private clearTerminalBindingForPageSide(pageInstanceId: string, side: TurboFileTerminalSide): void {
+		const key = turboFileTerminalBindingKey(pageInstanceId, side);
+		const terminalInstanceId = turboFileTerminalBindingByPageKey.get(key);
 		if (terminalInstanceId === undefined) {
 			return;
 		}
 
-		turboFileTerminalBindingByPageId.delete(pageInstanceId);
-		if (turboFilePageBindingByTerminalId.get(terminalInstanceId) === pageInstanceId) {
+		turboFileTerminalBindingByPageKey.delete(key);
+		const binding = turboFilePageBindingByTerminalId.get(terminalInstanceId);
+		if (binding && binding.pageInstanceId === pageInstanceId && binding.side === side) {
 			turboFilePageBindingByTerminalId.delete(terminalInstanceId);
 		}
 	}
 
 	private clearTerminalBindingForInstance(terminalInstanceId: number): void {
-		const pageInstanceId = turboFilePageBindingByTerminalId.get(terminalInstanceId);
-		if (!pageInstanceId) {
+		const binding = turboFilePageBindingByTerminalId.get(terminalInstanceId);
+		if (!binding) {
 			return;
 		}
 
 		turboFilePageBindingByTerminalId.delete(terminalInstanceId);
-		if (turboFileTerminalBindingByPageId.get(pageInstanceId) === terminalInstanceId) {
-			turboFileTerminalBindingByPageId.delete(pageInstanceId);
+		const key = turboFileTerminalBindingKey(binding.pageInstanceId, binding.side);
+		if (turboFileTerminalBindingByPageKey.get(key) === terminalInstanceId) {
+			turboFileTerminalBindingByPageKey.delete(key);
 		}
 	}
 
