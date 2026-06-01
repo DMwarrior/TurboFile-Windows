@@ -427,6 +427,7 @@ const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
+const IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD = 100;
 const IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD = 100;
 const IMAGE_PREVIEW_ZOOM_MIN = 0.01;
 const IMAGE_PREVIEW_ZOOM_MAX = 40;
@@ -7638,17 +7639,41 @@ export class TurboFileEditor extends EditorPane {
 
 		try {
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
-			const result = await this.readImageGridImage(device, image.item.path, {
-				encoding: 'base64',
-				width: requestWidth,
-				quality: IMAGE_GRID_THUMB_QUALITY,
-				format: 'webp',
-				interpolation: 'lanczos',
-				sourceSize: image.item.rawSize,
-				sourceModified: image.item.rawModified
-			});
+			const shouldReadOriginalFirst = this.shouldUseOriginalImageGridCardSource(image.width, image.height);
+			let result = shouldReadOriginalFirst
+				? await this.readImageGridImage(device, image.item.path, {
+					encoding: 'base64',
+					forceOriginal: true,
+					sourceSize: image.item.rawSize,
+					sourceModified: image.item.rawModified
+				})
+				: await this.readImageGridImage(device, image.item.path, {
+					encoding: 'base64',
+					width: requestWidth,
+					quality: IMAGE_GRID_THUMB_QUALITY,
+					format: 'webp',
+					interpolation: 'lanczos',
+					sourceSize: image.item.rawSize,
+					sourceModified: image.item.rawModified
+				});
 			if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
 				return;
+			}
+			const resolvedWidth = result.width ?? image.width;
+			const resolvedHeight = result.height ?? image.height;
+			if (!shouldReadOriginalFirst && result.ok && this.shouldUseOriginalImageGridCardSource(resolvedWidth, resolvedHeight)) {
+				const originalResult = await this.readImageGridImage(device, image.item.path, {
+					encoding: 'base64',
+					forceOriginal: true,
+					sourceSize: image.item.rawSize,
+					sourceModified: image.item.rawModified
+				});
+				if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+					return;
+				}
+				if (originalResult.ok) {
+					result = originalResult;
+				}
 			}
 			this.releaseImageBlobUrl(image.thumbnailUrl);
 			const thumbnailUrl = result.ok ? this.createImageObjectUrl(result) : undefined;
@@ -7656,8 +7681,8 @@ export class TurboFileEditor extends EditorPane {
 			image.thumbnailUrl = thumbnailUrl;
 			image.thumbnailMime = result.mime || getMimeType(image.item.name);
 			image.thumbnailError = result.ok ? undefined : result.message;
-			image.width = result.width ?? image.width;
-			image.height = result.height ?? image.height;
+			image.width = result.width ?? resolvedWidth;
+			image.height = result.height ?? resolvedHeight;
 			if (result.ok) {
 				this.imageGridLoadedThumbnailIndexes.add(index);
 			}
@@ -7895,6 +7920,10 @@ export class TurboFileEditor extends EditorPane {
 		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
 		const scaled = Math.round(columnWidth * dpr);
 		return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
+	}
+
+	private shouldUseOriginalImageGridCardSource(width: number | undefined, height: number | undefined): boolean {
+		return !!width && !!height && width <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD && height <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD;
 	}
 
 	private getImagePreviewRequestSize(): { width: number; height: number; quality: number } {
