@@ -4392,14 +4392,21 @@ export class TurboFileEditor extends EditorPane {
 		stage.appendChild(tooltip);
 		figure.dataset.turbofilePixelInspectorAttached = 'true';
 		this.prepareImagePreviewAnalysis(image, src);
-		figure.addEventListener('mousemove', event => this.updateImagePreviewPixelTooltip(event, stage, tooltip, image, src));
+		figure.addEventListener('mousemove', event => {
+			if (figure.dataset.turbofilePixelInspectorAttached !== 'true') {
+				tooltip.classList.remove('is-visible');
+				return;
+			}
+			this.updateImagePreviewPixelTooltip(event, stage, tooltip, image, src);
+		});
 		figure.addEventListener('mouseleave', () => {
 			tooltip.classList.remove('is-visible');
 		});
 	}
 
 	private updateImagePreviewPixelTooltip(event: MouseEvent, stage: HTMLElement, tooltip: HTMLElement, image: TurboFileImageGridImage, src: string): void {
-		if (!this.imageGridState?.pixelInspectorVisible) {
+		const figure = event.currentTarget as HTMLElement | null;
+		if (!this.imageGridState?.pixelInspectorVisible || figure?.dataset.turbofilePixelInspectorAttached !== 'true' || !figure.classList.contains('is-pixel-inspector')) {
 			tooltip.classList.remove('is-visible');
 			return;
 		}
@@ -4637,7 +4644,8 @@ export class TurboFileEditor extends EditorPane {
 		figure.classList.toggle('is-pixel-inspector', state.pixelInspectorVisible);
 		const tooltip = stage.querySelector<HTMLElement>('.turbofile-image-preview-pixel-tooltip');
 		if (!state.pixelInspectorVisible) {
-			tooltip?.classList.remove('is-visible');
+			delete figure.dataset.turbofilePixelInspectorAttached;
+			tooltip?.remove();
 			return;
 		}
 

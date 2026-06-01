@@ -5152,6 +5152,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 0 0 10px 10px;
 	background: var(--tf-image-info-bg);
 	color: var(--tf-image-info-text);
+	font-family: var(--vscode-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
+	font-size: 12px;
+	font-weight: 600;
 	line-height: 1.2;
 	z-index: 2;
 	opacity: 0;
@@ -5170,7 +5173,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-image-page-card-dimensions {
 	color: var(--tf-image-info-text);
 	white-space: nowrap;
-	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
 }
 
 .turbofile-image-page-card-dimensions {
@@ -5674,6 +5676,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 10px;
 	background: var(--tf-preview-control-bg);
 	color: var(--tf-preview-control-text);
+	font-family: var(--vscode-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
+	font-size: 13px;
+	font-weight: 400;
 	box-shadow: var(--tf-preview-elevated-shadow);
 	backdrop-filter: none;
 	pointer-events: auto;
