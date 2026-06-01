@@ -2874,18 +2874,6 @@ export class TurboFileEditor extends EditorPane {
 				void this.cancelRunningTransfers(runningTransfers);
 			});
 			right.appendChild(cancel.element);
-		} else if (this.getStatusbarQuickTransferState()) {
-			const quickTransfer = this.getStatusbarQuickTransferState()!;
-			right.appendChild(this.createStatusbarTransferButton(
-				quickTransfer.sourceSide === 'left' ? Codicon.arrowRight : Codicon.arrowLeft,
-				quickTransfer.sourceSide === 'left' ? `传到右侧 ${quickTransfer.count} 项` : `传到左侧 ${quickTransfer.count} 项`,
-				() => { void this.transferSelected(quickTransfer.sourceSide, quickTransfer.targetSide); }
-			));
-			right.appendChild(this.createStatusbarTransferButton(
-				Codicon.reply,
-				quickTransfer.sourceSide === 'left' ? '剪切到右侧' : '剪切到左侧',
-				() => { void this.moveSelected(quickTransfer.sourceSide, quickTransfer.targetSide); }
-			));
 		} else if (latest) {
 			right.appendChild(this.renderStatusbarItem(this.getTaskIcon(latest), latest.status === 'running' ? '进行中' : latest.status === 'success' ? '完成' : latest.status === 'canceled' ? '已取消' : '失败'));
 		} else {
@@ -2908,38 +2896,6 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		current.replaceWith(this.renderTaskbar());
-	}
-
-	private getStatusbarQuickTransferState(): { sourceSide: 'left' | 'right'; targetSide: 'left' | 'right'; count: number } | undefined {
-		const leftCount = this.getSelectedTransferItems('left').length;
-		const rightCount = this.getSelectedTransferItems('right').length;
-		if (leftCount > 0 && rightCount === 0) {
-			return { sourceSide: 'left', targetSide: 'right', count: leftCount };
-		}
-		if (rightCount > 0 && leftCount === 0) {
-			return { sourceSide: 'right', targetSide: 'left', count: rightCount };
-		}
-		if (leftCount > 0) {
-			return { sourceSide: 'left', targetSide: 'right', count: leftCount };
-		}
-		if (rightCount > 0) {
-			return { sourceSide: 'right', targetSide: 'left', count: rightCount };
-		}
-		return undefined;
-	}
-
-	private createStatusbarTransferButton(icon: ThemeIcon, label: string, handler: () => void): HTMLButtonElement {
-		const button = $('button.turbofile-page-button.turbofile-statusbar-action') as HTMLButtonElement;
-		button.type = 'button';
-		button.title = label;
-		button.appendChild(renderIcon(icon));
-		button.append(label);
-		button.addEventListener('click', event => {
-			event.preventDefault();
-			event.stopPropagation();
-			handler();
-		});
-		return button;
 	}
 
 	private renderStatusbarItem(icon: ThemeIcon, text: string, title?: string): HTMLElement {
