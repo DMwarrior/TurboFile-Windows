@@ -236,11 +236,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	}
 
 	private updateShellForActiveEditor(): void {
-		if (this.getActiveTurboFileEditorInput()) {
-			this.activateTurboFileShell();
-			return;
-		}
-		this.restoreNativeShell();
+		this.activateTurboFileShell();
 	}
 
 	private activateTurboFileShell(): void {
@@ -256,21 +252,6 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		}
 		this.resizeTurboFileSideBar();
 		this.layoutService.layout();
-	}
-
-	private restoreNativeShell(): void {
-		this.shellMode = 'native';
-		if (!this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
-			this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
-		}
-		if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
-			this.layoutService.setPartHidden(false, Parts.STATUSBAR_PART);
-		}
-		if (this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
-			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
-		}
-		this.layoutService.layout();
-		this.removeNavigation();
 	}
 
 	private async openTurboFilePage(page: TurboFileWorkbenchPage, _hideSideBar: boolean): Promise<void> {
