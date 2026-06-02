@@ -635,6 +635,8 @@ export class TurboFileEditor extends EditorPane {
 	private taskbarHiddenForTerminal = false;
 	private terminalRevealInProgress = false;
 	private terminalPanelVisibilityInProgress = false;
+	private terminalPanelVisibilityChangeDepth = 0;
+	private terminalPanelVisibilityResetHandle: number | undefined;
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
@@ -799,6 +801,10 @@ export class TurboFileEditor extends EditorPane {
 		if (this.appearanceTransitionTimer !== undefined) {
 			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
 			this.appearanceTransitionTimer = undefined;
+		}
+		if (this.terminalPanelVisibilityResetHandle !== undefined) {
+			getWindow(this.container).clearTimeout(this.terminalPanelVisibilityResetHandle);
+			this.terminalPanelVisibilityResetHandle = undefined;
 		}
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
@@ -8491,7 +8497,6 @@ export class TurboFileEditor extends EditorPane {
 		const title = this.getTerminalTitle(side, device);
 		try {
 			turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
-			await this.revealBoundTerminalsForPage(pageInstanceId, undefined, false);
 			if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
 				const defaultProfile = this.terminalProfileService.getDefaultProfile();
 				const instance = await this.createAndRevealTerminal({
@@ -8558,21 +8563,43 @@ export class TurboFileEditor extends EditorPane {
 		turboFileTerminalPanelHiddenByPageId.add(pageInstanceId);
 	}
 
-	private runTerminalPanelVisibilityChange<T>(callback: () => T): T {
+	private beginTerminalPanelVisibilityChange(): void {
+		if (this.terminalPanelVisibilityResetHandle !== undefined) {
+			getWindow(this.container).clearTimeout(this.terminalPanelVisibilityResetHandle);
+			this.terminalPanelVisibilityResetHandle = undefined;
+		}
+		this.terminalPanelVisibilityChangeDepth++;
 		this.terminalPanelVisibilityInProgress = true;
+	}
+
+	private endTerminalPanelVisibilityChange(): void {
+		this.terminalPanelVisibilityChangeDepth = Math.max(0, this.terminalPanelVisibilityChangeDepth - 1);
+		if (this.terminalPanelVisibilityChangeDepth > 0) {
+			return;
+		}
+		this.terminalPanelVisibilityResetHandle = getWindow(this.container).setTimeout(() => {
+			this.terminalPanelVisibilityResetHandle = undefined;
+			if (this.terminalPanelVisibilityChangeDepth === 0) {
+				this.terminalPanelVisibilityInProgress = false;
+			}
+		}, 100);
+	}
+
+	private runTerminalPanelVisibilityChange<T>(callback: () => T): T {
+		this.beginTerminalPanelVisibilityChange();
 		try {
 			return callback();
 		} finally {
-			this.terminalPanelVisibilityInProgress = false;
+			this.endTerminalPanelVisibilityChange();
 		}
 	}
 
 	private async runTerminalPanelVisibilityChangeAsync<T>(callback: () => Promise<T>): Promise<T> {
-		this.terminalPanelVisibilityInProgress = true;
+		this.beginTerminalPanelVisibilityChange();
 		try {
 			return await callback();
 		} finally {
-			this.terminalPanelVisibilityInProgress = false;
+			this.endTerminalPanelVisibilityChange();
 		}
 	}
 
