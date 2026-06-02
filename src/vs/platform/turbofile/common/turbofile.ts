@@ -139,7 +139,7 @@ export interface ITurboFileBatchTransferRequest {
 
 export interface ITurboFileTransferResult {
 	readonly ok: boolean;
-	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'scp-upload' | 'scp-download' | 'rsync-upload' | 'rsync-download' | 'scp-direct' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel' | 'rsync-relay';
+	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'scp-upload' | 'scp-download' | 'rsync-upload' | 'rsync-download' | 'scp-direct' | 'scp-relay' | 'tar-direct' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel' | 'rsync-relay';
 	readonly bytes: number;
 	readonly message: string;
 	readonly canceled?: boolean;
@@ -172,6 +172,7 @@ export interface ITurboFileTransferProgressEvent {
 	readonly totalBytes: number;
 	readonly phase: 'prepare' | 'transfer' | 'relay-download' | 'relay-upload' | 'rsync-direct' | 'complete';
 	readonly detail?: string;
+	readonly strategy?: ITurboFileTransferResult['strategy'];
 	readonly completedItems?: number;
 	readonly totalItems?: number;
 	readonly currentName?: string;
