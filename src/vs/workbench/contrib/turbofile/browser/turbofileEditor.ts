@@ -8243,6 +8243,25 @@ export class TurboFileEditor extends EditorPane {
 		return this.remoteFileSystemProvider;
 	}
 
+	/**
+	 * Keeps transfer pages on the left and opened documents on the right: returns the tab index
+	 * immediately after the last TurboFile transfer page in the current group, so a document never
+	 * gets inserted between two transfer pages. Returns undefined to fall back to the default slot.
+	 */
+	private getDocumentEditorTargetIndex(): number | undefined {
+		const editors = this.group?.editors;
+		if (!editors || editors.length === 0) {
+			return undefined;
+		}
+		let index = 0;
+		for (let i = 0; i < editors.length; i++) {
+			if (editors[i] instanceof TurboFileEditorInput) {
+				index = i + 1;
+			}
+		}
+		return index;
+	}
+
 	private async openNativeDocument(side: 'left' | 'right', item: TurboFileFileItem, device: TurboFileDevice): Promise<void> {
 		if (!item.path) {
 			return;
@@ -8266,7 +8285,8 @@ export class TurboFileEditor extends EditorPane {
 				languageId,
 				options: {
 					pinned: true,
-					override: DEFAULT_EDITOR_ASSOCIATION.id
+					override: DEFAULT_EDITOR_ASSOCIATION.id,
+					index: this.getDocumentEditorTargetIndex()
 				}
 			}).catch(reportOpenError);
 		} catch (error) {
