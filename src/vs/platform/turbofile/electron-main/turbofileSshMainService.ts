@@ -2026,9 +2026,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	 * - `target-pull`: otherwise, if target can reach source's SSH port, target pulls the file.
 	 * - `unavailable`: neither direction is reachable, fall back to relay.
 	 *
-	 * Both directions are probed in parallel and each probe is hard-capped to ~1s, so the
-	 * whole decision completes within roughly a second. Probes reuse the already pooled
-	 * SSH connections to keep the check fast and accurate.
+	 * Directions are tried in order (source-push first, then target-pull) and each probe is
+	 * hard-capped by a short timeout, so the common "source can push" case returns in a few
+	 * hundred milliseconds while a stuck/failing direction is abandoned quickly in favor of the
+	 * other one. Probes reuse the already pooled SSH connections to keep the check fast.
 	 */
 	private async resolveDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
 		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
@@ -2060,15 +2061,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async probeDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
 		this.throwIfTransferCanceled(progressId);
-		const [sourceCanReachTarget, targetCanReachSource] = await Promise.all([
-			this.probeSshRouteReachable(source, target, progressId),
-			this.probeSshRouteReachable(target, source, progressId)
-		]);
-		this.throwIfTransferCanceled(progressId);
-		if (sourceCanReachTarget) {
+		if (await this.probeSshRouteReachable(source, target, progressId)) {
 			return 'source-push';
 		}
-		if (targetCanReachSource) {
+		this.throwIfTransferCanceled(progressId);
+		if (await this.probeSshRouteReachable(target, source, progressId)) {
 			return 'target-pull';
 		}
 		return 'unavailable';
@@ -2084,7 +2081,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return false;
 		}
 		this.throwIfTransferCanceled(progressId);
-		const command = buildSshPortReachabilityCommand(remote.connection.host, remote.connection.port || 22);
+		const command = buildSshReachabilityCommand(remote.connection);
 		try {
 			let output = '';
 			await this.withDirectorySshClient(executor, client => this.execRemote(client, command, {
@@ -5294,16 +5291,27 @@ function getDirectSshRouteCacheKey(source: ITurboFileSshConnectionOptions, targe
 }
 
 /**
- * Builds a shell command (run on the executor host) that tests whether the executor can open
- * a TCP connection to `host:port` (the peer's SSH port). It prefers `nc` and falls back to a
- * timeout-bounded bash `/dev/tcp` probe. The command always exits 0 and prints `REACH_OK` to
- * stdout on success, so a negative result is reported via stdout rather than a non-zero exit
- * (which would otherwise tear down the pooled SSH session used to run it).
+ * Builds a shell command (run on the executor host) that tests whether the executor can reach
+ * `remote` over SSH, used to decide the direct-transfer direction. The command always exits 0
+ * and prints `REACH_OK` to stdout on success, so a negative result is reported via stdout rather
+ * than a non-zero exit (which would otherwise tear down the pooled SSH session used to run it).
+ *
+ * - Password auth: performs a real, hard-timeout-bounded SSH login (`ssh ... true` via `sshpass`).
+ *   This mirrors exactly what the direct transfer will do, so a direction whose login would hang
+ *   (e.g. multi-round keyboard-interactive) or fail is rejected within the timeout, letting the
+ *   transfer fall back to the opposite direction (or relay) instead of stalling at 0 bytes.
+ * - Key/agent auth: a TCP connect to the SSH port is enough, since key auth never blocks on an
+ *   interactive prompt (it fails fast if unauthorized).
  */
-function buildSshPortReachabilityCommand(host: string, port: number): string {
-	const quotedHost = quotePosixShellArg(host);
-	const safePort = Math.max(1, Math.floor(port) || 22);
-	const devTcpProbe = quotePosixShellArg(`exec 3<>/dev/tcp/${host}/${safePort}`);
+function buildSshReachabilityCommand(remote: ITurboFileSshConnectionOptions): string {
+	const safePort = Math.max(1, Math.floor(remote.port || 22) || 22);
+	const userHost = quotePosixShellArg(`${remote.username}@${remote.host}`);
+	if (remote.password) {
+		const loginCommand = `${buildSshpassPrefix(remote.password)}${buildDirectScpSshCommand(safePort, true)} ${userHost} true`;
+		return `if command -v sshpass >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout 2 ${loginCommand} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
+	}
+	const quotedHost = quotePosixShellArg(remote.host);
+	const devTcpProbe = quotePosixShellArg(`exec 3<>/dev/tcp/${remote.host}/${safePort}`);
 	return `if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then timeout 1 bash -c ${devTcpProbe} >/dev/null 2>&1 && printf REACH_OK; elif command -v nc >/dev/null 2>&1; then nc -z -w1 ${quotedHost} ${safePort} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
 }
 
