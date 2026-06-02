@@ -55,6 +55,11 @@ const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_SSH_ROUTE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DIRECT_SSH_ROUTE_UNAVAILABLE_CACHE_TTL_MS = 15 * 1000;
+// Hard wall-clock budget for deciding the direct route. Both directions are probed in parallel
+// and the first one that confirms direct reachability wins; if none confirms within this budget
+// the transfer falls back to relay. Kept under ~1s so a transfer always starts quickly.
+const DIRECT_SSH_ROUTE_DECISION_DEADLINE_MS = 900;
+const DIRECT_SSH_ROUTE_PROBE_TIMEOUT_SECONDS = 1;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
@@ -2026,10 +2031,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	 * - `target-pull`: otherwise, if target can reach source's SSH port, target pulls the file.
 	 * - `unavailable`: neither direction is reachable, fall back to relay.
 	 *
-	 * Directions are tried in order (source-push first, then target-pull) and each probe is
-	 * hard-capped by a short timeout, so the common "source can push" case returns in a few
-	 * hundred milliseconds while a stuck/failing direction is abandoned quickly in favor of the
-	 * other one. Probes reuse the already pooled SSH connections to keep the check fast.
+	 * Both directions are probed in parallel and the first one that confirms a direct route wins,
+	 * so a stuck/failing direction never blocks the decision. A hard deadline caps the whole check
+	 * under ~1s, and results are cached, so transfers start quickly. Probes reuse the already
+	 * pooled SSH connections to keep the check fast.
 	 */
 	private async resolveDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
 		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
@@ -2061,14 +2066,32 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async probeDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
 		this.throwIfTransferCanceled(progressId);
-		if (await this.probeSshRouteReachable(source, target, progressId)) {
-			return 'source-push';
-		}
-		this.throwIfTransferCanceled(progressId);
-		if (await this.probeSshRouteReachable(target, source, progressId)) {
-			return 'target-pull';
-		}
-		return 'unavailable';
+		// Probe both directions in parallel and take the FIRST that confirms a direct route.
+		// The working direction returns in a few hundred ms on a LAN, while a stuck/failing
+		// direction never blocks the decision. A hard deadline guarantees we start the transfer
+		// (direct or relay) within ~1s even if both probes are slow.
+		return await new Promise<TurboFileDirectScpRouteMode>(resolve => {
+			let settled = false;
+			let pending = 2;
+			const finish = (mode: TurboFileDirectScpRouteMode): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(deadline);
+				resolve(mode);
+			};
+			const onProbe = (reachable: boolean, mode: TurboFileDirectScpRouteMode): void => {
+				if (reachable) {
+					finish(mode);
+				} else if (--pending === 0) {
+					finish('unavailable');
+				}
+			};
+			const deadline = setTimeout(() => finish('unavailable'), DIRECT_SSH_ROUTE_DECISION_DEADLINE_MS);
+			void this.probeSshRouteReachable(source, target, progressId).then(ok => onProbe(ok, 'source-push'), () => onProbe(false, 'source-push'));
+			void this.probeSshRouteReachable(target, source, progressId).then(ok => onProbe(ok, 'target-pull'), () => onProbe(false, 'target-pull'));
+		});
 	}
 
 	/**
@@ -5306,13 +5329,14 @@ function getDirectSshRouteCacheKey(source: ITurboFileSshConnectionOptions, targe
 function buildSshReachabilityCommand(remote: ITurboFileSshConnectionOptions): string {
 	const safePort = Math.max(1, Math.floor(remote.port || 22) || 22);
 	const userHost = quotePosixShellArg(`${remote.username}@${remote.host}`);
+	const timeoutSeconds = DIRECT_SSH_ROUTE_PROBE_TIMEOUT_SECONDS;
 	if (remote.password) {
 		const loginCommand = `${buildSshpassPrefix(remote.password)}${buildDirectScpSshCommand(safePort, true)} ${userHost} true`;
-		return `if command -v sshpass >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout 2 ${loginCommand} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
+		return `if command -v sshpass >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout ${timeoutSeconds} ${loginCommand} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
 	}
 	const quotedHost = quotePosixShellArg(remote.host);
 	const devTcpProbe = quotePosixShellArg(`exec 3<>/dev/tcp/${remote.host}/${safePort}`);
-	return `if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then timeout 1 bash -c ${devTcpProbe} >/dev/null 2>&1 && printf REACH_OK; elif command -v nc >/dev/null 2>&1; then nc -z -w1 ${quotedHost} ${safePort} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
+	return `if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then timeout ${timeoutSeconds} bash -c ${devTcpProbe} >/dev/null 2>&1 && printf REACH_OK; elif command -v nc >/dev/null 2>&1; then nc -z -w1 ${quotedHost} ${safePort} >/dev/null 2>&1 && printf REACH_OK; fi; true`;
 }
 
 function getSshConnectionRouteKey(connection: ITurboFileSshConnectionOptions): string {
