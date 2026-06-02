@@ -53,8 +53,6 @@ const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
 const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
-const DIRECT_SSH_ROUTE_CACHE_TTL_MS = 5 * 60 * 1000;
-const DIRECT_SSH_ROUTE_UNAVAILABLE_CACHE_TTL_MS = 15 * 1000;
 // Hard wall-clock budget for deciding the direct route. Both directions are probed in parallel
 // and the first one that confirms direct reachability wins; if none confirms within this budget
 // the transfer falls back to relay. Kept under ~1s so a transfer always starts quickly.
@@ -254,11 +252,6 @@ interface IImageThumbnailCacheMetadata {
 type TurboFileDirectRsyncRouteMode = 'source-push' | 'target-pull' | 'unavailable';
 type TurboFileDirectScpRouteMode = TurboFileDirectRsyncRouteMode;
 
-interface IDirectSshRouteCacheEntry {
-	readonly mode: TurboFileDirectScpRouteMode;
-	readonly checkedAt: number;
-}
-
 interface IRemoteScpCredential {
 	readonly identityPath?: string;
 	readonly cleanupCommand?: string;
@@ -282,7 +275,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
-	private readonly directSshRouteCache = new Map<string, IDirectSshRouteCacheEntry>();
+	private readonly directSshRouteCache = new Map<string, TurboFileDirectScpRouteMode>();
 	private readonly directSshRoutePending = new Map<string, Promise<TurboFileDirectScpRouteMode>>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
@@ -2042,11 +2035,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
+		// A confirmed direct route is cached for the lifetime of the app session: a direct-transfer
+		// failure clears the entry (see clearDirectSshRouteCache), so a route that later breaks
+		// self-heals on the next attempt. An "unavailable" result is never cached, so a pair that
+		// currently can't direct-connect is always re-probed and upgraded to direct the moment it
+		// becomes reachable.
 		const cached = this.directSshRouteCache.get(cacheKey);
-		const now = Date.now();
-		const cacheTtl = cached?.mode === 'unavailable' ? DIRECT_SSH_ROUTE_UNAVAILABLE_CACHE_TTL_MS : DIRECT_SSH_ROUTE_CACHE_TTL_MS;
-		if (cached && now - cached.checkedAt < cacheTtl) {
-			return cached.mode;
+		if (cached) {
+			return cached;
 		}
 
 		const pending = this.directSshRoutePending.get(cacheKey);
@@ -2055,7 +2051,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const probe = this.probeDirectSshRoute(source, target, progressId).then(mode => {
-			this.directSshRouteCache.set(cacheKey, { mode, checkedAt: Date.now() });
+			if (mode !== 'unavailable') {
+				this.directSshRouteCache.set(cacheKey, mode);
+			}
 			return mode;
 		}).finally(() => {
 			this.directSshRoutePending.delete(cacheKey);
@@ -2353,6 +2351,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
+			this.clearDirectSshRouteCache(request.source, request.target);
 			throw new Error(`Direct SFTP failed: ${formatTransferError(error)}`);
 		} finally {
 			stopGrowthTiming();
