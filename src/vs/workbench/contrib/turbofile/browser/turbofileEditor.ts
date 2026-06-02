@@ -8605,24 +8605,6 @@ export class TurboFileEditor extends EditorPane {
 		}, 100);
 	}
 
-	private runTerminalPanelVisibilityChange<T>(callback: () => T): T {
-		this.beginTerminalPanelVisibilityChange();
-		try {
-			return callback();
-		} finally {
-			this.endTerminalPanelVisibilityChange();
-		}
-	}
-
-	private async runTerminalPanelVisibilityChangeAsync<T>(callback: () => Promise<T>): Promise<T> {
-		this.beginTerminalPanelVisibilityChange();
-		try {
-			return await callback();
-		} finally {
-			this.endTerminalPanelVisibilityChange();
-		}
-	}
-
 	private bindTerminalToPage(pageInstanceId: string, instance: ITerminalInstance): void {
 		this.clearTerminalBindingForInstance(instance.instanceId);
 		turboFileTerminalPageByTerminalId.set(instance.instanceId, pageInstanceId);
@@ -8662,39 +8644,48 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async revealBoundTerminalsForPage(pageInstanceId: string, activeInstance: ITerminalInstance | undefined, focus: boolean): Promise<void> {
-		for (const candidate of this.getBoundTerminalsForOtherPages(pageInstanceId)) {
-			this.terminalService.moveToBackground(candidate);
-		}
+		// Guard the ENTIRE reveal, including the background/foreground swaps below. Moving another
+		// page's terminals to the background can momentarily hide the panel; that must never be
+		// mistaken for the user manually hiding it, otherwise this page would be remembered as
+		// "panel hidden" and its terminals would appear to vanish on the next page switch.
+		this.beginTerminalPanelVisibilityChange();
+		try {
+			for (const candidate of this.getBoundTerminalsForOtherPages(pageInstanceId)) {
+				this.terminalService.moveToBackground(candidate);
+			}
 
-		const pageTerminals = this.getBoundTerminalsForPage(pageInstanceId);
-		if (pageTerminals.length === 0) {
-			this.restoreTaskbarAfterTerminal();
-			this.runTerminalPanelVisibilityChange(() => this.terminalGroupService.hidePanel());
-			return;
-		}
+			const pageTerminals = this.getBoundTerminalsForPage(pageInstanceId);
+			if (pageTerminals.length === 0) {
+				this.restoreTaskbarAfterTerminal();
+				this.terminalGroupService.hidePanel();
+				return;
+			}
 
-		for (const instance of pageTerminals) {
-			await this.terminalService.showBackgroundTerminal(instance, true);
-		}
+			for (const instance of pageTerminals) {
+				await this.terminalService.showBackgroundTerminal(instance, true);
+			}
 
-		const lastActiveTerminalId = turboFileLastActiveTerminalByPageId.get(pageInstanceId);
-		const lastActiveInstance = lastActiveTerminalId !== undefined
-			? pageTerminals.find(instance => instance.instanceId === lastActiveTerminalId)
-			: undefined;
-		activeInstance = activeInstance ?? lastActiveInstance ?? pageTerminals[0];
-		turboFileLastActiveTerminalByPageId.set(pageInstanceId, activeInstance.instanceId);
-		if (!focus && turboFileTerminalPanelHiddenByPageId.has(pageInstanceId)) {
-			this.restoreTaskbarAfterTerminal();
-			this.runTerminalPanelVisibilityChange(() => this.terminalGroupService.hidePanel());
-			return;
+			const lastActiveTerminalId = turboFileLastActiveTerminalByPageId.get(pageInstanceId);
+			const lastActiveInstance = lastActiveTerminalId !== undefined
+				? pageTerminals.find(instance => instance.instanceId === lastActiveTerminalId)
+				: undefined;
+			activeInstance = activeInstance ?? lastActiveInstance ?? pageTerminals[0];
+			turboFileLastActiveTerminalByPageId.set(pageInstanceId, activeInstance.instanceId);
+			if (!focus && turboFileTerminalPanelHiddenByPageId.has(pageInstanceId)) {
+				this.restoreTaskbarAfterTerminal();
+				this.terminalGroupService.hidePanel();
+				return;
+			}
+			this.taskbarHiddenForTerminal = true;
+			this.terminalService.setActiveInstance(activeInstance);
+			if (focus) {
+				await this.terminalService.focusInstance(activeInstance);
+				return;
+			}
+			await this.terminalGroupService.showPanel(false);
+		} finally {
+			this.endTerminalPanelVisibilityChange();
 		}
-		this.taskbarHiddenForTerminal = true;
-		this.terminalService.setActiveInstance(activeInstance);
-		if (focus) {
-			await this.runTerminalPanelVisibilityChangeAsync(() => this.terminalService.focusInstance(activeInstance));
-			return;
-		}
-		await this.runTerminalPanelVisibilityChangeAsync(() => this.terminalGroupService.showPanel(false));
 	}
 
 	private async syncActiveTerminalForCurrentPage(): Promise<void> {
