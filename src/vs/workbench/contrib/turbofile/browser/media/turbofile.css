@@ -136,6 +136,14 @@ body.turbofile-shell.turbofile-main-editor-visible .part.statusbar {
 	background-color: var(--vscode-activityBar-background) !important;
 }
 
+/* The side bar always hosts the TurboFile navigation. Keep its TurboFile background even when a
+   document editor is active (which hides the main TurboFile editor pane and therefore drops the
+   `turbofile-main-editor-visible` class), so the left nav looks identical whether or not a
+   document is open. */
+body.turbofile-shell .part.sidebar {
+	background-color: var(--vscode-activityBar-background) !important;
+}
+
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel > .content,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .composite.title,
