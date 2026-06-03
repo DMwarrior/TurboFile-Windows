@@ -615,6 +615,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly paneDirectoryInflight = new Map<string, Promise<TurboFileDirectoryCacheEntry>>();
 	private readonly paneDeviceSnapshots = new Map<string, TurboFilePaneDeviceSnapshot>();
 	private activePage: TurboFileWorkbenchPage = 'transfer';
+	private activeFilePaneSide: 'left' | 'right' = 'left';
 	private isTaskLogVisible = false;
 	private localWindowsDevice: TurboFileDevice;
 	private readonly paneStates: Record<'left' | 'right', TurboFilePaneState>;
@@ -842,6 +843,7 @@ export class TurboFileEditor extends EditorPane {
 		content.appendChild(this.renderActivePage());
 		shell.appendChild(content);
 		this.container.appendChild(shell);
+		this.registerWorkbenchKeyboardShortcuts();
 		this.ensureTitlebarThemeToggle();
 
 		if (this.previewState) {
@@ -882,6 +884,74 @@ export class TurboFileEditor extends EditorPane {
 			return this.renderImageGridPage();
 		}
 		return this.renderTransferPage();
+	}
+
+	private registerWorkbenchKeyboardShortcuts(): void {
+		if (!this.container) {
+			return;
+		}
+
+		const handleKeydown = (event: KeyboardEvent) => this.handleWorkbenchKeydown(event);
+		this.container.addEventListener('keydown', handleKeydown);
+		this.renderDisposables.add({ dispose: () => this.container?.removeEventListener('keydown', handleKeydown) });
+	}
+
+	private handleWorkbenchKeydown(event: KeyboardEvent): void {
+		if (event.defaultPrevented || event.key !== 'Delete' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
+			return;
+		}
+
+		const side = this.getDeleteKeyboardTargetSide(event);
+		if (!side) {
+			return;
+		}
+
+		event.preventDefault();
+		void this.deleteSelected(side);
+	}
+
+	private getDeleteKeyboardTargetSide(event: KeyboardEvent): 'left' | 'right' | undefined {
+		if (this.activePage !== 'transfer' || this.dialogState || this.previewState || this.imageGridState?.previewVisible || this.isDeviceFormVisible || this.isTaskLogVisible) {
+			return undefined;
+		}
+
+		const target = event.target;
+		if (this.isEditableKeyboardTarget(target)) {
+			return undefined;
+		}
+
+		const targetElement = target instanceof HTMLElement ? target : undefined;
+		if (targetElement?.closest('.turbofile-inline-rename, .turbofile-dialog, .turbofile-device-form, .turbofile-device-select.is-open')) {
+			return undefined;
+		}
+
+		const targetSide = this.getPaneSideFromElement(targetElement);
+		if (targetSide) {
+			this.activeFilePaneSide = targetSide;
+			return targetSide;
+		}
+
+		const leftSelected = this.getSelectedTransferItems('left').length > 0;
+		const rightSelected = this.getSelectedTransferItems('right').length > 0;
+		if (leftSelected && rightSelected) {
+			return this.activeFilePaneSide;
+		}
+		if (leftSelected) {
+			return 'left';
+		}
+		if (rightSelected) {
+			return 'right';
+		}
+		return undefined;
+	}
+
+	private getPaneSideFromElement(element: HTMLElement | undefined): 'left' | 'right' | undefined {
+		const side = element?.closest<HTMLElement>('.turbofile-pane[data-turbofile-side]')?.dataset.turbofileSide;
+		return side === 'left' || side === 'right' ? side : undefined;
+	}
+
+	private setActiveFilePaneSide(side: 'left' | 'right'): void {
+		this.activeFilePaneSide = side;
 	}
 
 	private renderTransferPage(): HTMLElement {
@@ -1915,6 +1985,8 @@ export class TurboFileEditor extends EditorPane {
 		pane.dataset.turbofileSide = side;
 		pane.classList.toggle('is-maximized', this.maximizedPane === side);
 		pane.classList.toggle('is-hidden-by-maximize', !!this.maximizedPane && this.maximizedPane !== side);
+		pane.addEventListener('pointerdown', () => this.setActiveFilePaneSide(side));
+		pane.addEventListener('focusin', () => this.setActiveFilePaneSide(side));
 		const browserTitle = side === 'left' ? '左侧文件浏览' : '右侧文件浏览';
 
 		const header = $('.turbofile-pane-header');
@@ -1960,6 +2032,7 @@ export class TurboFileEditor extends EditorPane {
 		list.classList.add('show-file-icons');
 		list.tabIndex = 0;
 		list.addEventListener('pointerdown', event => {
+			this.setActiveFilePaneSide(side);
 			if ((event.target as HTMLElement | null)?.closest('.turbofile-inline-rename')) {
 				return;
 			}
@@ -1975,11 +2048,13 @@ export class TurboFileEditor extends EditorPane {
 		list.addEventListener('keydown', event => {
 			if (event.key === 'F2') {
 				event.preventDefault();
+				this.setActiveFilePaneSide(side);
 				void this.renameSelected(side);
 				return;
 			}
 			if (event.key === 'Delete') {
 				event.preventDefault();
+				this.setActiveFilePaneSide(side);
 				void this.deleteSelected(side);
 				return;
 			}
@@ -1990,11 +2065,13 @@ export class TurboFileEditor extends EditorPane {
 				const key = event.key.toLowerCase();
 				if (key === 'a') {
 					event.preventDefault();
+					this.setActiveFilePaneSide(side);
 					this.selectAllPaneItems(side);
 					return;
 				}
 				if (key === 'c' || key === 'x') {
 					event.preventDefault();
+					this.setActiveFilePaneSide(side);
 					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy');
 					return;
 				}
@@ -2588,6 +2665,7 @@ export class TurboFileEditor extends EditorPane {
 		if (item.path && !item.parent && !renaming) {
 			row.draggable = true;
 			row.addEventListener('dragstart', event => {
+				this.setActiveFilePaneSide(side);
 				this.ensureItemInSelection(side, item);
 				const operation = this.getInternalDragOperation(side, item, event);
 				if (event.dataTransfer) {
@@ -2600,6 +2678,7 @@ export class TurboFileEditor extends EditorPane {
 			});
 		}
 		row.addEventListener('click', event => {
+			this.setActiveFilePaneSide(side);
 			if (renaming && (event.target as HTMLElement | null)?.closest('.turbofile-inline-rename')) {
 				return;
 			}
@@ -2631,6 +2710,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		row.addEventListener('contextmenu', event => {
+			this.setActiveFilePaneSide(side);
 			this.showFileContextMenu(side, item, event);
 		});
 
@@ -5115,6 +5195,7 @@ export class TurboFileEditor extends EditorPane {
 	private showFileContextMenu(side: 'left' | 'right', item: TurboFileFileItem, event: MouseEvent): void {
 		event.preventDefault();
 		event.stopPropagation();
+		this.setActiveFilePaneSide(side);
 		const anchor = new StandardMouseEvent(getWindow(event), event);
 		if (item.path) {
 			const state = this.paneStates[side];
@@ -5135,6 +5216,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private showPaneContextMenu(side: 'left' | 'right', event: MouseEvent): void {
 		event.preventDefault();
+		this.setActiveFilePaneSide(side);
 		const anchor = new StandardMouseEvent(getWindow(event), event);
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
@@ -5460,6 +5542,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private selectAllPaneItems(side: 'left' | 'right'): void {
+		this.setActiveFilePaneSide(side);
 		const state = this.paneStates[side];
 		const selectablePaths = state.items
 			.filter(item => !!item.path && !item.parent)
@@ -9323,6 +9406,7 @@ export class TurboFileEditor extends EditorPane {
 	private showWindowsLocationMenu(side: 'left' | 'right', event: MouseEvent | KeyboardEvent): void {
 		event.preventDefault();
 		event.stopPropagation();
+		this.setActiveFilePaneSide(side);
 		const anchor = event instanceof MouseEvent ? new StandardMouseEvent(getWindow(event), event) : event.currentTarget as HTMLElement;
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
