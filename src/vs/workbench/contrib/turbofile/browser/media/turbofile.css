@@ -2333,16 +2333,16 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-inline-rename .monaco-inputbox {
 	width: 100%;
-	min-height: 24px;
+	min-height: 26px;
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	height: 22px;
-	padding: 1px 4px;
+	height: 24px;
+	padding: 2px 4px 3px;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: 20px;
+	line-height: 21px;
 }
 
 .turbofile-file-row.is-clickable:active .turbofile-file-name {

@@ -2810,14 +2810,14 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			finished = true;
-			const nextName = inputBox.value.trim();
+			const nextName = inputBox.value;
 			disposables.dispose();
 			if (!this.isInlineRenameTarget(side, item)) {
 				return;
 			}
 			this.inlineRename = undefined;
 			this.render();
-			if (success && nextName && nextName !== item.name && !this.validateRenameName(side, item, nextName)) {
+			if (success && nextName.trim() && nextName !== item.name && !this.validateRenameName(side, item, nextName)) {
 				void this.performRename(side, item, nextName);
 			}
 		};
@@ -6958,21 +6958,20 @@ export class TurboFileEditor extends EditorPane {
 
 	private validateRenameName(side: 'left' | 'right', item: TurboFileFileItem, value: string): string | undefined {
 		const device = this.getPaneDevice(side);
-		const name = value.trim();
-		if (!name) {
+		if (!value.trim()) {
 			return '名称不能为空。';
 		}
-		if (name === '.' || name === '..') {
+		if (value === '.' || value === '..') {
 			return '不能使用 . 或 .. 作为名称。';
 		}
-		if (name.includes('/') || name.includes('\\')) {
+		if (value.includes('/') || value.includes('\\')) {
 			return '名称不能包含路径分隔符。';
 		}
-		if (device && this.isWindowsDevice(device) && /[<>:"|?*]/.test(name)) {
+		if (device && this.isWindowsDevice(device) && /[<>:"|?*]/.test(value)) {
 			return 'Windows 名称不能包含 < > : " | ? *。';
 		}
 		const caseInsensitive = !device || this.isWindowsDevice(device);
-		const nameKey = caseInsensitive ? name.toLocaleLowerCase() : name;
+		const nameKey = caseInsensitive ? value.toLocaleLowerCase() : value;
 		const duplicate = this.paneStates[side].items.some(candidate => {
 			if (!candidate.path || candidate.parent || candidate.path === item.path) {
 				return false;
@@ -6988,11 +6987,11 @@ export class TurboFileEditor extends EditorPane {
 
 	private async performRename(side: 'left' | 'right', item: TurboFileFileItem, nextName: string): Promise<void> {
 		const device = this.getPaneDevice(side);
-		if (!item.path || !device || item.parent || !nextName.trim() || nextName.trim() === item.name) {
+		if (!item.path || !device || item.parent || !nextName.trim() || nextName === item.name) {
 			return;
 		}
 
-		const targetName = nextName.trim();
+		const targetName = nextName;
 		const targetPath = joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(device));
 		const optimisticRename = this.applyOptimisticRename(side, item, targetName, targetPath);
 		const task = this.beginTask('rename', `重命名 ${item.name}`, `${item.name} -> ${targetName}`);
