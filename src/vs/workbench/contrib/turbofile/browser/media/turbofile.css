@@ -281,16 +281,19 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	height: 100%;
 	min-height: 0;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 24px;
+	grid-template-rows: minmax(0, 1fr);
+	padding-bottom: 24px;
+	box-sizing: border-box;
 	overflow: hidden;
 }
 
 .turbofile-transfer-page.has-live-transfer {
-	grid-template-rows: minmax(0, 1fr) 24px;
+	grid-template-rows: minmax(0, 1fr);
 }
 
 .turbofile-transfer-page.is-terminal-focused {
 	grid-template-rows: minmax(0, 1fr);
+	padding-bottom: 0;
 }
 
 .turbofile-page-nav {
@@ -1547,7 +1550,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	position: fixed;
 	left: 0;
 	top: 35px;
-	bottom: 22px;
+	bottom: 0;
 	width: 48px;
 	z-index: 20;
 	height: auto;
@@ -2397,6 +2400,11 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-taskbar {
+	position: fixed;
+	left: 48px;
+	right: 0;
+	bottom: 0;
+	z-index: 40;
 	display: grid;
 	grid-template-rows: minmax(0, 1fr);
 	box-sizing: border-box;
@@ -2412,6 +2420,10 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	font-family: inherit;
 	font-size: 11px;
 	font-weight: 400;
+}
+
+body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) .turbofile-taskbar {
+	left: 152px;
 }
 
 .turbofile-taskbar.has-live-transfer {
