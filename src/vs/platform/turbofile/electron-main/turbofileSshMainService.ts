@@ -849,12 +849,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? this.beginRemotePathGrowthTiming(progressId, { kind: 'ssh', path: remotePath, connection }, initialRemoteSize, expectedBytes, onProgress)
 			: this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize, expectedBytes, onProgress);
 		try {
-			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
+			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
 				...args,
 				...(recursive ? ['-r'] : []),
 				localPath,
 				formatNativeScpRemoteSpec(connection, remotePath)
-			], { env }));
+			], { env }, progressId));
 		} finally {
 			stopGrowthTiming();
 		}
@@ -865,12 +865,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? getLocalPathSize(localPath).catch(() => 0)
 			: fsp.stat(localPath).then(stat => stat.size).catch(() => 0), initialLocalSize, expectedBytes, onProgress);
 		try {
-			await withNativeOpenSshScpBaseArgs(connection, (args, env) => runLocalCommand('scp.exe', [
+			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
 				...args,
 				...(recursive ? ['-r'] : []),
 				formatNativeScpRemoteSpec(connection, remotePath),
 				localPath
-			], { env }));
+			], { env }, progressId));
 		} finally {
 			stopGrowthTiming();
 		}
@@ -985,14 +985,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Missing SSH target.');
 		}
 		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
-		await runLocalCommand('rsync.exe', [
+		await this.runCancelableLocalCommand('rsync.exe', [
 			'-a',
 			'--whole-file',
 			'-e',
 			buildLocalRsyncSshTransport(request.target.connection),
 			toRsyncLocalPath(request.source.path),
 			formatRsyncRemoteSpec(request.target.connection, request.target.path)
-		]);
+		], undefined, request.progressId);
 	}
 
 	private async runLocalRsyncDownload(request: ITurboFileTransferRequest): Promise<void> {
@@ -1000,14 +1000,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Missing SSH source.');
 		}
 		await ensureLocalParentDirectory(request.target.path);
-		await runLocalCommand('rsync.exe', [
+		await this.runCancelableLocalCommand('rsync.exe', [
 			'-a',
 			'--whole-file',
 			'-e',
 			buildLocalRsyncSshTransport(request.source.connection),
 			formatRsyncRemoteSpec(request.source.connection, request.source.path),
 			toRsyncLocalPath(request.target.path)
-		]);
+		], undefined, request.progressId);
 	}
 
 	async transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult> {
@@ -3568,6 +3568,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private runCancelableLocalCommand(command: string, args: string[], options: { readonly env?: NodeJS.ProcessEnv } = {}, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const child = execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024, env: options.env }, (error, _stdout, stderr) => {
+				settled = true;
+				unregisterCancel();
+				if (error) {
+					if (this.isTransferCanceled(progressId)) {
+						reject(new TurboFileTransferCanceledError());
+						return;
+					}
+					reject(new Error(formatLocalCommandError(stderr, error.message)));
+					return;
+				}
+				if (this.isTransferCanceled(progressId)) {
+					reject(new TurboFileTransferCanceledError());
+					return;
+				}
+				resolve();
+			});
+			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (settled) {
+					return;
+				}
+				killLocalProcessTree(child);
+			});
+			child.once('spawn', () => {
+				if (!settled && this.isTransferCanceled(progressId)) {
+					killLocalProcessTree(child);
+				}
+			});
+		});
+	}
+
 	private registerTransferCancelHandler(progressId: string | undefined, handler: () => void): () => void {
 		if (!progressId) {
 			return () => undefined;
@@ -5496,6 +5531,14 @@ function runLocalCommand(command: string, args: string[], options: { readonly en
 			resolve();
 		});
 	});
+}
+
+function killLocalProcessTree(child: ReturnType<typeof execFile>): void {
+	if (child.pid && platform() === 'win32') {
+		execFile('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => undefined);
+		return;
+	}
+	child.kill('SIGTERM');
 }
 
 function runLocalCommandBuffer(command: string, args: string[], maxBuffer = 10 * 1024 * 1024): Promise<Buffer> {
