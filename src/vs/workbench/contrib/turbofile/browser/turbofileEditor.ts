@@ -677,8 +677,8 @@ export class TurboFileEditor extends EditorPane {
 	) {
 		super((new.target as typeof TurboFileEditor).ID, group, telemetryService, workbenchThemeService, storageService);
 
-		const localWindowsDefaultPath = this.getLocalWindowsDefaultPath();
 		this.localWindowsDevice = this.createLocalWindowsDevice();
+		const localWindowsDefaultPath = this.getLocalWindowsDeviceDefaultPath();
 		this.paneStates = {
 			left: {
 				deviceId: LOCAL_WINDOWS_DEVICE_ID,
@@ -1937,7 +1937,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 			const state = this.paneStates[targetSide];
 			state.deviceId = device.id;
-			state.path = device.defaultPath || (device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDefaultPath() : '/');
+			state.path = this.getDefaultPaneDevicePath(device);
 			state.items = [];
 			state.error = undefined;
 			this.resetPaneScroll(targetSide);
@@ -9322,6 +9322,10 @@ export class TurboFileEditor extends EditorPane {
 		return savedPath || this.getLocalWindowsDefaultPath();
 	}
 
+	private getLocalWindowsDeviceDefaultPath(): string {
+		return this.localWindowsDevice.defaultPath || this.getConfiguredLocalWindowsDefaultPath();
+	}
+
 	private getConfiguredLocalWindowsTransferProtocol(): TurboFileTransferProtocol {
 		const protocol = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, StorageScope.PROFILE);
 		return protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
@@ -9339,6 +9343,43 @@ export class TurboFileEditor extends EditorPane {
 			preferredTransferProtocol
 		};
 		return this.localWindowsDevice;
+	}
+
+	private syncLocalWindowsDefaultPath(previousDefaultPath: string, nextDefaultPath: string): boolean {
+		if (!nextDefaultPath) {
+			return false;
+		}
+
+		let refreshed = false;
+		for (const key of Array.from(this.paneDirectoryCache.keys())) {
+			if (key.startsWith(`${LOCAL_WINDOWS_DEVICE_ID}|`)) {
+				this.paneDirectoryCache.delete(key);
+			}
+		}
+
+		const systemUserPath = this.getLocalWindowsDefaultPath();
+		for (const side of ['left', 'right'] as const) {
+			const state = this.paneStates[side];
+			if (state.deviceId !== LOCAL_WINDOWS_DEVICE_ID) {
+				continue;
+			}
+			const shouldUseNewDefault = !state.path
+				|| isSameWindowsPath(state.path, previousDefaultPath)
+				|| isSameWindowsPath(state.path, systemUserPath);
+			if (!shouldUseNewDefault) {
+				continue;
+			}
+
+			state.path = nextDefaultPath;
+			state.items = [];
+			state.error = undefined;
+			this.resetPaneScroll(side);
+			this.clearPaneSelection(side);
+			this.rememberPaneDevicePath(side, this.localWindowsDevice, nextDefaultPath);
+			void this.refreshPane(side, { path: nextDefaultPath, force: true, silent: true });
+			refreshed = true;
+		}
+		return refreshed;
 	}
 
 	private getLocalWindowsDefaultPath(): string {
@@ -9541,7 +9582,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getDefaultPaneDevicePath(device: TurboFileDevice): string {
-		return device.defaultPath || (device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDefaultPath() : '/');
+		return device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDeviceDefaultPath() : device.defaultPath || '/';
 	}
 
 	private getPaneDeviceMemoryKey(side: 'left' | 'right', device: TurboFileDevice): string {
@@ -9562,6 +9603,20 @@ export class TurboFileEditor extends EditorPane {
 	private getRememberedPaneDevicePath(side: 'left' | 'right', device: TurboFileDevice): string | undefined {
 		const path = this.storageService.get(this.getPaneDevicePathStorageKey(side, device), StorageScope.PROFILE);
 		return path || undefined;
+	}
+
+	private getInitialPaneDevicePath(side: 'left' | 'right', device: TurboFileDevice): string {
+		const rememberedPath = this.getRememberedPaneDevicePath(side, device);
+		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			return rememberedPath ?? this.getDefaultPaneDevicePath(device);
+		}
+
+		const defaultPath = this.getLocalWindowsDeviceDefaultPath();
+		const systemUserPath = this.getLocalWindowsDefaultPath();
+		if (rememberedPath && !isSameWindowsPath(rememberedPath, systemUserPath)) {
+			return rememberedPath;
+		}
+		return defaultPath;
 	}
 
 	private rememberPaneDeviceSnapshot(side: 'left' | 'right'): void {
@@ -9609,7 +9664,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.rememberPaneDeviceSnapshot(side);
 		state.deviceId = device.id;
-		const targetPath = this.getRememberedPaneDevicePath(side, device) ?? this.getDefaultPaneDevicePath(device);
+		const targetPath = this.getInitialPaneDevicePath(side, device);
 		const snapshot = this.getPaneDeviceSnapshot(side, device);
 		const cached = this.getCachedPaneDirectory(device, targetPath);
 		state.path = targetPath;
@@ -9636,7 +9691,7 @@ export class TurboFileEditor extends EditorPane {
 			const state = this.paneStates[side];
 			if (!devices.some(device => device.id === state.deviceId)) {
 				state.deviceId = devices[0].id;
-				state.path = devices[0].defaultPath || this.getLocalWindowsDefaultPath();
+				state.path = this.getDefaultPaneDevicePath(devices[0]);
 			}
 		}
 
@@ -9726,6 +9781,7 @@ export class TurboFileEditor extends EditorPane {
 
 			message.textContent = draft.preferredTransferProtocol === 'sftp' ? '正在保存设备...' : '正在保存并检测协议能力...';
 			try {
+				const previousLocalWindowsDefaultPath = isEditingLocalWindows ? this.getLocalWindowsDeviceDefaultPath() : undefined;
 				let savedDevice = isEditingLocalWindows ? this.saveLocalWindowsDevice(draft) : editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
 				const capabilityResult = isEditingLocalWindows ? undefined : await this.detectAndStoreDeviceCapabilities(savedDevice);
 				if (!isEditingLocalWindows) {
@@ -9733,6 +9789,9 @@ export class TurboFileEditor extends EditorPane {
 					this.devices = this.deviceStore.loadDevices();
 				}
 				this.ensurePaneDeviceSelection();
+				const refreshedLocalWindowsPanes = isEditingLocalWindows
+					? this.syncLocalWindowsDefaultPath(previousLocalWindowsDefaultPath ?? this.getLocalWindowsDefaultPath(), savedDevice.defaultPath || this.getLocalWindowsDeviceDefaultPath())
+					: false;
 				if (capabilityResult) {
 					this.deviceConnectionMessages.set(savedDevice.id, capabilityResult);
 				} else if (isEditingLocalWindows) {
@@ -9745,7 +9804,9 @@ export class TurboFileEditor extends EditorPane {
 				this.isDeviceFormVisible = false;
 				this.editingDeviceId = undefined;
 				this.render();
-				void this.refreshPane('right');
+				if (!isEditingLocalWindows || !refreshedLocalWindowsPanes) {
+					void this.refreshPane('right');
+				}
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				this.deviceFormMessage = `保存失败：${reason}`;
