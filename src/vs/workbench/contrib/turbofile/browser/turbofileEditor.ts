@@ -954,8 +954,100 @@ export class TurboFileEditor extends EditorPane {
 		this.activeFilePaneSide = side;
 	}
 
+	/**
+	 * Resets the drag-state flags after an internal pane drag finishes (drop or dragend) or after
+	 * we've handed control over to the Windows native drag pipeline. Safe to call multiple times.
+	 */
+	private clearCurrentFileDragState(): void {
+		this.currentFileDragSide = undefined;
+		this.hasStartedNativeWindowsDrag = false;
+		this.setExternalDropTargetSide(undefined);
+	}
+
+	/**
+	 * dragstart handler for a file-list row. Marks the drag as TurboFile-originated (so internal
+	 * drop handlers can detect it via the side data) and remembers the source side so a later
+	 * dragleave from the window can hand off to the Windows native drag pipeline. Drags from the
+	 * TurboFile file area are always copy-only by design — there is no Shift-to-move semantic.
+	 *
+	 * Selection rule: if the dragged row is part of the current multi-selection, drag the whole
+	 * selection; otherwise drag just that single row (without disturbing the previous selection
+	 * in a way that would surprise the user — we keep the row's behavior consistent with single
+	 * left-click).
+	 */
+	private beginFileRowDrag(side: 'left' | 'right', item: TurboFileFileItem, event: DragEvent): void {
+		if (!event.dataTransfer || !item.path || item.parent) {
+			return;
+		}
+
+		const state = this.paneStates[side];
+		if (!state.selectedPaths.has(item.path)) {
+			state.selectedPaths.clear();
+			state.selectedPaths.add(item.path);
+			this.updateRenderedSelection(side);
+		}
+
+		this.setActiveFilePaneSide(side);
+		this.currentFileDragSide = side;
+		this.hasStartedNativeWindowsDrag = false;
+
+		event.dataTransfer.effectAllowed = 'copy';
+		event.dataTransfer.setData('application/x-turbofile-side', side);
+		event.dataTransfer.setData('application/x-turbofile-operation', 'copy');
+
+		const items = this.getSelectedTransferItems(side);
+		const labels = items.length ? items.map(i => i.name) : [item.name];
+		event.dataTransfer.setData('text/plain', labels.join('\n'));
+	}
+
+	/**
+	 * Called when the user drags a TurboFile file-row out of the window. Hands off to the main
+	 * process so Windows can pick up a real file drop (Explorer, Desktop, etc.).
+	 *
+	 * - Local Windows source: the main service feeds real file paths into Electron's startDrag,
+	 *   so Explorer receives an actual copy (source files always preserved).
+	 * - SSH source: the main service currently reports that virtual-file drag isn't available in
+	 *   this build; we surface that as a status message and degrade gracefully — internal pane-
+	 *   to-pane drag and the rest of the transfer flow are unaffected.
+	 */
+	private async startWindowsFileDragFromPane(side: 'left' | 'right'): Promise<void> {
+		try {
+			const device = this.getPaneDevice(side);
+			if (!device) {
+				return;
+			}
+			const items = this.getSelectedTransferItems(side);
+			if (!items.length) {
+				return;
+			}
+			const dragItems: ITurboFileWindowsDragItem[] = items
+				.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent)
+				.map(candidate => ({
+					sourcePath: candidate.path,
+					name: candidate.name,
+					type: candidate.type,
+					size: candidate.directory ? undefined : candidate.rawSize
+				}));
+			if (!dragItems.length) {
+				return;
+			}
+
+			const source = await this.toTransferEndpoint(device, this.paneStates[side].path);
+			const result = await this.sshService.startWindowsFileDrag({ source, items: dragItems });
+			if (!result.ok) {
+				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
+				this.render();
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `拖出到 Windows 失败：${message}`;
+			this.render();
+		}
+	}
+
 	private renderTransferPage(): HTMLElement {
 		const page = $('.turbofile-transfer-page');
+		this.registerTransferPageDragAndDrop(page);
 		const hasLiveTransfer = this.tasks.some(task => task.kind === 'transfer' && task.status === 'running');
 		if (hasLiveTransfer) {
 			page.classList.add('has-live-transfer');
@@ -5728,30 +5820,6 @@ export class TurboFileEditor extends EditorPane {
 			|| dataTransfer.files.length > 0;
 	}
 
-	private getInternalDragOperation(side: 'left' | 'right', item: TurboFileFileItem, event: DragEvent): 'copy' | 'move' {
-		if (this.internalTransferClipboard?.operation === 'move'
-			&& this.internalTransferClipboard.sourceSide === side
-			&& this.internalTransferClipboard.items.some(candidate => candidate.path === item.path)) {
-			return 'move';
-		}
-		return this.getDropTransferOperation(event);
-	}
-
-	private getDropTransferOperation(event: DragEvent): 'copy' | 'move' {
-		const dataTransfer = event.dataTransfer;
-		const explicitOperation = dataTransfer?.getData('application/x-turbofile-operation');
-		if (explicitOperation === 'move') {
-			return 'move';
-		}
-		if (explicitOperation === 'copy') {
-			return 'copy';
-		}
-		if (event.shiftKey || dataTransfer?.effectAllowed?.toLowerCase() === 'move') {
-			return 'move';
-		}
-		return 'copy';
-	}
-
 	private extractExternalDropPaths(event: DragEvent): string[] {
 		const dataTransfer = event.dataTransfer;
 		if (!dataTransfer) {
@@ -6668,64 +6736,6 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		} finally {
 			progressDisposable.dispose();
-		}
-	}
-
-	private async moveSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): Promise<void> {
-		const items = this.getSelectedTransferItems(sourceSide);
-		const device = this.getPaneDevice(sourceSide);
-		const targetDevice = this.getPaneDevice(targetSide);
-		if (!items.length || !device || !targetDevice) {
-			this.statusMessage = '请先选择要剪切的文件或目录。';
-			this.render();
-			return;
-		}
-
-		if (items.length > 1) {
-			await this.transferItemsBatch(sourceSide, targetSide, device, targetDevice, items, 'move');
-			return;
-		}
-
-		if (this.isSameDeviceForNativeOperation(device, targetDevice)) {
-			const batch = items.length > 1;
-			const task = this.beginTask('rename', batch ? `剪切移动 ${items.length} 项` : `剪切移动 ${items[0].name}`, `${device.name} -> ${targetDevice.name}`);
-			task.progress = 0;
-			task.cancelRequested = false;
-			task.transferItems = items.map(item => this.createTransferTaskItem(item));
-			task.speedSamples = [];
-			await this.moveInternalItemsNatively(task, device, sourceSide, targetSide, items);
-			return;
-		}
-
-		const transferred = await this.transferSelected(sourceSide, targetSide);
-		if (!transferred) {
-			return;
-		}
-		const batch = items.length > 1;
-		const task = this.beginTask('delete', batch ? `剪切清理 ${items.length} 项` : `剪切清理 ${items[0].name}`, `正在删除来源：${device.name}`);
-		this.removePaneItems(sourceSide, items);
-		try {
-			let deleted = 0;
-			const failures: string[] = [];
-			for (const [index, item] of items.entries()) {
-				this.updateTask(task, batch ? `正在删除来源 ${index + 1}/${items.length}：${item.name}` : `正在删除来源：${item.name}`, Math.min(88, 20 + Math.round((index / items.length) * 60)));
-				const result = await this.sshService.deletePath(await this.toTransferEndpoint(device, item.path!), true);
-				if (result.ok) {
-					deleted++;
-				} else {
-					failures.push(`${item.name}: ${result.message}`);
-				}
-			}
-			this.updateTask(task, `正在刷新来源目录：${device.name}`, 90);
-			await this.refreshPane(sourceSide, { force: true });
-			if (failures.length) {
-				this.finishTask(task, 'error', `目标已复制，但删除来源失败 ${failures.length} 项。`, { error: failures[0] });
-				return;
-			}
-			this.finishTask(task, 'success', batch ? `剪切完成：${deleted} 项` : `剪切完成：${items[0].name}`);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.finishTask(task, 'error', `目标已复制，但删除来源失败：${message}`, { error: message });
 		}
 	}
 
