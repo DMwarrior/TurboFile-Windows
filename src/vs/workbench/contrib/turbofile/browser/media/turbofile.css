@@ -1550,7 +1550,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	position: fixed;
 	left: 0;
 	top: 35px;
-	bottom: 24px;
+	bottom: 0;
 	width: 48px;
 	z-index: 20;
 	height: auto;
@@ -2401,7 +2401,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-taskbar {
 	position: fixed;
-	left: 0;
+	left: 48px;
 	right: 0;
 	bottom: 0;
 	z-index: 40;
@@ -2420,6 +2420,10 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	font-family: inherit;
 	font-size: 11px;
 	font-weight: 400;
+}
+
+body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) .turbofile-taskbar {
+	left: 152px;
 }
 
 .turbofile-taskbar.has-live-transfer {
