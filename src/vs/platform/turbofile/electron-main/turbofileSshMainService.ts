@@ -793,10 +793,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const recursive = localStat.isDirectory();
 		const initialRemoteSize = await this.withDirectorySftp(request.target, async sftp => {
 			this.throwIfTransferCanceled(request.progressId);
-			await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
 			if (recursive) {
-				await this.withDirectorySshClient(request.target, client => this.execRemote(client, `rm -rf -- ${quotePosixShellArg(request.target.path)}`)).catch(() => undefined);
+				await this.withDirectorySshClient(request.target, client => this.execRemote(client, `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}`)).catch(async () => {
+					await this.ensureRemoteDirectory(sftp, request.target.path);
+				});
 			} else {
+				await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
 				await this.unlinkRemote(sftp, request.target.path).catch(() => undefined);
 			}
 			return 0;
@@ -827,6 +829,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const recursive = sourceType === 'directory';
 		if (canUseNativeOpenSshScpCommand(request.source.connection)) {
 			await fsp.rm(request.target.path, { recursive, force: true }).catch(() => undefined);
+			if (recursive) {
+				await ensureLocalDirectory(request.target.path);
+			}
 			const initialLocalSize = 0;
 			try {
 				await this.downloadPathWithNativeOpenSshScp(request.source.connection, request.source.path, request.target.path, recursive, initialLocalSize, bytes, onProgress, request.progressId);
@@ -849,11 +854,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? this.beginRemotePathGrowthTiming(progressId, { kind: 'ssh', path: remotePath, connection }, initialRemoteSize, expectedBytes, onProgress)
 			: this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize, expectedBytes, onProgress);
 		try {
+			const sourceArg = recursive ? getNativeScpLocalDirectoryContentsPath(localPath) : localPath;
+			const targetArg = recursive ? ensureTrailingRemoteSlash(remotePath) : remotePath;
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
 				...args,
 				...(recursive ? ['-r'] : []),
-				localPath,
-				formatNativeScpRemoteSpec(connection, remotePath)
+				sourceArg,
+				formatNativeScpRemoteSpec(connection, targetArg)
 			], { env }, progressId));
 		} finally {
 			stopGrowthTiming();
@@ -865,10 +872,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? getLocalPathSize(localPath).catch(() => 0)
 			: fsp.stat(localPath).then(stat => stat.size).catch(() => 0), initialLocalSize, expectedBytes, onProgress);
 		try {
+			const sourceArg = recursive ? getRemoteDirectoryContentsPath(remotePath) : remotePath;
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
 				...args,
 				...(recursive ? ['-r'] : []),
-				formatNativeScpRemoteSpec(connection, remotePath),
+				formatNativeScpRemoteSpec(connection, sourceArg),
 				localPath
 			], { env }, progressId));
 		} finally {
@@ -984,13 +992,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
-		await this.withSftp(request.target, async sftp => this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
+		const sourceIsDirectory = (await fsp.stat(request.source.path)).isDirectory();
+		await this.withSftp(request.target, async sftp => sourceIsDirectory ? this.ensureRemoteDirectory(sftp, request.target.path) : this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
+		const sourcePath = toRsyncLocalPath(request.source.path);
 		await this.runCancelableLocalCommand('rsync.exe', [
 			'-a',
 			'--whole-file',
 			'-e',
 			buildLocalRsyncSshTransport(request.target.connection),
-			toRsyncLocalPath(request.source.path),
+			sourceIsDirectory ? ensureTrailingRemoteSlash(sourcePath) : sourcePath,
 			formatRsyncRemoteSpec(request.target.connection, request.target.path)
 		], undefined, request.progressId);
 	}
@@ -999,13 +1009,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
-		await ensureLocalParentDirectory(request.target.path);
+		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+		const sourceIsDirectory = sourceType === 'directory';
+		if (sourceIsDirectory) {
+			await ensureLocalDirectory(request.target.path);
+		} else {
+			await ensureLocalParentDirectory(request.target.path);
+		}
 		await this.runCancelableLocalCommand('rsync.exe', [
 			'-a',
 			'--whole-file',
 			'-e',
 			buildLocalRsyncSshTransport(request.source.connection),
-			formatRsyncRemoteSpec(request.source.connection, request.source.path),
+			formatRsyncRemoteSpec(request.source.connection, sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path),
 			toRsyncLocalPath(request.target.path)
 		], undefined, request.progressId);
 	}
@@ -2291,12 +2307,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const remoteUserHost = `${remote.username}@${remote.host}`;
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
 			const targetParentPath = getRemoteParentPath(request.target.path);
-			const cleanupCommand = sourceIsDirectory ? 'rm -rf' : 'rm -f';
 			const mkdirCommand = route === 'source-push'
-				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(targetParentPath)} && ${cleanupCommand} ${quotePosixShellArg(request.target.path)}`)}`
-				: `mkdir -p ${quotePosixShellArg(targetParentPath)} && ${cleanupCommand} ${quotePosixShellArg(request.target.path)}`;
-			const sourceArg = route === 'source-push' ? request.source.path : `${remoteUserHost}:${request.source.path}`;
-			const targetArg = route === 'source-push' ? `${remoteUserHost}:${request.target.path}` : request.target.path;
+				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)} && rm -f -- ${quotePosixShellArg(request.target.path)}`)}`
+				: sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)} && rm -f -- ${quotePosixShellArg(request.target.path)}`;
+			const sourcePath = sourceIsDirectory ? getRemoteDirectoryContentsPath(request.source.path) : request.source.path;
+			const targetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
+			const sourceArg = route === 'source-push' ? sourcePath : `${remoteUserHost}:${sourcePath}`;
+			const targetArg = route === 'source-push' ? `${remoteUserHost}:${targetPath}` : targetPath;
 			const scpCommand = `${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath, sourceIsDirectory)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`;
 
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true, { strategy: 'scp-direct' });
@@ -2410,13 +2427,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SFTP transfer.', true, { strategy: 'sftp-direct' });
 			const targetParentPath = getRemoteParentPath(request.target.path);
+			const sourceIsDirectory = sourceType === 'directory';
 			const mkdirCommand = route === 'source-push'
-				? `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(`mkdir -p ${quotePosixShellArg(targetParentPath)}`)}`
-				: `mkdir -p ${quotePosixShellArg(targetParentPath)}`;
-			const batchVerb = sourceType === 'directory'
+				? `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)}`)}`
+				: sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)}`;
+			const batchVerb = sourceIsDirectory
 				? route === 'source-push' ? 'put -pr' : 'get -pr'
 				: route === 'source-push' ? 'put -p' : 'get -p';
-			const batch = `${batchVerb} ${quoteSftpBatchPath(request.source.path)} ${quoteSftpBatchPath(request.target.path)}\n`;
+			const batchSourcePath = sourceIsDirectory ? getRemoteDirectoryContentsPath(request.source.path) : request.source.path;
+			const batchTargetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
+			const batch = `${batchVerb} ${quoteSftpBatchPath(batchSourcePath)} ${quoteSftpBatchPath(batchTargetPath)}\n`;
 			const transferCommand = `printf %s ${quotePosixShellArg(batch)} | ${sftpCommand}`;
 
 			this.throwIfTransferCanceled(request.progressId);
@@ -5416,6 +5436,16 @@ async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnecti
 
 function formatNativeScpRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
 	return `${connection.username}@${connection.host}:${remotePath}`;
+}
+
+function getNativeScpLocalDirectoryContentsPath(localPath: string): string {
+	const trimmed = localPath.replace(/[\/]+$/g, '');
+	const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';
+	return `${trimmed}${separator}.`;
+}
+
+function getRemoteDirectoryContentsPath(remotePath: string): string {
+	return `${ensureTrailingRemoteSlash(trimTrailingRemoteSlash(remotePath))}.`;
 }
 
 function isRecoverableLocalCommandTransferError(error: unknown): boolean {
