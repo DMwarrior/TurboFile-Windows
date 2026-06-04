@@ -26,6 +26,7 @@ export interface ITurboFileSshService {
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
 	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
+	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileFileOperationResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
@@ -135,6 +136,19 @@ export interface ITurboFileBatchTransferRequest {
 	readonly progressId?: string;
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+}
+
+export interface ITurboFileWindowsDragItem {
+	readonly sourcePath: string;
+	readonly name: string;
+	readonly type: TurboFileFileType;
+	readonly size?: number;
+}
+
+export interface ITurboFileStartWindowsDragRequest {
+	readonly source: ITurboFileTransferEndpoint;
+	readonly items: readonly ITurboFileWindowsDragItem[];
+	readonly progressId?: string;
 }
 
 export interface ITurboFileTransferResult {

@@ -22,7 +22,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -641,6 +641,8 @@ export class TurboFileEditor extends EditorPane {
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
+	private currentFileDragSide: 'left' | 'right' | undefined;
+	private hasStartedNativeWindowsDrag = false;
 	private maximizedPane: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
 	private inlineRename: TurboFileInlineRenameState | undefined;
@@ -1011,6 +1013,8 @@ export class TurboFileEditor extends EditorPane {
 	 *   to-pane drag and the rest of the transfer flow are unaffected.
 	 */
 	private async startWindowsFileDragFromPane(side: 'left' | 'right'): Promise<void> {
+		let task: TurboFileTask | undefined;
+		let progressDisposable: IDisposable | undefined;
 		try {
 			const device = this.getPaneDevice(side);
 			if (!device) {
@@ -1033,16 +1037,88 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			const source = await this.toTransferEndpoint(device, this.paneStates[side].path);
-			const result = await this.sshService.startWindowsFileDrag({ source, items: dragItems });
+			let progressId: string | undefined;
+			if (source.kind !== 'local') {
+				const label = dragItems.length > 1 ? `拖到 Windows ${dragItems.length} 项` : `拖到 Windows ${dragItems[0].name}`;
+				task = this.beginTask('transfer', label, `${device.name} -> Windows`);
+				task.progress = 0;
+				task.cancelRequested = false;
+				task.transferItems = items.map(item => this.createTransferTaskItem(item));
+				task.speedSamples = [];
+				progressId = `turbofile-windows-drag-${task.id}-${Date.now()}`;
+				task.progressId = progressId;
+				for (const transferItem of task.transferItems) {
+					transferItem.progressId = progressId;
+					transferItem.status = 'running';
+					transferItem.startedAt = Date.now();
+				}
+				progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task!, event));
+				this.updateTask(task, `正在准备拖到 Windows：${dragItems.length} 项`, 8);
+			}
+
+			const result = await this.sshService.startWindowsFileDrag({ source, items: dragItems, progressId });
 			if (!result.ok) {
+				if (task) {
+					for (const transferItem of task.transferItems ?? []) {
+						transferItem.status = 'error';
+						transferItem.error = result.message;
+						transferItem.endedAt = Date.now();
+					}
+					this.finishTask(task, 'error', `拖出到 Windows 失败：${result.message}`, { error: result.message });
+					return;
+				}
 				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
 				this.render();
+				return;
+			}
+
+			if (task) {
+				const now = Date.now();
+				for (const transferItem of task.transferItems ?? []) {
+					transferItem.status = 'success';
+					transferItem.progress = 100;
+					transferItem.endedAt = now;
+				}
+				this.finishTask(task, 'success', `已准备拖到 Windows：${dragItems.length} 项`, { bytes: task.transferredBytes, strategy: task.strategy });
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.statusMessage = `拖出到 Windows 失败：${message}`;
-			this.render();
+			if (task) {
+				for (const transferItem of task.transferItems ?? []) {
+					transferItem.status = 'error';
+					transferItem.error = message;
+					transferItem.endedAt = Date.now();
+				}
+				this.finishTask(task, 'error', `拖出到 Windows 失败：${message}`, { error: message });
+			} else {
+				this.statusMessage = `拖出到 Windows 失败：${message}`;
+				this.render();
+			}
+		} finally {
+			progressDisposable?.dispose();
 		}
+	}
+
+	private maybeStartWindowsFileDragFromPointer(side: 'left' | 'right', event: DragEvent): void {
+		if (this.currentFileDragSide !== side || this.hasStartedNativeWindowsDrag) {
+			return;
+		}
+
+		if (event.clientX === 0 && event.clientY === 0 && event.screenX === 0 && event.screenY === 0) {
+			return;
+		}
+
+		const ownerWindow = getWindow(this.container);
+		const outsideWindow = event.clientX <= 0
+			|| event.clientY <= 0
+			|| event.clientX >= ownerWindow.innerWidth - 1
+			|| event.clientY >= ownerWindow.innerHeight - 1;
+		if (!outsideWindow) {
+			return;
+		}
+
+		this.hasStartedNativeWindowsDrag = true;
+		void this.startWindowsFileDragFromPane(side);
 	}
 
 	private renderTransferPage(): HTMLElement {
@@ -1067,6 +1143,96 @@ export class TurboFileEditor extends EditorPane {
 			page.appendChild(this.renderTaskbar());
 		}
 		return page;
+	}
+
+	private registerTransferPageDragAndDrop(page: HTMLElement): void {
+		const handleDragEnter = (event: DragEvent) => this.handleTransferPageDragOver(event);
+		const handleDragOver = (event: DragEvent) => this.handleTransferPageDragOver(event);
+		const handleDrop = (event: DragEvent) => this.handleTransferPageDrop(event);
+		const handleDragLeave = (event: DragEvent) => this.handleTransferPageDragLeave(event);
+		page.addEventListener('dragenter', handleDragEnter, true);
+		page.addEventListener('dragover', handleDragOver, true);
+		page.addEventListener('drop', handleDrop, true);
+		page.addEventListener('dragleave', handleDragLeave, true);
+		this.renderDisposables.add({
+			dispose: () => {
+				page.removeEventListener('dragenter', handleDragEnter, true);
+				page.removeEventListener('dragover', handleDragOver, true);
+				page.removeEventListener('drop', handleDrop, true);
+				page.removeEventListener('dragleave', handleDragLeave, true);
+			}
+		});
+	}
+
+	private handleTransferPageDragOver(event: DragEvent): void {
+		if (!this.isTransferPageFileDrag(event)) {
+			return;
+		}
+
+		const targetSide = this.getTransferDropTargetSide(event);
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		this.setExternalDropTargetSide(this.hasExternalDropData(event) ? targetSide : undefined);
+	}
+
+	private handleTransferPageDrop(event: DragEvent): void {
+		if (!this.isTransferPageFileDrag(event)) {
+			return;
+		}
+
+		const targetSide = this.getTransferDropTargetSide(event);
+		event.preventDefault();
+		event.stopPropagation();
+		this.setExternalDropTargetSide(undefined);
+		const sourceSide = this.getTurboFileDragSourceSide(event);
+		if (sourceSide) {
+			if (sourceSide !== targetSide) {
+				void this.transferSelected(sourceSide, targetSide);
+			}
+			this.clearCurrentFileDragState();
+			return;
+		}
+
+		const externalPaths = this.extractExternalDropPaths(event);
+		if (externalPaths.length) {
+			void this.transferExternalPaths(targetSide, externalPaths, 'copy');
+		}
+		this.clearCurrentFileDragState();
+	}
+
+	private handleTransferPageDragLeave(event: DragEvent): void {
+		const relatedTarget = event.relatedTarget;
+		if (relatedTarget instanceof Node && event.currentTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+			return;
+		}
+
+		this.setExternalDropTargetSide(undefined);
+		if (this.currentFileDragSide && !this.hasStartedNativeWindowsDrag) {
+			this.hasStartedNativeWindowsDrag = true;
+			void this.startWindowsFileDragFromPane(this.currentFileDragSide);
+		}
+	}
+
+	private isTransferPageFileDrag(event: DragEvent): boolean {
+		return !!this.getTurboFileDragSourceSide(event) || this.hasExternalDropData(event);
+	}
+
+	private getTransferDropTargetSide(event: DragEvent): 'left' | 'right' {
+		const target = event.target instanceof HTMLElement ? event.target : undefined;
+		const targetSide = this.getPaneSideFromElement(target);
+		if (targetSide) {
+			this.activeFilePaneSide = targetSide;
+			return targetSide;
+		}
+		return this.activeFilePaneSide;
+	}
+
+	private getTurboFileDragSourceSide(event: DragEvent): 'left' | 'right' | undefined {
+		const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side');
+		return sourceSide === 'left' || sourceSide === 'right' ? sourceSide : undefined;
 	}
 
 	private renderDevicesPage(): HTMLElement {
@@ -2757,16 +2923,13 @@ export class TurboFileEditor extends EditorPane {
 		if (item.path && !item.parent && !renaming) {
 			row.draggable = true;
 			row.addEventListener('dragstart', event => {
-				this.setActiveFilePaneSide(side);
-				this.ensureItemInSelection(side, item);
-				const operation = this.getInternalDragOperation(side, item, event);
-				if (event.dataTransfer) {
-					event.dataTransfer.effectAllowed = 'copyMove';
-					event.dataTransfer.dropEffect = operation;
-				}
-				event.dataTransfer?.setData('application/x-turbofile-side', side);
-				event.dataTransfer?.setData('application/x-turbofile-operation', operation);
-				event.dataTransfer?.setData('text/plain', item.path ?? '');
+				this.beginFileRowDrag(side, item, event);
+			});
+			row.addEventListener('drag', event => {
+				this.maybeStartWindowsFileDragFromPointer(side, event);
+			});
+			row.addEventListener('dragend', () => {
+				this.clearCurrentFileDragState();
 			});
 		}
 		row.addEventListener('click', event => {

@@ -12,9 +12,9 @@ import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
-import { app, clipboard, nativeImage } from 'electron';
+import { app, BrowserWindow, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -1618,7 +1618,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	async readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult> {
 		try {
-			const paths = readWindowsClipboardFilePaths();
+			const paths = await readWindowsClipboardFilePaths();
 			return {
 				ok: paths.length > 0,
 				message: paths.length > 0 ? 'Windows clipboard files loaded.' : 'No Windows files in clipboard.',
@@ -1635,6 +1635,98 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+
+	async startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileFileOperationResult> {
+		if (platform() !== 'win32') {
+			return { ok: false, message: 'Windows file drag is only supported on Windows.' };
+		}
+
+		const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && !candidate.webContents.isDestroyed());
+		if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
+			return { ok: false, message: 'No TurboFile window is available for Windows drag.' };
+		}
+
+		if (request.source.kind !== 'local') {
+			return this.startStagedWindowsFileDrag(request, window);
+		}
+
+		const files = request.items
+			.map(item => item.sourcePath)
+			.filter(path => isWindowsClipboardPath(path));
+		if (!files.length) {
+			return { ok: false, message: 'No local Windows files are available to drag.' };
+		}
+
+		try {
+			window.webContents.startDrag({
+				file: files[0],
+				files,
+				icon: nativeImage.createEmpty()
+			});
+			return { ok: true, message: 'Windows file drag started.' };
+		} catch (error) {
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error)
+			};
+		}
+	}
+
+	private async startStagedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileFileOperationResult> {
+		const items = request.items.filter(item => !!item.sourcePath && !!item.name);
+		if (!items.length) {
+			return { ok: false, message: 'No remote files are available to drag.' };
+		}
+
+		const tempRoot = join(tmpdir(), `turbofile-windows-drag-${randomUUID()}`);
+		try {
+			await ensureLocalDirectory(tempRoot);
+			const result = await this.transferBatch({
+				source: request.source,
+				targetDirectory: {
+					kind: 'local',
+					path: tempRoot
+				},
+				items: items.map(item => ({
+					sourcePath: item.sourcePath,
+					targetName: item.name,
+					displayName: item.name,
+					sourceType: item.type,
+					expectedBytes: item.type === 'directory' ? 0 : Math.max(0, item.size ?? 0)
+				})),
+				operation: 'copy',
+				progressId: request.progressId,
+				expectedBytes: items.reduce((sum, item) => sum + (item.type === 'directory' ? 0 : Math.max(0, item.size ?? 0)), 0),
+				strategyHint: 'auto'
+			});
+			if (!result.ok) {
+				await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+				return { ok: false, message: result.message };
+			}
+
+			const files = items.map(item => join(tempRoot, item.name));
+			window.webContents.startDrag({
+				file: files[0],
+				files,
+				icon: nativeImage.createEmpty()
+			});
+			this.scheduleWindowsDragTempCleanup(tempRoot);
+			return { ok: true, message: 'Windows file drag started.' };
+		} catch (error) {
+			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error)
+			};
+		}
+	}
+
+	private scheduleWindowsDragTempCleanup(path: string): void {
+		const timer = setTimeout(() => {
+			void fsp.rm(path, { recursive: true, force: true });
+		}, 30 * 60 * 1000);
+		(timer as unknown as { unref?: () => void }).unref?.();
+	}
 	async readFile(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadFileOptions = {}): Promise<ITurboFileReadFileResult> {
 		const encoding = options.encoding ?? 'utf8';
 		const maxBytes = options.maxBytes ?? DEFAULT_READ_LIMIT;
@@ -4879,7 +4971,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 }
 
-function readWindowsClipboardFilePaths(): string[] {
+async function readWindowsClipboardFilePaths(): Promise<string[]> {
 	const paths: string[] = [];
 	const seen = new Set<string>();
 	const acceptPath = (path: string): void => {
@@ -4897,6 +4989,9 @@ function readWindowsClipboardFilePaths(): string[] {
 		paths.push(candidate);
 	};
 
+	for (const path of await readWindowsClipboardDropListPaths().catch(() => [])) {
+		acceptPath(path);
+	}
 	for (const path of parseWindowsClipboardBuffer(clipboard.readBuffer('FileNameW'), 'utf16le')) {
 		acceptPath(path);
 	}
@@ -4910,6 +5005,28 @@ function readWindowsClipboardFilePaths(): string[] {
 	return paths;
 }
 
+
+async function readWindowsClipboardDropListPaths(): Promise<string[]> {
+	if (platform() !== 'win32') {
+		return [];
+	}
+
+	const script = withPowerShellDefaults(`
+Add-Type -AssemblyName System.Windows.Forms
+$items = [System.Windows.Forms.Clipboard]::GetFileDropList()
+foreach ($item in $items) {
+	if ([string]::IsNullOrWhiteSpace($item)) { continue }
+	[Console]::Out.WriteLine([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($item)))
+}
+`);
+	const stdout = await runLocalPowerShellStaScriptBuffer(script, 16 * 1024 * 1024);
+	return stdout
+		.toString('utf8')
+		.split(/\r?\n/)
+		.map(line => line.trim())
+		.filter(Boolean)
+		.map(line => Buffer.from(line, 'base64').toString('utf8'));
+}
 function parseWindowsClipboardBuffer(buffer: Buffer, encoding: BufferEncoding): string[] {
 	if (!buffer.byteLength) {
 		return [];
@@ -5566,6 +5683,10 @@ function formatLocalCommandError(stderr: string | undefined, fallback: string): 
 
 function runLocalPowerShellScript(script: string): Promise<void> {
 	return runLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)]);
+}
+
+function runLocalPowerShellStaScriptBuffer(script: string, maxBuffer = 10 * 1024 * 1024): Promise<Buffer> {
+	return runLocalCommandBuffer('powershell.exe', ['-NoProfile', '-STA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)], maxBuffer);
 }
 
 async function getWindowsExplorerVisibleLocalNames(path: string): Promise<Set<string> | undefined> {
