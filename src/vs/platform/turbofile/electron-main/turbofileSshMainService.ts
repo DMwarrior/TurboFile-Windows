@@ -5439,7 +5439,7 @@ function formatNativeScpRemoteSpec(connection: ITurboFileSshConnectionOptions, r
 }
 
 function getNativeScpLocalDirectoryContentsPath(localPath: string): string {
-	const trimmed = localPath.replace(/[\/]+$/g, '');
+	const trimmed = localPath.replace(/[\\/]+$/g, '');
 	const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';
 	return `${trimmed}${separator}.`;
 }
