@@ -2340,9 +2340,6 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	transform-origin: left center;
-	transition: transform 80ms ease;
-	will-change: transform;
 }
 
 .turbofile-file-name.is-renaming {
@@ -2366,10 +2363,6 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
 	line-height: 21px;
-}
-
-.turbofile-file-row.is-clickable:active .turbofile-file-name {
-	transform: scale(1.028);
 }
 
 .turbofile-file-meta {
