@@ -2401,7 +2401,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-taskbar {
 	position: fixed;
-	left: 52px;
+	left: 48px;
 	right: 0;
 	bottom: 0;
 	z-index: 40;
@@ -2423,7 +2423,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) .turbofile-taskbar {
-	left: 156px;
+	left: 152px;
 }
 
 .turbofile-taskbar.has-live-transfer {
