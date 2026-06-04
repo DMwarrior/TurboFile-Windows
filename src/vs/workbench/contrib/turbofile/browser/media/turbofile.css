@@ -121,6 +121,14 @@ body.turbofile-theme-switching .turbofile-workbench * {
 	overflow: hidden;
 }
 
+body.turbofile-shell {
+	--turbofile-page-nav-width: 48px;
+}
+
+body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
+	--turbofile-page-nav-width: 152px;
+}
+
 .turbofile-editor-content {
 	height: 100%;
 	min-width: 0;
@@ -301,7 +309,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	min-height: 0;
 	box-sizing: border-box;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 48px;
+	grid-template-rows: minmax(0, 1fr) 24px;
 	border-right: 0;
 	background: var(--turbofile-unified-background);
 	overflow: hidden;
@@ -319,6 +327,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 .turbofile-page-nav-toggle {
 	width: 100%;
 	height: 48px;
+	box-sizing: border-box;
 	display: flex;
 	align-items: center;
 	gap: 10px;
@@ -417,6 +426,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 
 .turbofile-page-nav-toggle {
 	justify-content: center;
+	height: 24px;
 	border-top: 1px solid var(--vscode-panel-border);
 	border-radius: 0;
 	padding: 0;
@@ -425,14 +435,14 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 .turbofile-editor-shell.is-nav-expanded .turbofile-page-nav-toggle {
 	justify-content: flex-start;
 	padding: 0 12px;
-	height: 48px;
+	height: 24px;
 	color: var(--vscode-sideBar-foreground);
 }
 
 .turbofile-page-nav.is-nav-expanded .turbofile-page-nav-toggle {
 	justify-content: flex-start;
 	padding: 0 12px;
-	height: 48px;
+	height: 24px;
 	color: var(--vscode-sideBar-foreground);
 }
 
@@ -1551,13 +1561,13 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	left: 0;
 	top: 35px;
 	bottom: 0;
-	width: 48px;
+	width: var(--turbofile-page-nav-width);
 	z-index: 20;
 	height: auto;
 }
 
 body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
-	width: 152px;
+	width: var(--turbofile-page-nav-width);
 }
 
 .turbofile-route-nav {
@@ -2401,7 +2411,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-taskbar {
 	position: fixed;
-	left: 48px;
+	left: var(--turbofile-page-nav-width);
 	right: 0;
 	bottom: 0;
 	z-index: 40;
@@ -2420,10 +2430,6 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	font-family: inherit;
 	font-size: 11px;
 	font-weight: 400;
-}
-
-body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) .turbofile-taskbar {
-	left: 152px;
 }
 
 .turbofile-taskbar.has-live-transfer {
