@@ -122,7 +122,11 @@ body.turbofile-theme-switching .turbofile-workbench * {
 }
 
 body.turbofile-shell {
-	--turbofile-page-nav-width: 48px;
+	/* Match the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54). Requesting a
+	   narrower sidebar gets clamped to 54, so pinning the collapsed nav/taskbar to that same width
+	   keeps the nav, the expand/collapse toggle and the bottom taskbar aligned exactly with the
+	   file-browser (editor) boundary. */
+	--turbofile-page-nav-width: 54px;
 }
 
 body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
@@ -339,6 +343,15 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	overflow: hidden;
 	position: relative;
 	opacity: 1;
+}
+
+/* Suppress the default blue focus outline on the side-nav buttons (incl. the expand/collapse
+   toggle) so clicking them does not leave a blue ring around the button. */
+.turbofile-page-nav-item:focus,
+.turbofile-page-nav-item:focus-visible,
+.turbofile-page-nav-toggle:focus,
+.turbofile-page-nav-toggle:focus-visible {
+	outline: none !important;
 }
 
 .turbofile-page-nav-item {

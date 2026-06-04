@@ -94,7 +94,10 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 	}
 ];
 
-const TURBOFILE_NAV_COLLAPSED_WIDTH = 48;
+// Use the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54): requesting a narrower
+// size is clamped to 54, which would leave the nav/taskbar (pinned to the requested width) 6px
+// off from the file-browser boundary. Matching it keeps everything aligned when collapsed.
+const TURBOFILE_NAV_COLLAPSED_WIDTH = 54;
 const TURBOFILE_NAV_EXPANDED_WIDTH = 152;
 
 let turboFileTransferPageSequence = 1;
