@@ -5704,7 +5704,10 @@ export class TurboFileEditor extends EditorPane {
 				path: listing.path,
 				items: this.toFileItems(device, listing.path, listing.entries)
 			};
-			this.paneDirectoryCache.set(cacheKey, entry);
+			this.paneDirectoryCache.set(this.getPaneDirectoryCacheKey(device, listing.path), entry);
+			if (listing.path === path) {
+				this.paneDirectoryCache.set(cacheKey, entry);
+			}
 			this.trimPaneDirectoryCache();
 			return entry;
 		})();

@@ -476,9 +476,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					.map(entry => this.toRemoteEntry(listing.path, entry))
 					.sort(compareFileEntries)
 			};
-			this.setRemoteDirectoryListingCache(cacheKey, result);
-			if (listing.path !== path) {
-				this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+			this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+			if (listing.path === path) {
+				this.setRemoteDirectoryListingCache(cacheKey, result);
 			}
 			return result;
 		} catch (error) {
@@ -6965,10 +6965,6 @@ function getRemoteDirectoryFallbackPaths(options: ITurboFileSshConnectionOptions
 		}
 	}
 
-	add('.');
-	add('/home');
-	add(`/homes/${username}`);
-	add('/');
 	return candidates;
 }
 
