@@ -2434,7 +2434,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		if (request.source.kind !== 'local') {
-			return this.startStagedWindowsFileDrag(request, window);
+			// Dragging remote (SSH) files straight to Windows without a temp cache requires a native
+			// virtual-file (IDataObject/IStream) helper that this build does not ship. Never fall
+			// back to staging into a temp directory — report it as unsupported instead.
+			return {
+				ok: false,
+				message: 'SSH 文件暂不支持直接拖到 Windows（需要原生虚拟文件支持）。'
+			};
 		}
 
 		const files = request.items
@@ -2457,62 +2463,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				message: error instanceof Error ? error.message : String(error)
 			};
 		}
-	}
-
-	private async startStagedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileFileOperationResult> {
-		const items = request.items.filter(item => !!item.sourcePath && !!item.name);
-		if (!items.length) {
-			return { ok: false, message: 'No remote files are available to drag.' };
-		}
-
-		const tempRoot = join(tmpdir(), `turbofile-windows-drag-${randomUUID()}`);
-		try {
-			await ensureLocalDirectory(tempRoot);
-			const result = await this.transferBatch({
-				source: request.source,
-				targetDirectory: {
-					kind: 'local',
-					path: tempRoot
-				},
-				items: items.map(item => ({
-					sourcePath: item.sourcePath,
-					targetName: item.name,
-					displayName: item.name,
-					sourceType: item.type,
-					expectedBytes: item.type === 'directory' ? 0 : Math.max(0, item.size ?? 0)
-				})),
-				operation: 'copy',
-				progressId: request.progressId,
-				expectedBytes: items.reduce((sum, item) => sum + (item.type === 'directory' ? 0 : Math.max(0, item.size ?? 0)), 0),
-				strategyHint: 'auto'
-			});
-			if (!result.ok) {
-				await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
-				return { ok: false, message: result.message };
-			}
-
-			const files = items.map(item => join(tempRoot, item.name));
-			window.webContents.startDrag({
-				file: files[0],
-				files,
-				icon: createWindowsDragIcon()
-			});
-			this.scheduleWindowsDragTempCleanup(tempRoot);
-			return { ok: true, message: 'Windows file drag started.' };
-		} catch (error) {
-			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
-			return {
-				ok: false,
-				message: error instanceof Error ? error.message : String(error)
-			};
-		}
-	}
-
-	private scheduleWindowsDragTempCleanup(path: string): void {
-		const timer = setTimeout(() => {
-			void fsp.rm(path, { recursive: true, force: true });
-		}, 30 * 60 * 1000);
-		(timer as unknown as { unref?: () => void }).unref?.();
 	}
 
 	async readFile(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadFileOptions = {}): Promise<ITurboFileReadFileResult> {

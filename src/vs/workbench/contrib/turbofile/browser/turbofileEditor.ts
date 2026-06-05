@@ -1049,18 +1049,26 @@ export class TurboFileEditor extends EditorPane {
 	 * Explorer/Desktop still receives real Windows paths.
 	 */
 	private async startWindowsFileDragFromPane(side: 'left' | 'right'): Promise<void> {
-		let task: TurboFileTask | undefined;
-		let progressDisposable: IDisposable | undefined;
+		const device = this.getPaneDevice(side);
+		if (!device) {
+			return;
+		}
+
+		// Local files are handed to Windows as a real native OS drag during dragstart
+		// (tryStartImmediateLocalWindowsDrag). This dragleave/pointer path is therefore only
+		// reached for remote (SSH) sources, which require a native virtual-file helper that this
+		// build does not ship. We MUST NOT silently stage to a temp cache (the old behavior, which
+		// also surfaced as a tar transfer task); instead show a clear hint on how to transfer.
+		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			this.statusMessage = 'SSH 文件暂不支持直接拖到 Windows。请用 Ctrl+C 复制，或把本地面板切到目标目录后传输。';
+			this.render();
+			return;
+		}
+
+		// Defensive fallback for a local drag that didn't start natively at dragstart: start the
+		// native drag now with the real Windows paths (no staging, no transfer task).
 		try {
-			const device = this.getPaneDevice(side);
-			if (!device) {
-				return;
-			}
-			const items = this.getSelectedTransferItems(side);
-			if (!items.length) {
-				return;
-			}
-			const dragItems: ITurboFileWindowsDragItem[] = items
+			const dragItems: ITurboFileWindowsDragItem[] = this.getSelectedTransferItems(side)
 				.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent)
 				.map(candidate => ({
 					sourcePath: candidate.path,
@@ -1071,67 +1079,18 @@ export class TurboFileEditor extends EditorPane {
 			if (!dragItems.length) {
 				return;
 			}
-
-			const source = await this.toTransferEndpoint(device, this.paneStates[side].path);
-			let progressId: string | undefined;
-			if (source.kind !== 'local') {
-				const label = dragItems.length > 1 ? `拖到 Windows ${dragItems.length} 项` : `拖到 Windows ${dragItems[0].name}`;
-				task = this.beginTask('transfer', label, `${device.name} -> Windows`);
-				task.progress = 0;
-				task.cancelRequested = false;
-				task.transferItems = items.map(item => this.createTransferTaskItem(item));
-				task.speedSamples = [];
-				progressId = `turbofile-windows-drag-${task.id}-${Date.now()}`;
-				task.progressId = progressId;
-				for (const transferItem of task.transferItems) {
-					transferItem.progressId = progressId;
-					transferItem.status = 'running';
-					transferItem.startedAt = Date.now();
-				}
-				progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task!, event));
-				this.updateTask(task, `正在准备拖到 Windows：${dragItems.length} 项`, 8);
-			}
-
-			const result = await this.sshService.startWindowsFileDrag({ source, items: dragItems, progressId });
+			const result = await this.sshService.startWindowsFileDrag({
+				source: { kind: 'local', path: this.paneStates[side].path, label: device.name },
+				items: dragItems
+			});
 			if (!result.ok) {
-				if (task) {
-					for (const transferItem of task.transferItems ?? []) {
-						transferItem.status = 'error';
-						transferItem.error = result.message;
-						transferItem.endedAt = Date.now();
-					}
-					this.finishTask(task, 'error', `拖出到 Windows 失败：${result.message}`, { error: result.message });
-					return;
-				}
 				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
 				this.render();
-				return;
-			}
-
-			if (task) {
-				const now = Date.now();
-				for (const transferItem of task.transferItems ?? []) {
-					transferItem.status = 'success';
-					transferItem.progress = 100;
-					transferItem.endedAt = now;
-				}
-				this.finishTask(task, 'success', `已准备拖到 Windows：${dragItems.length} 项`, { bytes: task.transferredBytes, strategy: task.strategy });
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (task) {
-				for (const transferItem of task.transferItems ?? []) {
-					transferItem.status = 'error';
-					transferItem.error = message;
-					transferItem.endedAt = Date.now();
-				}
-				this.finishTask(task, 'error', `拖出到 Windows 失败：${message}`, { error: message });
-			} else {
-				this.statusMessage = `拖出到 Windows 失败：${message}`;
-				this.render();
-			}
-		} finally {
-			progressDisposable?.dispose();
+			this.statusMessage = `拖出到 Windows 失败：${message}`;
+			this.render();
 		}
 	}
 
