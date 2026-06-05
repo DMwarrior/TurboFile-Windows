@@ -59,6 +59,8 @@
 	--tf-yellow-soft: rgba(225, 255, 37, 0.26);
 	--tf-pink-soft: rgba(255, 100, 218, 0.16);
 	--turbofile-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+	--turbofile-file-surface-final: var(--vscode-editor-background);
+	--tf-file-surface: var(--turbofile-file-surface-final);
 	--turbofile-pane-border: var(--tf-border);
 	position: relative;
 	height: 100%;
@@ -95,6 +97,21 @@
 	--tf-yellow-soft: rgba(225, 255, 37, 0.26);
 	--tf-pink-soft: rgba(255, 100, 218, 0.16);
 	--turbofile-unified-background: var(--tf-bg);
+	--turbofile-file-surface-final: #ffffff;
+	--tf-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-theme-switching .monaco-workbench,
+body.turbofile-theme-switching .monaco-workbench *,
+body.turbofile-theme-switching .part.editor,
+body.turbofile-theme-switching .part.sidebar,
+body.turbofile-theme-switching .part.activitybar,
+body.turbofile-theme-switching .part.titlebar,
+body.turbofile-theme-switching .part.panel,
+body.turbofile-theme-switching .part.statusbar,
+body.turbofile-theme-switching .turbofile-workbench,
+body.turbofile-theme-switching .turbofile-workbench * {
+	transition: none !important;
 }
 
 .turbofile-editor-shell {
@@ -104,6 +121,18 @@
 	overflow: hidden;
 }
 
+body.turbofile-shell {
+	/* Match the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54). Requesting a
+	   narrower sidebar gets clamped to 54, so pinning the collapsed nav/taskbar to that same width
+	   keeps the nav, the expand/collapse toggle and the bottom taskbar aligned exactly with the
+	   file-browser (editor) boundary. */
+	--turbofile-page-nav-width: 54px;
+}
+
+body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
+	--turbofile-page-nav-width: 152px;
+}
+
 .turbofile-editor-content {
 	height: 100%;
 	min-width: 0;
@@ -111,38 +140,121 @@
 	overflow: hidden;
 }
 
-.turbofile-shell .monaco-workbench,
-.turbofile-shell .part.editor,
-.turbofile-shell .part.sidebar,
-.turbofile-shell .part.panel,
-.turbofile-shell .part.statusbar {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench,
+body.turbofile-shell.turbofile-main-editor-visible .part.editor,
+body.turbofile-shell.turbofile-main-editor-visible .part.sidebar,
+body.turbofile-shell.turbofile-main-editor-visible .part.panel,
+body.turbofile-shell.turbofile-main-editor-visible .part.statusbar {
 	background-color: var(--vscode-activityBar-background) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.panel,
-body.turbofile-shell .monaco-workbench .part.panel > .content,
-body.turbofile-shell .monaco-workbench .part.panel .composite.title,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-wrapper,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-outer-container,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-tabs,
-body.turbofile-shell .monaco-workbench .part.panel .terminal-tab,
-body.turbofile-shell .monaco-workbench .part.panel .xterm {
+/* The side bar always hosts the TurboFile navigation. Keep its TurboFile background even when a
+   document editor is active (which hides the main TurboFile editor pane and therefore drops the
+   `turbofile-main-editor-visible` class), so the left nav looks identical whether or not a
+   document is open. */
+body.turbofile-shell .part.sidebar {
+	background-color: var(--vscode-activityBar-background) !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel > .content,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .composite.title,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-wrapper,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-outer-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tabs,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tab,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
 }
 
-body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench {
+	--turbofile-editor-unified-background: var(--vscode-activityBar-background, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+	--turbofile-file-surface-final: var(--vscode-editor-background);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-dark .monaco-workbench,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench.vs-dark,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench.hc-black {
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench {
+	--turbofile-editor-unified-background: #ffffff;
+	--turbofile-file-surface-final: #ffffff;
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-dark) {
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-editor-unified-background) 46%);
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) {
+	--turbofile-editor-unified-background: #ffffff;
+	--turbofile-file-surface-final: #ffffff;
+	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-and-actions-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-and-actions-container > .monaco-scrollable-element,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions .monaco-action-bar,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-actions .actions-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .editor-layout-actions,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .monaco-scrollable-element,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab.active,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab:hover,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-label,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-label .monaco-icon-label,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .tab-actions,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group > .title .tabs-container .tab .action-label {
+	background: var(--turbofile-file-surface-final, var(--turbofile-editor-file-surface, var(--vscode-editor-background))) !important;
+	background-color: var(--turbofile-file-surface-final, var(--turbofile-editor-file-surface, var(--vscode-editor-background))) !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .title {
 	display: none !important;
 	height: 0 !important;
 	min-height: 0 !important;
 	border: 0 !important;
 }
 
-body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .editor-container {
+body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-visible) .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group.active > .editor-container {
 	height: 100% !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:has(.tab-label[aria-label*="极速传"]) {
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] {
+	width: 64px !important;
+	min-width: 64px !important;
+	max-width: 64px !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-name,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-description,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-separator {
 	display: none !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label {
+	justify-content: center;
+	padding-left: 0 !important;
+	padding-right: 0 !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label .codicon,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .monaco-icon-label::before {
+	font-size: 22px !important;
+	width: 22px !important;
+	height: 22px !important;
+	line-height: 22px !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar,
@@ -181,16 +293,19 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	height: 100%;
 	min-height: 0;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 50px;
+	grid-template-rows: minmax(0, 1fr);
+	padding-bottom: 24px;
+	box-sizing: border-box;
 	overflow: hidden;
 }
 
 .turbofile-transfer-page.has-live-transfer {
-	grid-template-rows: minmax(0, 1fr) auto;
+	grid-template-rows: minmax(0, 1fr);
 }
 
 .turbofile-transfer-page.is-terminal-focused {
 	grid-template-rows: minmax(0, 1fr);
+	padding-bottom: 0;
 }
 
 .turbofile-page-nav {
@@ -198,7 +313,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	min-height: 0;
 	box-sizing: border-box;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 48px;
+	grid-template-rows: minmax(0, 1fr) 24px;
 	border-right: 0;
 	background: var(--turbofile-unified-background);
 	overflow: hidden;
@@ -216,6 +331,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 .turbofile-page-nav-toggle {
 	width: 100%;
 	height: 48px;
+	box-sizing: border-box;
 	display: flex;
 	align-items: center;
 	gap: 10px;
@@ -227,6 +343,15 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	overflow: hidden;
 	position: relative;
 	opacity: 1;
+}
+
+/* Suppress the default blue focus outline on the side-nav buttons (incl. the expand/collapse
+   toggle) so clicking them does not leave a blue ring around the button. */
+.turbofile-page-nav-item:focus,
+.turbofile-page-nav-item:focus-visible,
+.turbofile-page-nav-toggle:focus,
+.turbofile-page-nav-toggle:focus-visible {
+	outline: none !important;
 }
 
 .turbofile-page-nav-item {
@@ -314,6 +439,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 
 .turbofile-page-nav-toggle {
 	justify-content: center;
+	height: 24px;
 	border-top: 1px solid var(--vscode-panel-border);
 	border-radius: 0;
 	padding: 0;
@@ -322,14 +448,14 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 .turbofile-editor-shell.is-nav-expanded .turbofile-page-nav-toggle {
 	justify-content: flex-start;
 	padding: 0 12px;
-	height: 48px;
+	height: 24px;
 	color: var(--vscode-sideBar-foreground);
 }
 
 .turbofile-page-nav.is-nav-expanded .turbofile-page-nav-toggle {
 	justify-content: flex-start;
 	padding: 0 12px;
-	height: 48px;
+	height: 24px;
 	color: var(--vscode-sideBar-foreground);
 }
 
@@ -967,7 +1093,8 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	flex-wrap: wrap;
 }
 
-.turbofile-device-page-card .turbofile-page-card-title .codicon {
+.turbofile-device-page-card .turbofile-page-card-title .codicon,
+.turbofile-device-page-icon {
 	width: 36px;
 	height: 36px;
 	display: inline-flex;
@@ -977,6 +1104,11 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	color: #ffffff;
 	background: linear-gradient(135deg, var(--turbofile-device-card-accent, #6d78ff), var(--turbofile-device-card-accent-2, #3fb6d8));
 	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.turbofile-device-page-icon {
+	color: inherit;
+	padding: 5px;
 }
 
 .turbofile-device-page-card .turbofile-page-card-actions {
@@ -1408,47 +1540,47 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 	color: var(--vscode-descriptionForeground);
 }
 
-.turbofile-shell .part.sidebar .composite.title,
-.turbofile-shell .part.sidebar .pane-header {
+body.turbofile-shell .part.sidebar .composite.title,
+body.turbofile-shell .part.sidebar .pane-header {
 	display: none !important;
 }
 
-.turbofile-shell .part.sidebar {
+body.turbofile-shell .part.sidebar {
 	position: relative;
 	border-right: 0 !important;
 	box-shadow: none !important;
 	overflow: hidden;
 }
 
-body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .monaco-sash.vertical {
 	display: none !important;
 }
 
-.turbofile-shell .part.sidebar .content,
-.turbofile-shell .part.sidebar .composite,
-.turbofile-shell .part.sidebar .split-view-view,
-.turbofile-shell .part.sidebar .pane,
-.turbofile-shell .part.sidebar .pane-body {
+body.turbofile-shell .part.sidebar .content,
+body.turbofile-shell .part.sidebar .composite,
+body.turbofile-shell .part.sidebar .split-view-view,
+body.turbofile-shell .part.sidebar .pane,
+body.turbofile-shell .part.sidebar .pane-body {
 	min-height: 0;
 	height: 100% !important;
 }
 
-.turbofile-shell .part.sidebar .content .turbofile-page-nav {
+body.turbofile-shell .part.sidebar .content .turbofile-page-nav {
 	display: none;
 }
 
-.turbofile-shell .part.sidebar > .turbofile-page-nav {
+body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	position: fixed;
 	left: 0;
 	top: 35px;
-	bottom: 22px;
-	width: 48px;
+	bottom: 0;
+	width: var(--turbofile-page-nav-width);
 	z-index: 20;
 	height: auto;
 }
 
-.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
-	width: 152px;
+body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
+	width: var(--turbofile-page-nav-width);
 }
 
 .turbofile-route-nav {
@@ -1524,6 +1656,14 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	overflow: hidden;
 }
 
+.turbofile-transfer-page.is-pane-maximized .turbofile-main {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.turbofile-pane.is-hidden-by-maximize {
+	display: none;
+}
+
 .turbofile-pane,
 .turbofile-transfer-rail,
 .turbofile-taskbar {
@@ -1552,11 +1692,11 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-pane-header {
-	height: 64px;
+	height: 42px;
 	padding: 6px 8px;
 	display: grid;
-	grid-template-rows: 20px 30px;
-	gap: 4px;
+	grid-template-rows: 30px;
+	gap: 0;
 	border-top: 1px solid var(--turbofile-pane-border);
 	border-bottom: 1px solid var(--turbofile-pane-border);
 	position: relative;
@@ -1645,8 +1785,22 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-device-select-icon {
+	width: 18px;
+	height: 18px;
 	flex: 0 0 auto;
 	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	filter: drop-shadow(0 0 4px rgba(46, 140, 255, 0.22));
+	forced-color-adjust: none;
+}
+
+.turbofile-device-monitor-svg {
+	width: 100%;
+	height: 100%;
+	display: block;
+	flex: 0 0 auto;
 }
 
 .turbofile-device-card > .codicon-chevron-down,
@@ -1734,6 +1888,18 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	font-weight: 600;
 	line-height: 1.25;
 	margin-right: auto;
+}
+
+.turbofile-browser-item-count {
+	flex: 0 0 auto;
+	margin-left: 4px;
+	padding-left: 9px;
+	border-left: 1px solid color-mix(in srgb, var(--turbofile-browser-font-color, var(--vscode-foreground)) 18%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-size: calc(var(--turbofile-browser-font-size, 14px) * 0.92);
+	font-weight: 500;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
 }
 
 .turbofile-toolbar-button,
@@ -2077,7 +2243,7 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	min-height: 0;
 	overflow: auto;
 	overflow-x: hidden;
-	background: var(--vscode-editor-background);
+	background: var(--turbofile-file-surface-final, var(--tf-file-surface, var(--vscode-editor-background)));
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
 	color: var(--turbofile-browser-font-color, var(--vscode-foreground));
@@ -2143,7 +2309,6 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	padding: 0 10px;
 	border: 0;
 	color: var(--turbofile-browser-font-color, var(--vscode-foreground));
-	transition: background-color 90ms ease;
 }
 
 .turbofile-file-row:hover {
@@ -2159,6 +2324,14 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	color: var(--vscode-list-activeSelectionForeground);
 }
 
+.turbofile-file-row.is-renaming {
+	grid-template-columns: minmax(220px, 1fr);
+}
+
+.turbofile-file-row.is-renaming .turbofile-file-meta {
+	display: none;
+}
+
 .turbofile-file-name {
 	min-width: 0;
 	display: flex;
@@ -2167,13 +2340,29 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	transform-origin: left center;
-	transition: transform 80ms ease;
-	will-change: transform;
 }
 
-.turbofile-file-row.is-clickable:active .turbofile-file-name {
-	transform: scale(1.028);
+.turbofile-file-name.is-renaming {
+	overflow: visible;
+}
+
+.turbofile-inline-rename {
+	min-width: 80px;
+	flex: 1 1 auto;
+}
+
+.turbofile-inline-rename .monaco-inputbox {
+	width: 100%;
+	min-height: 26px;
+}
+
+.turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
+.turbofile-inline-rename .monaco-inputbox > input {
+	height: 24px;
+	padding: 2px 4px 3px;
+	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
+	font-size: var(--turbofile-browser-font-size, 14px);
+	line-height: 21px;
 }
 
 .turbofile-file-meta {
@@ -2227,18 +2416,166 @@ body.turbofile-shell .monaco-workbench .monaco-sash.vertical {
 }
 
 .turbofile-taskbar {
+	position: fixed;
+	left: var(--turbofile-page-nav-width);
+	right: 0;
+	bottom: 0;
+	z-index: 40;
 	display: grid;
-	grid-template-columns: minmax(160px, 1fr) auto minmax(160px, 1fr);
-	gap: 8px;
-	align-items: center;
-	padding: 5px 12px;
-	border-top: 1px solid var(--vscode-panel-border);
+	grid-template-rows: minmax(0, 1fr);
+	box-sizing: border-box;
+	min-height: 24px;
+	height: 24px;
+	padding: 0;
+	border-top: 1px solid var(--vscode-statusBar-border, var(--vscode-panel-border));
+	color: var(--vscode-statusBar-foreground);
+	background: var(--vscode-statusBar-background);
+	cursor: pointer;
+	overflow: hidden;
+	user-select: none;
+	font-family: inherit;
+	font-size: 11px;
+	font-weight: 400;
 }
 
 .turbofile-taskbar.has-live-transfer {
-	display: block;
-	padding: 8px 12px;
-	background: var(--turbofile-unified-background);
+	background: var(--vscode-statusBar-background);
+}
+
+.turbofile-taskbar:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.turbofile-statusbar-progress {
+	display: none;
+}
+
+.turbofile-statusbar-progress-value {
+	width: 0;
+	height: 100%;
+	background: var(--vscode-progressBar-background);
+	transition: width 140ms ease-out;
+}
+
+.turbofile-statusbar-progress.is-running .turbofile-statusbar-progress-value {
+	animation: turbofile-statusbar-progress-glow 1.2s ease-in-out infinite;
+}
+
+.turbofile-statusbar-content {
+	min-width: 0;
+	min-height: 0;
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 12px;
+	align-items: center;
+	padding: 0 8px;
+}
+
+.turbofile-statusbar-section {
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	white-space: nowrap;
+}
+
+.turbofile-statusbar-section.is-right {
+	justify-content: flex-end;
+}
+
+.turbofile-statusbar-item {
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-family: inherit;
+	font-size: inherit;
+	font-weight: inherit;
+	line-height: 20px;
+	color: inherit;
+	opacity: 0.94;
+}
+
+.turbofile-statusbar-item span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.turbofile-statusbar-message {
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.turbofile-statusbar-message-title,
+.turbofile-statusbar-message-detail {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.turbofile-statusbar-message-title {
+	font-family: inherit;
+	font-size: inherit;
+	font-weight: inherit;
+	line-height: 20px;
+	color: inherit;
+}
+
+.turbofile-statusbar-message-detail {
+	font-family: inherit;
+	font-size: inherit;
+	font-weight: inherit;
+	line-height: 20px;
+	color: color-mix(in srgb, var(--vscode-statusBar-foreground) 76%, transparent);
+}
+
+.turbofile-statusbar-cancel {
+	width: 20px;
+	height: 20px;
+	border: 0;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-statusBar-foreground);
+	background: transparent;
+	cursor: pointer;
+}
+
+.turbofile-statusbar-cancel:hover {
+	background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-statusBar-foreground) 12%, transparent));
+}
+
+.turbofile-statusbar-cancel:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+@media (max-width: 980px) {
+	.turbofile-statusbar-content {
+		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.turbofile-statusbar-section.is-right {
+		display: none;
+	}
+}
+
+@keyframes turbofile-statusbar-progress-glow {
+	0%,
+	100% {
+		opacity: 0.76;
+	}
+	50% {
+		opacity: 1;
+	}
 }
 
 .turbofile-live-transfer-panel {
@@ -2416,7 +2753,7 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-live-transfer-metrics {
 	display: grid;
-	grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(150px, 0.9fr);
+	grid-template-columns: repeat(5, minmax(110px, 1fr)) minmax(150px, 0.9fr);
 	gap: 8px;
 	align-items: center;
 }
@@ -2887,6 +3224,19 @@ body.hc-black .turbofile-live-transfer-panel {
 	border-radius: 3px;
 	background: var(--vscode-input-background);
 	color: var(--vscode-input-foreground);
+	pointer-events: auto;
+}
+
+.turbofile-device-field input {
+	cursor: text;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.turbofile-device-field select {
+	cursor: pointer;
+	user-select: auto;
+	-webkit-user-select: auto;
 }
 
 .turbofile-device-field.is-wide {
@@ -3157,6 +3507,8 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-foreground) 3%);
 	color: var(--vscode-foreground);
 	cursor: pointer;
+	text-align: left;
+	user-select: none;
 	transition: border-color 120ms ease, box-shadow 120ms ease, transform 90ms ease;
 	content-visibility: auto;
 	contain: layout paint style;
@@ -3175,6 +3527,11 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-image-page-card.is-selected {
 	border-color: #22c55e;
 	box-shadow: 0 0 0 2px color-mix(in srgb, #22c55e 25%, transparent);
+}
+
+.turbofile-image-page-card:focus-visible {
+	outline: 2px solid color-mix(in srgb, #22c55e 62%, transparent);
+	outline-offset: 2px;
 }
 
 .turbofile-image-page-card::after {
@@ -3216,7 +3573,16 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-card-name {
-	display: none;
+	display: block;
+	padding: 8px 10px 10px;
+	color: color-mix(in srgb, var(--vscode-foreground) 84%, transparent);
+	line-height: 1.25;
+	text-align: center;
+	overflow-wrap: anywhere;
+	white-space: normal;
+	word-break: break-word;
+	cursor: text;
+	user-select: text;
 }
 
 .turbofile-image-preview-overlay {
@@ -3899,9 +4265,10 @@ body.hc-black .turbofile-live-transfer-panel {
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench {
 	--tf-bg: var(--vscode-editor-background);
-	--tf-bg-secondary: color-mix(in srgb, var(--tf-file-surface) 92%, var(--vscode-foreground) 4%);
-	--tf-surface: var(--tf-file-surface);
-	--tf-file-surface: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
+	--turbofile-file-surface-final: color-mix(in srgb, var(--vscode-editor-background) 54%, var(--turbofile-unified-background) 46%);
+	--tf-file-surface: var(--turbofile-file-surface-final);
+	--tf-bg-secondary: color-mix(in srgb, var(--turbofile-file-surface-final) 92%, var(--vscode-foreground) 4%);
+	--tf-surface: var(--turbofile-file-surface-final);
 	--tf-surface-muted: color-mix(in srgb, var(--vscode-foreground) 6%, var(--tf-file-surface));
 	--tf-text: var(--vscode-foreground);
 	--tf-text-muted: var(--vscode-descriptionForeground);
@@ -4471,8 +4838,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 }
 
 .vs .turbofile-taskbar {
-	border-top: 1px solid var(--tf-border);
-	background: var(--tf-bg);
+	border-top: 1px solid var(--vscode-statusBar-border, var(--tf-border));
+	color: var(--vscode-statusBar-foreground);
+	background: var(--vscode-statusBar-background);
 }
 
 .vs .turbofile-live-transfer-panel {
@@ -4726,10 +5094,11 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border: 1px solid var(--tf-image-border);
 	border-radius: 12px;
 	background: var(--tf-image-surface);
+	color: var(--tf-image-text);
 	box-shadow: var(--tf-image-card-shadow);
 	overflow: hidden;
 	transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
-	contain-intrinsic-size: 220px 160px;
+	contain-intrinsic-size: 220px 218px;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card:hover,
@@ -4806,7 +5175,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	right: 0;
 	bottom: 0;
 	display: grid;
-	grid-template-columns: minmax(22px, max-content) minmax(0, 1fr) max-content;
+	grid-template-columns: minmax(22px, max-content) minmax(0, 1fr);
 	align-items: center;
 	gap: 8px;
 	min-height: 34px;
@@ -4815,8 +5184,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 0 0 10px 10px;
 	background: var(--tf-image-info-bg);
 	color: var(--tf-image-info-text);
+	font-family: var(--vscode-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: 12px;
-	font-weight: 700;
+	font-weight: 600;
 	line-height: 1.2;
 	z-index: 2;
 	opacity: 0;
@@ -4835,7 +5205,27 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-image-page-card-dimensions {
 	color: var(--tf-image-info-text);
 	white-space: nowrap;
-	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.turbofile-image-page-card-dimensions {
+	justify-self: end;
+}
+
+.vs .turbofile-workbench .turbofile-image-page-card-name,
+.vs-dark .turbofile-workbench .turbofile-image-page-card-name,
+.hc-black .turbofile-workbench .turbofile-image-page-card-name,
+.turbofile-workbench.is-turbofile-light .turbofile-image-page-card-name,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-name {
+	display: block;
+	padding: 8px 10px 10px;
+	color: var(--tf-image-text);
+	line-height: 1.25;
+	text-align: center;
+	overflow-wrap: anywhere;
+	white-space: normal;
+	word-break: break-word;
+	cursor: text;
+	user-select: text;
 }
 
 .turbofile-image-page-card-filename {
@@ -4988,8 +5378,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 12px;
 	background: var(--tf-image-control-bg);
 	color: var(--tf-image-muted);
-	font-size: 12px;
-	font-weight: 600;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	box-shadow: var(--tf-image-card-shadow);
@@ -5122,13 +5510,21 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 
 .vs .turbofile-workbench,
 .turbofile-workbench.is-turbofile-light {
-	--tf-preview-side-fill: #0f1f8f;
+	--tf-preview-side-fill: rgba(255, 255, 255, 0.94);
+	--tf-preview-side-hover: #ffffff;
+	--tf-preview-side-image-bg: #f3f4f6;
+	--tf-preview-side-icon-bg: rgba(17, 24, 39, 0.68);
+	--tf-preview-side-icon-hover: rgba(17, 24, 39, 0.82);
 }
 
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench,
 .turbofile-workbench.is-turbofile-dark {
-	--tf-preview-side-fill: #101d78;
+	--tf-preview-side-fill: rgba(15, 16, 19, 0.94);
+	--tf-preview-side-hover: rgba(21, 23, 27, 0.96);
+	--tf-preview-side-image-bg: #0b0c0f;
+	--tf-preview-side-icon-bg: rgba(0, 0, 0, 0.56);
+	--tf-preview-side-icon-hover: rgba(0, 0, 0, 0.7);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-overlay,
@@ -5312,8 +5708,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	border-radius: 10px;
 	background: var(--tf-preview-control-bg);
 	color: var(--tf-preview-control-text);
-	font-size: 12px;
-	font-weight: 500;
+	font-family: var(--vscode-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
+	font-size: 13px;
+	font-weight: 400;
 	box-shadow: var(--tf-preview-elevated-shadow);
 	backdrop-filter: none;
 	pointer-events: auto;
@@ -5330,7 +5727,6 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	font-weight: 700;
 	color: var(--tf-preview-control-text);
 }
 
@@ -5406,18 +5802,18 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side {
 	top: auto;
-	bottom: 32px;
-	width: 80px;
-	height: 80px;
-	padding: 6px;
-	border: 0;
-	border-radius: 10px;
+	bottom: 28px;
+	width: 156px;
+	height: 96px;
+	padding: 10px;
+	border: 1px solid var(--tf-preview-border-ring);
+	border-radius: 13px;
 	background: var(--tf-preview-side-fill);
-	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
+	box-shadow: var(--tf-preview-elevated-shadow);
 	transform: none;
 	overflow: hidden;
 	z-index: 30;
-	backdrop-filter: blur(8px) saturate(1.2) brightness(1.01);
+	backdrop-filter: blur(10px) saturate(1.05);
 	transition: transform 200ms ease, box-shadow 200ms ease, background 200ms ease;
 }
 
@@ -5426,7 +5822,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side.is-left,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-left,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-left {
-	left: 8px;
+	left: 12px;
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side.is-right,
@@ -5434,7 +5830,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side.is-right,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side.is-right,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side.is-right {
-	right: 8px;
+	right: 12px;
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side:hover,
@@ -5442,9 +5838,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side:hover,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover {
-	background: var(--tf-preview-side-fill);
+	background: var(--tf-preview-side-hover);
 	box-shadow: var(--tf-preview-elevated-shadow), 0 0 0 1px var(--tf-preview-border-ring);
-	transform: scale(1.05);
+	transform: translateY(-1px);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-side img,
@@ -5454,9 +5850,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side img {
 	width: 100%;
 	height: 100%;
-	border-radius: 0;
+	border-radius: 7px;
 	object-fit: contain;
-	background: var(--tf-preview-side-fill);
+	background: var(--tf-preview-side-image-bg);
 	box-sizing: border-box;
 }
 
@@ -5465,8 +5861,15 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side-icon {
+	inset: auto;
+	top: 50%;
+	left: 50%;
+	width: 34px;
+	height: 34px;
+	border-radius: 999px;
 	color: #ffffff;
-	background: rgba(0, 0, 0, 0.4);
+	background: var(--tf-preview-side-icon-bg);
+	transform: translate(-50%, -50%);
 	transition: background 200ms ease;
 }
 
@@ -5475,7 +5878,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-light .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-preview-side:hover .turbofile-image-preview-side-icon {
-	background: rgba(0, 0, 0, 0.2);
+	background: var(--tf-preview-side-icon-hover);
 }
 
 .vs .turbofile-workbench .turbofile-image-preview-navigation,

@@ -11,7 +11,7 @@ import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboF
 const TURBOFILE_DEVICES_STORAGE_KEY = 'turbofile.devices';
 const TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY = 'turbofile.deletedDefaultDevices';
 const TURBOFILE_SECRET_PREFIX = 'turbofile.device.secret';
-const TURBOFILE_SCP_DEFAULT_MIGRATION_KEY = 'turbofile.transferProtocolDefault.scp.v1';
+const TURBOFILE_AUTO_FAST_DEFAULT_MIGRATION_KEY = 'turbofile.transferProtocolDefault.autoFast.v1';
 
 export interface TurboFileDeviceDraft {
 	readonly name: string;
@@ -45,7 +45,7 @@ function getDefaultCapabilitiesForPlatform(platform: TurboFileDevicePlatform | u
 }
 
 function normalizeTransferProtocol(value: unknown): TurboFileTransferProtocol {
-	return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
+	return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
 }
 
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
@@ -68,7 +68,7 @@ export class TurboFileDeviceStore {
 				return [];
 			}
 			const normalized = devices.map(device => this.normalizeDevice(device)).filter((device): device is TurboFileDevice => !!device && device.platform !== 'windows');
-			return this.migrateDefaultTransferProtocolToScp(normalized);
+			return this.migrateDefaultTransferProtocolToAutoFast(normalized);
 		} catch {
 			return [];
 		}
@@ -251,14 +251,14 @@ export class TurboFileDeviceStore {
 		this.storageService.store(TURBOFILE_DEVICES_STORAGE_KEY, JSON.stringify(devices), StorageScope.PROFILE, StorageTarget.MACHINE);
 	}
 
-	private migrateDefaultTransferProtocolToScp(devices: TurboFileDevice[]): TurboFileDevice[] {
-		if (this.storageService.get(TURBOFILE_SCP_DEFAULT_MIGRATION_KEY, StorageScope.PROFILE, 'false') === 'true') {
+	private migrateDefaultTransferProtocolToAutoFast(devices: TurboFileDevice[]): TurboFileDevice[] {
+		if (this.storageService.get(TURBOFILE_AUTO_FAST_DEFAULT_MIGRATION_KEY, StorageScope.PROFILE, 'false') === 'true') {
 			return devices;
 		}
 
 		let changed = false;
 		const migrated = devices.map(device => {
-			if (device.preferredTransferProtocol !== 'sftp') {
+			if (device.preferredTransferProtocol !== 'scp') {
 				return device;
 			}
 			changed = true;
@@ -271,7 +271,7 @@ export class TurboFileDeviceStore {
 		if (changed) {
 			this.storeDevices(migrated);
 		}
-		this.storageService.store(TURBOFILE_SCP_DEFAULT_MIGRATION_KEY, 'true', StorageScope.PROFILE, StorageTarget.MACHINE);
+		this.storageService.store(TURBOFILE_AUTO_FAST_DEFAULT_MIGRATION_KEY, 'true', StorageScope.PROFILE, StorageTarget.MACHINE);
 		return migrated;
 	}
 
@@ -315,7 +315,8 @@ export class TurboFileDeviceStore {
 			capabilities: {
 				...defaultCapabilities,
 				...device.capabilities,
-				rsync: device.capabilities?.rsync ?? defaultCapabilities.rsync
+				rsync: device.capabilities?.rsync ?? defaultCapabilities.rsync,
+				tar: device.capabilities?.tar ?? device.capabilities?.archive ?? defaultCapabilities.tar
 			},
 			preferredTransferProtocol: normalizeTransferProtocol(device.preferredTransferProtocol),
 			lastConnectedAt: device.lastConnectedAt

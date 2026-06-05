@@ -508,7 +508,8 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				'resources/win32/xml.ico',
 				'resources/win32/yaml.ico',
 				'resources/win32/code_70x70.png',
-				'resources/win32/code_150x150.png'
+				'resources/win32/code_150x150.png',
+				'resources/turbofile/**'
 			], { base: '.' }));
 			if (embedded) {
 				all = es.merge(all, gulp.src('resources/win32/sessions.ico', { base: '.' }));

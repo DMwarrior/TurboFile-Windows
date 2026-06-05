@@ -5,8 +5,8 @@
 
 export type TurboFileDevicePlatform = 'linux' | 'windows' | 'wsl' | 'unknown';
 export type TurboFileAuthType = 'password' | 'privateKey';
-export type TurboFileTransferProtocol = 'sftp' | 'scp' | 'rsync';
-export const defaultTurboFileTransferProtocol: TurboFileTransferProtocol = 'scp';
+export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync';
+export const defaultTurboFileTransferProtocol: TurboFileTransferProtocol = 'auto-fast';
 
 export interface TurboFileDevice {
 	readonly id: string;
@@ -28,6 +28,7 @@ export interface TurboFileDeviceCapabilities {
 	readonly sftp: boolean;
 	readonly scp: boolean;
 	readonly rsync: boolean;
+	readonly tar: boolean;
 	readonly shell: boolean;
 	readonly archive: boolean;
 }
@@ -37,6 +38,7 @@ export const defaultTurboFileDeviceCapabilities: TurboFileDeviceCapabilities = {
 	sftp: true,
 	scp: true,
 	rsync: false,
+	tar: true,
 	shell: true,
 	archive: true
 };

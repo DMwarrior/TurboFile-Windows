@@ -8,7 +8,8 @@ import { createReadStream, createWriteStream, promises as fsp } from 'fs';
 import { basename, dirname, join } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { PassThrough } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
@@ -23,6 +24,7 @@ const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
+const WINDOWS_DRAG_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_VERSION = 1;
 const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
@@ -53,11 +55,13 @@ const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
 const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
-// Hard wall-clock budget for deciding the direct route. Both directions are probed in parallel
-// and the first one that confirms direct reachability wins; if none confirms within this budget
-// the transfer falls back to relay. Kept under ~1s so a transfer always starts quickly.
+// Hard wall-clock budget for collecting direct route candidates. Kept under ~1s so a transfer
+// always starts quickly, but we still remember both working directions when both probes finish.
 const DIRECT_SSH_ROUTE_DECISION_DEADLINE_MS = 900;
 const DIRECT_SSH_ROUTE_PROBE_TIMEOUT_SECONDS = 1;
+const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 30 * 1000;
+const DIRECT_TRANSFER_STALL_TIMEOUT_MS = 30 * 1000;
+const DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS = 1000;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
@@ -212,6 +216,12 @@ interface IRemoteDirectoryTransferPlan {
 	readonly totalBytes: number;
 }
 
+interface ITarBatchPlan {
+	readonly parentPath: string;
+	readonly names: readonly string[];
+	readonly targetNames: readonly string[];
+}
+
 interface ITransferProgressSnapshot {
 	lastAt: number;
 	lastBytes: number;
@@ -221,6 +231,9 @@ interface IRemoteExecOptions {
 	readonly onStdout?: (chunk: string) => void;
 	readonly onStderr?: (chunk: string) => void;
 	readonly timeoutMs?: number;
+	readonly inactivityTimeoutMs?: number;
+	readonly inactivityMessage?: string;
+	readonly getActivityTime?: () => number | undefined;
 }
 
 interface IImageSize {
@@ -249,12 +262,23 @@ interface IImageThumbnailCacheMetadata {
 	readonly createdAt: number;
 }
 
-type TurboFileDirectRsyncRouteMode = 'source-push' | 'target-pull' | 'unavailable';
-type TurboFileDirectScpRouteMode = TurboFileDirectRsyncRouteMode;
+type TurboFileDirectSshRoute = 'source-push' | 'target-pull';
 
 interface IRemoteScpCredential {
 	readonly identityPath?: string;
 	readonly cleanupCommand?: string;
+}
+
+interface ILocalRsyncTool {
+	readonly executable: string;
+	readonly sshExecutable?: string;
+	readonly pathFlavor: 'cygwin' | 'posix';
+	readonly env: NodeJS.ProcessEnv;
+}
+
+interface ILocalSshTool {
+	readonly executable: string;
+	readonly env: NodeJS.ProcessEnv;
 }
 
 export class TurboFileSshMainService implements ITurboFileSshService {
@@ -275,8 +299,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
-	private readonly directSshRouteCache = new Map<string, TurboFileDirectScpRouteMode>();
-	private readonly directSshRoutePending = new Map<string, Promise<TurboFileDirectScpRouteMode>>();
+	private readonly directSshRouteCache = new Map<string, readonly TurboFileDirectSshRoute[]>();
+	private readonly directSshRoutePending = new Map<string, Promise<readonly TurboFileDirectSshRoute[]>>();
+	private readonly directSshRouteFailureCooldowns = new Map<string, number>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 
@@ -374,6 +399,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					scp,
 					rsync,
 					sshpass,
+					tar,
 					shell: true,
 					archive: tar || zip || unzip
 				}
@@ -517,26 +543,39 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.throwIfTransferCanceled(request.progressId);
 				const stat = await fsp.stat(request.source.path);
 				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
-				if (!stat.isDirectory()) {
+				if (stat.isDirectory()) {
+					const tarResult = await this.tryLocalToSshTarTransfer(request, bytes, startedAt);
+					if (tarResult?.ok) {
+						this.clearRemoteDirectoryListingCache(request.target);
+						return tarResult;
+					}
+					if (isExplicitCommandTransferMode(request.target.preferredProtocol)) {
+						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt);
+						if (commandResult?.ok) {
+							this.clearRemoteDirectoryListingCache(request.target);
+							return commandResult;
+						}
+					}
+				} else {
 					const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt);
 					if (commandResult?.ok) {
 						this.clearRemoteDirectoryListingCache(request.target);
 						return commandResult;
 					}
 				}
-				this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP upload.', true);
+				this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP upload.', true, { strategy: 'sftp-upload' });
 				let transferredBytes = 0;
 				const onDelta = (delta: number): void => {
 					this.throwIfTransferCanceled(request.progressId);
 					transferredBytes += delta;
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over SFTP.');
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over SFTP.', false, { strategy: 'sftp-upload' });
 				};
 				const onTotal = (totalBytes: number): void => {
 					bytes = Math.max(bytes, totalBytes);
-					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Uploading over SFTP.', true);
+					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Uploading over SFTP.', true, { strategy: 'sftp-upload' });
 				};
 				if (stat.isDirectory()) {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and uploading directory over SFTP.', true);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and uploading directory over SFTP.', true, { strategy: 'sftp-upload' });
 					await this.uploadDirectoryConcurrent(request.target, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
 					await this.withSftp(request.target, async sftp => {
@@ -546,7 +585,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}, request.progressId);
 				}
 				this.throwIfTransferCanceled(request.progressId);
-				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true, { strategy: 'sftp-upload' });
 				this.clearRemoteDirectoryListingCache(request.target);
 				return this.createTransferResult(true, 'sftp-upload', bytes, 'SFTP upload completed.', startedAt, request.progressId);
 			}
@@ -559,7 +598,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bytes = sourceType === 'directory'
 					? Math.max(0, request.expectedBytes ?? 0)
 					: Math.max(0, request.expectedBytes ?? 0);
-				if (sourceType !== 'directory') {
+				if (sourceType === 'directory') {
+					const tarResult = await this.trySshToLocalTarTransfer(request, bytes, startedAt);
+					if (tarResult?.ok) {
+						return tarResult;
+					}
+					if (isExplicitCommandTransferMode(request.source.preferredProtocol)) {
+						const commandResult = await this.trySshToLocalCommandTransfer(request, bytes, startedAt);
+						if (commandResult?.ok) {
+							return commandResult;
+						}
+					}
+				} else {
 					if (bytes <= 0) {
 						bytes = await this.withSftp(request.source, async sftp => (await this.remoteStat(sftp, request.source.path)).size, request.progressId).catch(() => bytes);
 					}
@@ -572,14 +622,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const onDelta = (delta: number): void => {
 					this.throwIfTransferCanceled(request.progressId);
 					transferredBytes += delta;
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Downloading over SFTP.');
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Downloading over SFTP.', false, { strategy: 'sftp-download' });
 				};
 				const onTotal = (totalBytes: number): void => {
 					bytes = Math.max(bytes, totalBytes);
-					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Downloading over SFTP.', true);
+					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Downloading over SFTP.', true, { strategy: 'sftp-download' });
 				};
 				if (sourceType === 'directory') {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and downloading directory over SFTP.', true);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and downloading directory over SFTP.', true, { strategy: 'sftp-download' });
 					await this.downloadDirectoryConcurrent(request.source, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
 					await this.withSftp(request.source, async sftp => {
@@ -587,12 +637,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						if (bytes <= 0) {
 							bytes = (await this.remoteStat(sftp, request.source.path)).size;
 						}
-						this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true);
+						this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing SFTP download.', true, { strategy: 'sftp-download' });
 						await this.fastGetWithFallback(sftp, request.source.path, request.target.path, bytes, onDelta, request.progressId);
 					}, request.progressId);
 				}
 				this.throwIfTransferCanceled(request.progressId);
-				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP download completed.', true);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP download completed.', true, { strategy: 'sftp-download' });
 				return this.createTransferResult(true, 'sftp-download', bytes, 'SFTP download completed.', startedAt, request.progressId);
 			}
 
@@ -697,6 +747,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async trySshToSshDirectTransfer(protocol: TurboFileTransferProtocol, request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		switch (protocol) {
+			case 'auto-fast': {
+				let tarFailure: unknown;
+				try {
+					const tarResult = await this.tryDirectTarTransfer(request, startedAt);
+					if (tarResult?.ok) {
+						return tarResult;
+					}
+				} catch (error) {
+					tarFailure = error;
+				}
+				const scpResult = await this.tryDirectScpTransfer(request, startedAt);
+				if (scpResult?.ok) {
+					return scpResult;
+				}
+				if (tarFailure) {
+					throw tarFailure;
+				}
+				return undefined;
+			}
 			case 'rsync':
 				return this.tryDirectRsyncTransfer(request, startedAt);
 			case 'sftp':
@@ -709,6 +778,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async trySshToSshRelayTransfer(protocol: TurboFileTransferProtocol, request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		switch (protocol) {
+			case 'auto-fast': {
+				let tarFailure: unknown;
+				try {
+					const tarResult = await this.tryTarRelayTransfer(request, startedAt);
+					if (tarResult?.ok) {
+						return tarResult;
+					}
+				} catch (error) {
+					tarFailure = error;
+				}
+				const scpResult = await this.tryScpRelayTransfer(request, startedAt);
+				if (scpResult?.ok) {
+					return scpResult;
+				}
+				if (tarFailure) {
+					throw tarFailure;
+				}
+				return undefined;
+			}
 			case 'rsync':
 				return this.tryTunneledRsyncRelayTransfer(request, startedAt);
 			case 'sftp':
@@ -728,21 +816,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
 					this.markTransferDataStarted(request.progressId);
-					await this.runLocalRsyncUpload(request);
-					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync upload completed.', true);
+					await this.runLocalRsyncUpload(request, transferredBytes => {
+						this.fireTransferProgress(request, bytes > 0 ? Math.min(transferredBytes, bytes) : transferredBytes, bytes, 'transfer', 'Uploading over local rsync.', false, { strategy: 'rsync-upload' });
+					});
+					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync upload completed.', true, { strategy: 'rsync-upload' });
 					return this.createTransferResult(true, 'rsync-upload', bytes, 'Local rsync upload completed.', startedAt, request.progressId);
 				}
-				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local SCP.', true);
+				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local SCP.', true, { strategy: 'scp-upload' });
 				await this.runLocalScpUpload(request, bytes, transferredBytes => {
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over local SCP.');
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over local SCP.', false, { strategy: 'scp-upload' });
 				});
-				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true, { strategy: 'scp-upload' });
 				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt, request.progressId);
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
+				}
+				if (protocol === 'rsync' && request.target.preferredProtocol === 'rsync') {
+					throw error;
 				}
 				if (!isRecoverableLocalCommandTransferError(error)) {
 					return undefined;
@@ -761,21 +854,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
 					this.markTransferDataStarted(request.progressId);
-					await this.runLocalRsyncDownload(request);
-					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync download completed.', true);
+					await this.runLocalRsyncDownload(request, transferredBytes => {
+						this.fireTransferProgress(request, bytes > 0 ? Math.min(transferredBytes, bytes) : transferredBytes, bytes, 'transfer', 'Downloading over local rsync.', false, { strategy: 'rsync-download' });
+					});
+					this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local rsync download completed.', true, { strategy: 'rsync-download' });
 					return this.createTransferResult(true, 'rsync-download', bytes, 'Local rsync download completed.', startedAt, request.progressId);
 				}
-				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local SCP.', true);
+				this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local SCP.', true, { strategy: 'scp-download' });
 				await this.runLocalScpDownload(request, bytes, delta => {
-					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Downloading over local SCP.');
+					this.fireTransferProgress(request, delta, bytes, 'transfer', 'Downloading over local SCP.', false, { strategy: 'scp-download' });
 				});
-				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP download completed.', true);
+				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP download completed.', true, { strategy: 'scp-download' });
 				return this.createTransferResult(true, 'scp-download', bytes, 'Local SCP download completed.', startedAt, request.progressId);
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
+				}
+				if (protocol === 'rsync' && request.source.preferredProtocol === 'rsync') {
+					throw error;
 				}
 				if (!isRecoverableLocalCommandTransferError(error)) {
 					return undefined;
@@ -783,6 +881,248 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		return undefined;
+	}
+
+	private async tryLocalToSshTarTransfer(request: ITurboFileTransferRequest, expectedBytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
+			return undefined;
+		}
+		if (request.target.preferredProtocol && request.target.preferredProtocol !== 'auto-fast') {
+			return undefined;
+		}
+		if (request.target.supportsTar === false || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+
+		try {
+			const stat = await fsp.stat(request.source.path);
+			if (!stat.isDirectory()) {
+				return undefined;
+			}
+			let bytes = Math.max(0, expectedBytes);
+			if (bytes <= 0) {
+				bytes = await getLocalPathSize(request.source.path).catch(() => 0);
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing tar upload.', true, { strategy: 'tar-upload' });
+			let archiveBytes = 0;
+			const onArchiveDelta = (delta: number): void => {
+				this.throwIfTransferCanceled(request.progressId);
+				archiveBytes += Math.max(0, delta);
+				this.fireTransferProgress(request, bytes > 0 ? Math.min(archiveBytes, bytes) : archiveBytes, bytes, 'transfer', 'Tar upload in progress.', false, { strategy: 'tar-upload' });
+			};
+			this.markTransferDataStarted(request.progressId);
+			await this.runLocalDirectoryTarUpload(request.source.path, request.target, request.progressId, onArchiveDelta);
+			this.throwIfTransferCanceled(request.progressId);
+			const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
+			if (bytes > 0 && targetSize !== bytes) {
+				throw new Error(`Tar upload size mismatch: expected ${bytes}, got ${targetSize}.`);
+			}
+			const resultBytes = bytes > 0 ? bytes : targetSize;
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar upload completed.', true, { strategy: 'tar-upload' });
+			return this.createTransferResult(true, 'tar-upload', resultBytes, 'Tar upload completed.', startedAt, request.progressId);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			this.clearTransferDataTiming(request.progressId);
+			return undefined;
+		}
+	}
+
+	private async trySshToLocalTarTransfer(request: ITurboFileTransferRequest, expectedBytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'local' || !request.source.connection) {
+			return undefined;
+		}
+		if (request.source.preferredProtocol && request.source.preferredProtocol !== 'auto-fast') {
+			return undefined;
+		}
+		if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
+			return undefined;
+		}
+
+		try {
+			const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+			if (sourceType !== 'directory') {
+				return undefined;
+			}
+			let bytes = Math.max(0, expectedBytes);
+			if (bytes <= 0) {
+				bytes = await this.getRemotePathContentSizeByCommand(request.source).catch(() => 0);
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing tar download.', true, { strategy: 'tar-download' });
+			await fsp.rm(request.target.path, { recursive: true, force: true }).catch(() => undefined);
+			await ensureLocalDirectory(request.target.path);
+			let archiveBytes = 0;
+			const onArchiveDelta = (delta: number): void => {
+				this.throwIfTransferCanceled(request.progressId);
+				archiveBytes += Math.max(0, delta);
+				this.fireTransferProgress(request, bytes > 0 ? Math.min(archiveBytes, bytes) : archiveBytes, bytes, 'transfer', 'Tar download in progress.', false, { strategy: 'tar-download' });
+			};
+			this.markTransferDataStarted(request.progressId);
+			await this.runRemoteDirectoryTarDownload(request.source, request.target.path, request.progressId, onArchiveDelta);
+			this.throwIfTransferCanceled(request.progressId);
+			const targetSize = await getLocalPathSize(request.target.path).catch(() => bytes);
+			if (bytes > 0 && targetSize !== bytes) {
+				throw new Error(`Tar download size mismatch: expected ${bytes}, got ${targetSize}.`);
+			}
+			const resultBytes = bytes > 0 ? bytes : targetSize;
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar download completed.', true, { strategy: 'tar-download' });
+			return this.createTransferResult(true, 'tar-download', resultBytes, 'Tar download completed.', startedAt, request.progressId);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			this.clearTransferDataTiming(request.progressId);
+			return undefined;
+		}
+	}
+
+	private async runLocalDirectoryTarUpload(localDirectory: string, target: ITurboFileTransferEndpoint, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		if (target.kind !== 'ssh' || !target.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		try {
+			await this.runNativeLocalTarUpload(['-cf', '-', '-C', localDirectory, '.'], target.connection, buildTarExtractToExactDirectoryCommand(target.path), progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Native tar|ssh is the fast path. If it is unavailable, fall back to the ssh2 stream path.
+		}
+		const configResult = await this.createConnectConfig(target.connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		let client: ISSHClient | undefined;
+		let tarProcess: ReturnType<typeof spawn> | undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+			tarProcess?.kill();
+			client?.end();
+		});
+		try {
+			client = await this.connect(configResult.config);
+			const targetCommand = buildTarExtractToExactDirectoryCommand(target.path);
+			const targetStream = await this.openRemoteCommandStream(client, targetCommand, 'tar upload extract', true);
+			tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localDirectory, '.'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+			if (!tarProcess.stdout) {
+				throw new Error('Local tar upload did not provide stdout.');
+			}
+			const tarClose = waitForLocalProcessClose(tarProcess, 'local tar upload');
+			await pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
+			await tarClose;
+			await targetStream.close;
+		} finally {
+			unregisterCancel();
+			client?.end();
+		}
+	}
+
+	private async runRemoteDirectoryTarDownload(source: ITurboFileTransferEndpoint, localDirectory: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		if (source.kind !== 'ssh' || !source.connection) {
+			throw new Error('Missing SSH source.');
+		}
+		try {
+			await this.runNativeLocalTarDownload(source.connection, buildTarCreateFromDirectoryCommand(source.path), ['-xf', '-', '-C', localDirectory], progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Native ssh|tar is the fast path. If it is unavailable, fall back to the ssh2 stream path.
+		}
+		const configResult = await this.createConnectConfig(source.connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		let client: ISSHClient | undefined;
+		let tarProcess: ReturnType<typeof spawn> | undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+			tarProcess?.kill();
+			client?.end();
+		});
+		try {
+			client = await this.connect(configResult.config);
+			const sourceStream = await this.openRemoteCommandStream(client, buildTarCreateFromDirectoryCommand(source.path), 'tar download create');
+			tarProcess = spawn('tar.exe', ['-xf', '-', '-C', localDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+			if (!tarProcess.stdin || !tarProcess.stdout) {
+				throw new Error('Local tar download did not provide pipes.');
+			}
+			tarProcess.stdout.resume();
+			const tarClose = waitForLocalProcessClose(tarProcess, 'local tar download');
+			await pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, createProgressPassThrough(onArchiveDelta), tarProcess.stdin);
+			await sourceStream.close;
+			await tarClose;
+		} finally {
+			unregisterCancel();
+			client?.end();
+		}
+	}
+
+	private async runNativeLocalTarUpload(tarArgs: string[], connection: ITurboFileSshConnectionOptions, remoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const tool = await resolveLocalSshTool();
+		await withNativeOpenSshArgs(connection, tool, remoteCommand, async (sshArgs, env) => {
+			let tarProcess: ReturnType<typeof spawn> | undefined;
+			let sshProcess: ReturnType<typeof spawn> | undefined;
+			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (tarProcess) {
+					killLocalProcessTree(tarProcess);
+				}
+				if (sshProcess) {
+					killLocalProcessTree(sshProcess);
+				}
+			});
+			try {
+				tarProcess = spawn('tar.exe', tarArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				sshProcess = spawn(tool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env });
+				sshProcess.stdout?.resume();
+				if (!tarProcess.stdout || !sshProcess.stdin) {
+					throw new Error('Native tar upload did not provide required pipes.');
+				}
+				const tarClose = waitForLocalProcessClose(tarProcess, 'native tar upload create');
+				const sshClose = waitForLocalProcessClose(sshProcess, 'native tar upload extract');
+				await pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), sshProcess.stdin);
+				await tarClose;
+				await sshClose;
+			} finally {
+				unregisterCancel();
+			}
+		});
+	}
+
+	private async runNativeLocalTarDownload(connection: ITurboFileSshConnectionOptions, remoteCommand: string, tarArgs: string[], progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const tool = await resolveLocalSshTool();
+		await withNativeOpenSshArgs(connection, tool, remoteCommand, async (sshArgs, env) => {
+			let sshProcess: ReturnType<typeof spawn> | undefined;
+			let tarProcess: ReturnType<typeof spawn> | undefined;
+			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (sshProcess) {
+					killLocalProcessTree(sshProcess);
+				}
+				if (tarProcess) {
+					killLocalProcessTree(tarProcess);
+				}
+			});
+			try {
+				sshProcess = spawn(tool.executable, sshArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
+				tarProcess = spawn('tar.exe', tarArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+				tarProcess.stdout?.resume();
+				if (!sshProcess.stdout || !tarProcess.stdin) {
+					throw new Error('Native tar download did not provide required pipes.');
+				}
+				const sshClose = waitForLocalProcessClose(sshProcess, 'native tar download create');
+				const tarClose = waitForLocalProcessClose(tarProcess, 'native tar download extract');
+				await pipeline(sshProcess.stdout, createProgressPassThrough(onArchiveDelta), tarProcess.stdin);
+				await sshClose;
+				await tarClose;
+			} finally {
+				unregisterCancel();
+			}
+		});
 	}
 
 	private async runLocalScpUpload(request: ITurboFileTransferRequest, bytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
@@ -851,9 +1191,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async uploadPathWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, recursive: boolean, initialRemoteSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
 		const stopGrowthTiming = recursive
-			? this.beginRemotePathGrowthTiming(progressId, { kind: 'ssh', path: remotePath, connection }, initialRemoteSize, expectedBytes, onProgress)
+			? () => undefined
 			: this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize, expectedBytes, onProgress);
 		try {
+			if (recursive) {
+				this.markTransferDataStarted(progressId);
+			}
 			const sourceArg = recursive ? getNativeScpLocalDirectoryContentsPath(localPath) : localPath;
 			const targetArg = recursive ? ensureTrailingRemoteSlash(remotePath) : remotePath;
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
@@ -868,10 +1211,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async downloadPathWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, recursive: boolean, initialLocalSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
-		const stopGrowthTiming = this.beginTransferGrowthTiming(progressId, () => recursive
-			? getLocalPathSize(localPath).catch(() => 0)
-			: fsp.stat(localPath).then(stat => stat.size).catch(() => 0), initialLocalSize, expectedBytes, onProgress);
+		const stopGrowthTiming = recursive
+			? () => undefined
+			: this.beginTransferGrowthTiming(progressId, () => fsp.stat(localPath).then(stat => stat.size).catch(() => 0), initialLocalSize, expectedBytes, onProgress);
 		try {
+			if (recursive) {
+				this.markTransferDataStarted(progressId);
+			}
 			const sourceArg = recursive ? getRemoteDirectoryContentsPath(remotePath) : remotePath;
 			await withNativeOpenSshScpBaseArgs(connection, (args, env) => this.runCancelableLocalCommand('scp.exe', [
 				...args,
@@ -988,27 +1334,46 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalRsyncUpload(request: ITurboFileTransferRequest): Promise<void> {
+	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
+		const connection = request.target.connection;
+		const tool = await resolveLocalRsyncTool();
+		let rsyncProgressBuffer = '';
+		const handleRsyncOutput = (chunk: string): void => {
+			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+			const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
+			if (transferredBytes !== undefined) {
+				onProgress?.(transferredBytes);
+			}
+		};
 		const sourceIsDirectory = (await fsp.stat(request.source.path)).isDirectory();
 		await this.withSftp(request.target, async sftp => sourceIsDirectory ? this.ensureRemoteDirectory(sftp, request.target.path) : this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
-		const sourcePath = toRsyncLocalPath(request.source.path);
-		await this.runCancelableLocalCommand('rsync.exe', [
-			'-a',
-			'--whole-file',
+		const sourcePath = toRsyncLocalPath(request.source.path, tool.pathFlavor);
+		await withLocalRsyncSshEnvironment(connection, tool, env => this.runCancelableLocalCommand(tool.executable, [
+			...buildLocalRsyncOptionArgs(true),
 			'-e',
-			buildLocalRsyncSshTransport(request.target.connection),
+			buildLocalRsyncSshTransport(connection, tool.sshExecutable),
 			sourceIsDirectory ? ensureTrailingRemoteSlash(sourcePath) : sourcePath,
-			formatRsyncRemoteSpec(request.target.connection, request.target.path)
-		], undefined, request.progressId);
+			formatRsyncRemoteSpec(connection, request.target.path)
+		], { env, onStdout: handleRsyncOutput, onStderr: handleRsyncOutput }, request.progressId));
 	}
 
-	private async runLocalRsyncDownload(request: ITurboFileTransferRequest): Promise<void> {
+	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
+		const connection = request.source.connection;
+		const tool = await resolveLocalRsyncTool();
+		let rsyncProgressBuffer = '';
+		const handleRsyncOutput = (chunk: string): void => {
+			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+			const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
+			if (transferredBytes !== undefined) {
+				onProgress?.(transferredBytes);
+			}
+		};
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 		const sourceIsDirectory = sourceType === 'directory';
 		if (sourceIsDirectory) {
@@ -1016,14 +1381,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} else {
 			await ensureLocalParentDirectory(request.target.path);
 		}
-		await this.runCancelableLocalCommand('rsync.exe', [
-			'-a',
-			'--whole-file',
+		await withLocalRsyncSshEnvironment(connection, tool, env => this.runCancelableLocalCommand(tool.executable, [
+			...buildLocalRsyncOptionArgs(true),
 			'-e',
-			buildLocalRsyncSshTransport(request.source.connection),
-			formatRsyncRemoteSpec(request.source.connection, sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path),
-			toRsyncLocalPath(request.target.path)
-		], undefined, request.progressId);
+			buildLocalRsyncSshTransport(connection, tool.sshExecutable),
+			formatRsyncRemoteSpec(connection, sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path),
+			toRsyncLocalPath(request.target.path, tool.pathFlavor)
+		], { env, onStdout: handleRsyncOutput, onStderr: handleRsyncOutput }, request.progressId));
 	}
 
 	async transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult> {
@@ -1059,6 +1423,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			if (sameRemote) {
 				return await this.runSameRemoteNativeBatchTransfer(request, items, operation, expectedBytes, startedAt);
+			}
+
+			const tarBatch = await this.tryBatchTarTransfer(request, items, operation, expectedBytes, startedAt);
+			this.throwIfTransferCanceled(request.progressId);
+			if (tarBatch?.ok) {
+				return tarBatch;
 			}
 
 			const sshToSshProtocol = request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh'
@@ -1216,22 +1586,44 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const route = await this.resolveDirectSshRoute(request.source, request.targetDirectory, request.progressId);
-		if (route === 'unavailable') {
+		const routes = await this.resolveDirectSshRoutes(request.source, request.targetDirectory, request.progressId);
+		if (!routes.length) {
 			return undefined;
 		}
 
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectBatchRsyncTransferRoute(request, items, expectedBytes, startedAt, route);
+				this.clearDirectSshRouteFailure(request.source, request.targetDirectory, route);
+				return result;
+			} catch {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.targetDirectory, route);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.targetDirectory);
+		return undefined;
+	}
+
+	private async tryDirectBatchRsyncTransferRoute(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], expectedBytes: number, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileBatchTransferResult> {
 		const executorEndpoint = route === 'source-push' ? request.source : request.targetDirectory;
 		const remoteEndpoint = route === 'source-push' ? request.targetDirectory : request.source;
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
-			return undefined;
+			throw new Error('Batch direct rsync route is missing SSH connection details.');
 		}
 		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
 		if (!executorConfigResult.ok) {
-			return undefined;
+			throw new Error(executorConfigResult.message);
 		}
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		let lastActivityAt = Date.now();
+		const markActivity = (): void => {
+			lastActivityAt = Date.now();
+		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			const remote = remoteEndpoint.connection;
@@ -1241,6 +1633,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
 			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch direct rsync transfer.', true, {
 				strategy: 'rsync-direct',
+				route,
 				completedItems: 0,
 				totalItems: items.length,
 				currentName: items[0]?.displayName ?? items[0]?.targetName
@@ -1264,32 +1657,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (transferredBytes === undefined || transferredBytes < lastRsyncBytes) {
 					return;
 				}
+				markActivity();
 				lastRsyncBytes = transferredBytes;
 				const totalBytes = expectedBytes > 0 ? expectedBytes : transferredBytes;
 				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'rsync-direct', 'Batch direct rsync transfer in progress.', false, {
 					strategy: 'rsync-direct',
+					route,
 					completedItems: 0,
 					totalItems: items.length
 				});
 			};
-			await this.execRemote(client, mkdirCommand);
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
 			this.throwIfTransferCanceled(request.progressId);
-			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
+			markActivity();
+			await this.execRemote(client, rsyncCommand, {
+				onStdout: handleRsyncOutput,
+				onStderr: handleRsyncOutput,
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Batch direct rsync ${route} produced no transfer progress for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: () => lastActivityAt
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = expectedBytes > 0 ? expectedBytes : lastRsyncBytes;
 			this.fireTransferProgress(request, bytes, bytes, 'complete', 'Batch direct rsync completed.', true, {
 				strategy: 'rsync-direct',
+				route,
 				completedItems: items.length,
 				totalItems: items.length
 			});
 			this.clearRemoteDirectoryListingCache(request.targetDirectory);
 			return this.createBatchTransferResult(true, 'rsync-direct', bytes, 'Batch direct rsync completed.', items.length, 0, [], startedAt, request.progressId);
-		} catch {
+		} catch (error) {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			this.clearDirectSshRouteCache(request.source, request.targetDirectory);
-			return undefined;
+			throw error;
 		} finally {
 			unregisterCancel();
 			client.end();
@@ -1406,6 +1808,376 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				socket.destroy();
 			}
 			client.end();
+		}
+	}
+
+	private async tryBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+		if (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh') {
+			if (request.targetDirectory.preferredProtocol && request.targetDirectory.preferredProtocol !== 'auto-fast') {
+				return undefined;
+			}
+			if (request.targetDirectory.supportsTar === false || looksLikeWindowsPath(request.targetDirectory.path)) {
+				return undefined;
+			}
+			const plan = this.createLocalBatchTarPlan(items);
+			if (!plan) {
+				return undefined;
+			}
+			const bytes = expectedBytes > 0 ? expectedBytes : await this.getLocalBatchTarBytes(items);
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing batch tar upload.', true, { strategy: 'tar-upload', completedItems: 0, totalItems: items.length });
+			let archiveBytes = 0;
+			const onArchiveDelta = (delta: number): void => {
+				this.throwIfTransferCanceled(request.progressId);
+				archiveBytes += Math.max(0, delta);
+				this.fireTransferProgress(request, bytes > 0 ? Math.min(archiveBytes, bytes) : archiveBytes, bytes, 'transfer', 'Batch tar upload in progress.', false, { strategy: 'tar-upload', completedItems: 0, totalItems: items.length });
+			};
+			this.markTransferDataStarted(request.progressId);
+			await this.runLocalBatchTarUpload(plan, request.targetDirectory, request.progressId, onArchiveDelta);
+			const resultBytes = bytes > 0 ? bytes : await this.getRemoteBatchTargetContentSize(request.targetDirectory, plan.targetNames).catch(() => 0);
+			await this.cleanupBatchSourcesAfterTar(request, items, operation);
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Batch tar upload completed.', true, { strategy: 'tar-upload', completedItems: items.length, totalItems: items.length });
+			return this.createBatchTransferResult(true, 'tar-upload', resultBytes, 'Batch tar upload completed.', items.length, 0, [], startedAt, request.progressId);
+		}
+
+		if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'local') {
+			if (request.source.preferredProtocol && request.source.preferredProtocol !== 'auto-fast') {
+				return undefined;
+			}
+			if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
+				return undefined;
+			}
+			const plan = this.createRemoteBatchTarPlan(items);
+			if (!plan) {
+				return undefined;
+			}
+			const bytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchSourceContentSize(request.source, items);
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing batch tar download.', true, { strategy: 'tar-download', completedItems: 0, totalItems: items.length });
+			await this.prepareLocalBatchTarTarget(request.targetDirectory.path, plan.targetNames);
+			let archiveBytes = 0;
+			const onArchiveDelta = (delta: number): void => {
+				this.throwIfTransferCanceled(request.progressId);
+				archiveBytes += Math.max(0, delta);
+				this.fireTransferProgress(request, bytes > 0 ? Math.min(archiveBytes, bytes) : archiveBytes, bytes, 'transfer', 'Batch tar download in progress.', false, { strategy: 'tar-download', completedItems: 0, totalItems: items.length });
+			};
+			this.markTransferDataStarted(request.progressId);
+			await this.runRemoteBatchTarDownload(request.source, plan, request.targetDirectory.path, request.progressId, onArchiveDelta);
+			const resultBytes = bytes > 0 ? bytes : await getLocalBatchTargetSize(request.targetDirectory.path, plan.targetNames).catch(() => 0);
+			await this.cleanupBatchSourcesAfterTar(request, items, operation);
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Batch tar download completed.', true, { strategy: 'tar-download', completedItems: items.length, totalItems: items.length });
+			return this.createBatchTransferResult(true, 'tar-download', resultBytes, 'Batch tar download completed.', items.length, 0, [], startedAt, request.progressId);
+		}
+
+		if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh') {
+			if (getSshToSshTransferProtocol(request.source) !== 'auto-fast') {
+				return undefined;
+			}
+			if (request.source.supportsTar === false || request.targetDirectory.supportsTar === false || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.targetDirectory.path)) {
+				return undefined;
+			}
+			const plan = this.createRemoteBatchTarPlan(items);
+			if (!plan) {
+				return undefined;
+			}
+			const bytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchSourceContentSize(request.source, items);
+			let directFailure: unknown;
+			if (request.strategyHint !== 'relay') {
+				try {
+					const directResult = await this.tryDirectBatchTarTransfer(request, items, plan, operation, bytes, startedAt);
+					if (directResult?.ok) {
+						return directResult;
+					}
+				} catch (error) {
+					if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+						throw new TurboFileTransferCanceledError();
+					}
+					directFailure = error;
+				}
+			}
+			if (request.strategyHint === 'direct') {
+				if (directFailure) {
+					throw directFailure;
+				}
+				return undefined;
+			}
+			return this.tryRelayBatchTarTransfer(request, items, plan, operation, bytes, startedAt);
+		}
+
+		return undefined;
+	}
+
+	private createLocalBatchTarPlan(items: readonly ITurboFileBatchTransferItem[]): ITarBatchPlan | undefined {
+		if (!items.length) {
+			return undefined;
+		}
+		const parentPath = dirname(items[0].sourcePath);
+		const names: string[] = [];
+		const targetNames: string[] = [];
+		for (const item of items) {
+			const name = getTransferName(item.sourcePath);
+			if (!name || dirname(item.sourcePath) !== parentPath || item.targetName !== name) {
+				return undefined;
+			}
+			names.push(name);
+			targetNames.push(item.targetName);
+		}
+		return { parentPath, names, targetNames };
+	}
+
+	private createRemoteBatchTarPlan(items: readonly ITurboFileBatchTransferItem[]): ITarBatchPlan | undefined {
+		if (!items.length) {
+			return undefined;
+		}
+		const parentPath = getRemoteParentPath(items[0].sourcePath);
+		const names: string[] = [];
+		const targetNames: string[] = [];
+		for (const item of items) {
+			const name = getTransferName(item.sourcePath);
+			if (!name || getRemoteParentPath(item.sourcePath) !== parentPath || item.targetName !== name) {
+				return undefined;
+			}
+			names.push(name);
+			targetNames.push(item.targetName);
+		}
+		return { parentPath, names, targetNames };
+	}
+
+	private async getLocalBatchTarBytes(items: readonly ITurboFileBatchTransferItem[]): Promise<number> {
+		let total = 0;
+		for (const item of items) {
+			total += await getLocalPathSize(item.sourcePath).catch(() => Math.max(0, item.expectedBytes ?? 0));
+		}
+		return total;
+	}
+
+	private async getRemoteBatchSourceContentSize(source: ITurboFileTransferEndpoint, items: readonly ITurboFileBatchTransferItem[]): Promise<number> {
+		let total = 0;
+		for (const item of items) {
+			total += await this.getRemotePathContentSizeByCommand({ ...source, path: item.sourcePath }).catch(() => Math.max(0, item.expectedBytes ?? 0));
+		}
+		return total;
+	}
+
+	private async getRemoteBatchTargetContentSize(targetDirectory: ITurboFileTransferEndpoint, targetNames: readonly string[]): Promise<number> {
+		let total = 0;
+		for (const targetName of targetNames) {
+			total += await this.getRemotePathContentSizeByCommand({ ...targetDirectory, path: joinRemotePath(targetDirectory.path, targetName) }).catch(() => 0);
+		}
+		return total;
+	}
+
+	private beginRemoteBatchTargetGrowthTiming(progressId: string | undefined, targetDirectory: ITurboFileTransferEndpoint, targetNames: readonly string[], baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void): () => void {
+		return this.beginTransferGrowthTiming(progressId, () => this.getRemoteBatchTargetContentSize(targetDirectory, targetNames), baselineSize, expectedBytes, onProgress);
+	}
+
+	private async prepareLocalBatchTarTarget(targetDirectory: string, targetNames: readonly string[]): Promise<void> {
+		await ensureLocalDirectory(targetDirectory);
+		await Promise.all(targetNames.map(targetName => fsp.rm(join(targetDirectory, targetName), { recursive: true, force: true }).catch(() => undefined)));
+	}
+
+	private async cleanupBatchSourcesAfterTar(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move'): Promise<void> {
+		if (operation !== 'move') {
+			return;
+		}
+		const cleanupFailures = await this.deleteBatchSources(request.source, items);
+		if (cleanupFailures.length) {
+			throw new Error(`Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`);
+		}
+	}
+
+	private async runLocalBatchTarUpload(plan: ITarBatchPlan, targetDirectory: ITurboFileTransferEndpoint, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		if (targetDirectory.kind !== 'ssh' || !targetDirectory.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		try {
+			await this.runNativeLocalTarUpload(['-cf', '-', '-C', plan.parentPath, '--', ...plan.names], targetDirectory.connection, buildTarExtractToDirectoryCommand(targetDirectory.path, plan.targetNames), progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Native tar|ssh is preferred for speed; ssh2 remains the compatibility fallback.
+		}
+		const configResult = await this.createConnectConfig(targetDirectory.connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+		let client: ISSHClient | undefined;
+		let tarProcess: ReturnType<typeof spawn> | undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+			tarProcess?.kill();
+			client?.end();
+		});
+		try {
+			client = await this.connect(configResult.config);
+			const targetStream = await this.openRemoteCommandStream(client, buildTarExtractToDirectoryCommand(targetDirectory.path, plan.targetNames), 'batch tar upload extract', true);
+			tarProcess = spawn('tar.exe', ['-cf', '-', '-C', plan.parentPath, '--', ...plan.names], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+			if (!tarProcess.stdout) {
+				throw new Error('Local batch tar upload did not provide stdout.');
+			}
+			const tarClose = waitForLocalProcessClose(tarProcess, 'local batch tar upload');
+			await pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
+			await tarClose;
+			await targetStream.close;
+		} finally {
+			unregisterCancel();
+			client?.end();
+		}
+	}
+
+	private async runRemoteBatchTarDownload(source: ITurboFileTransferEndpoint, plan: ITarBatchPlan, targetDirectory: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		if (source.kind !== 'ssh' || !source.connection) {
+			throw new Error('Missing SSH source.');
+		}
+		try {
+			await this.runNativeLocalTarDownload(source.connection, buildTarCreateFromItemsCommand(plan.parentPath, plan.names), ['-xf', '-', '-C', targetDirectory], progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Native ssh|tar is preferred for speed; ssh2 remains the compatibility fallback.
+		}
+		const configResult = await this.createConnectConfig(source.connection);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+		let client: ISSHClient | undefined;
+		let tarProcess: ReturnType<typeof spawn> | undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+			tarProcess?.kill();
+			client?.end();
+		});
+		try {
+			client = await this.connect(configResult.config);
+			const sourceStream = await this.openRemoteCommandStream(client, buildTarCreateFromItemsCommand(plan.parentPath, plan.names), 'batch tar download create');
+			tarProcess = spawn('tar.exe', ['-xf', '-', '-C', targetDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+			if (!tarProcess.stdin || !tarProcess.stdout) {
+				throw new Error('Local batch tar download did not provide pipes.');
+			}
+			tarProcess.stdout.resume();
+			const tarClose = waitForLocalProcessClose(tarProcess, 'local batch tar download');
+			await pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, createProgressPassThrough(onArchiveDelta), tarProcess.stdin);
+			await sourceStream.close;
+			await tarClose;
+		} finally {
+			unregisterCancel();
+			client?.end();
+		}
+	}
+
+	private async tryDirectBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.targetDirectory.kind !== 'ssh' || !request.source.connection || !request.targetDirectory.connection) {
+			return undefined;
+		}
+		const routes = await this.resolveDirectSshRoutes(request.source, request.targetDirectory, request.progressId);
+		if (!routes.length) {
+			return undefined;
+		}
+
+		const failures: string[] = [];
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectBatchTarTransferRoute(request, items, plan, operation, expectedBytes, startedAt, route);
+				this.clearDirectSshRouteFailure(request.source, request.targetDirectory, route);
+				return result;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.targetDirectory, route);
+				failures.push(`${route}: ${formatTransferError(error)}`);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.targetDirectory);
+		throw new Error(`Direct batch tar failed: ${failures.join('; ')}`);
+	}
+
+	private async tryDirectBatchTarTransferRoute(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileBatchTransferResult> {
+		const executorEndpoint = route === 'source-push' ? request.source : request.targetDirectory;
+		const remoteEndpoint = route === 'source-push' ? request.targetDirectory : request.source;
+		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
+			throw new Error('Direct batch tar route is missing SSH connection details.');
+		}
+		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
+		if (!executorConfigResult.ok) {
+			throw new Error(executorConfigResult.message);
+		}
+
+		const client = await this.connect(executorConfigResult.config);
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		let credential: IRemoteScpCredential | undefined;
+		let stopGrowthTiming: () => void = () => undefined;
+		try {
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
+			const sshCommand = buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath);
+			const command = route === 'source-push'
+				? buildTarItemsSourcePushCommand(plan.parentPath, plan.names, request.targetDirectory.path, plan.targetNames, remoteUserHost, sshCommand, sshpassPrefix)
+				: buildTarItemsTargetPullCommand(plan.parentPath, plan.names, request.targetDirectory.path, plan.targetNames, remoteUserHost, sshCommand, sshpassPrefix);
+			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch direct tar transfer.', true, { strategy: 'tar-direct', route, completedItems: 0, totalItems: items.length });
+			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, plan.targetNames, 0, expectedBytes, transferredBytes => {
+				this.fireTransferProgress(request, transferredBytes, expectedBytes, 'transfer', 'Batch direct tar transfer in progress.', false, { strategy: 'tar-direct', route, completedItems: 0, totalItems: items.length });
+			});
+			this.markTransferDataStarted(request.progressId);
+			await this.execRemote(client, command, { inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
+			this.throwIfTransferCanceled(request.progressId);
+			const bytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchTargetContentSize(request.targetDirectory, plan.targetNames).catch(() => 0);
+			await this.cleanupBatchSourcesAfterTar(request, items, operation);
+			this.fireTransferProgress(request, bytes, bytes, 'complete', 'Batch direct tar completed.', true, { strategy: 'tar-direct', route, completedItems: items.length, totalItems: items.length });
+			return this.createBatchTransferResult(true, 'tar-direct', bytes, 'Batch direct tar completed.', items.length, 0, [], startedAt, request.progressId);
+		} finally {
+			stopGrowthTiming();
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+			}
+			unregisterCancel();
+			client.end();
+		}
+	}
+
+	private async tryRelayBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.targetDirectory.kind !== 'ssh' || !request.source.connection || !request.targetDirectory.connection) {
+			return undefined;
+		}
+		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
+		const targetConfigResult = await this.createConnectConfig(request.targetDirectory.connection);
+		if (!sourceConfigResult.ok || !targetConfigResult.ok) {
+			return undefined;
+		}
+
+		let sourceClient: ISSHClient | undefined;
+		let targetClient: ISSHClient | undefined;
+		let stopGrowthTiming: () => void = () => undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
+			sourceClient?.end();
+			targetClient?.end();
+		});
+		try {
+			sourceClient = await this.connect(sourceConfigResult.config);
+			targetClient = await this.connect(targetConfigResult.config);
+			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch tar relay.', true, { strategy: 'tar-relay', route: 'relay', completedItems: 0, totalItems: items.length });
+			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, plan.targetNames, 0, expectedBytes, transferredBytes => {
+				this.fireTransferProgress(request, transferredBytes, expectedBytes, 'relay-upload', 'Batch tar relay in progress.', false, { strategy: 'tar-relay', route: 'relay', completedItems: 0, totalItems: items.length });
+			});
+			this.markTransferDataStarted(request.progressId);
+			const sourceStream = await this.openRemoteCommandStream(sourceClient, buildTarCreateFromItemsCommand(plan.parentPath, plan.names), 'batch tar relay create');
+			const targetStream = await this.openRemoteCommandStream(targetClient, buildTarExtractToDirectoryCommand(request.targetDirectory.path, plan.targetNames), 'batch tar relay extract', true);
+			await pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, targetStream.stream as unknown as NodeJS.WritableStream);
+			await sourceStream.close;
+			await targetStream.close;
+			this.throwIfTransferCanceled(request.progressId);
+			const bytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchTargetContentSize(request.targetDirectory, plan.targetNames).catch(() => 0);
+			await this.cleanupBatchSourcesAfterTar(request, items, operation);
+			this.fireTransferProgress(request, bytes, bytes, 'complete', 'Batch tar relay completed.', true, { strategy: 'tar-relay', route: 'relay', completedItems: items.length, totalItems: items.length });
+			return this.createBatchTransferResult(true, 'tar-relay', bytes, 'Batch tar relay completed.', items.length, 0, [], startedAt, request.progressId);
+		} finally {
+			stopGrowthTiming();
+			unregisterCancel();
+			sourceClient?.end();
+			targetClient?.end();
 		}
 	}
 
@@ -1619,7 +2391,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	async calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult> {
 		try {
 			const size = endpoint.kind === 'local'
-				? await getLocalPathSize(endpoint.path)
+				? await getLocalPathSizeByCommand(endpoint.path)
 				: await this.getRemotePathSizeByCommand(endpoint);
 			const humanSize = await this.getPathHumanSize(endpoint, size);
 			return { ok: true, message: 'Path size calculated.', size, humanSize };
@@ -1651,7 +2423,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-
 	async startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileFileOperationResult> {
 		if (platform() !== 'win32') {
 			return { ok: false, message: 'Windows file drag is only supported on Windows.' };
@@ -1677,7 +2448,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			window.webContents.startDrag({
 				file: files[0],
 				files,
-				icon: nativeImage.createEmpty()
+				icon: createWindowsDragIcon()
 			});
 			return { ok: true, message: 'Windows file drag started.' };
 		} catch (error) {
@@ -1724,7 +2495,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			window.webContents.startDrag({
 				file: files[0],
 				files,
-				icon: nativeImage.createEmpty()
+				icon: createWindowsDragIcon()
 			});
 			this.scheduleWindowsDragTempCleanup(tempRoot);
 			return { ok: true, message: 'Windows file drag started.' };
@@ -1743,6 +2514,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}, 30 * 60 * 1000);
 		(timer as unknown as { unref?: () => void }).unref?.();
 	}
+
 	async readFile(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadFileOptions = {}): Promise<ITurboFileReadFileResult> {
 		const encoding = options.encoding ?? 'utf8';
 		const maxBytes = options.maxBytes ?? DEFAULT_READ_LIMIT;
@@ -2012,6 +2784,119 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return this.createTransferResult(true, 'remote-copy', bytes, 'Remote copy completed.', startedAt, request.progressId);
 	}
 
+	private async tryDirectTarTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
+			return undefined;
+		}
+		if (request.strategyHint === 'relay') {
+			return undefined;
+		}
+		if (getSshToSshTransferProtocol(request.source) !== 'auto-fast') {
+			return undefined;
+		}
+		if (request.source.supportsTar === false || request.target.supportsTar === false || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+
+		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+		if (sourceType !== 'directory') {
+			return undefined;
+		}
+
+		let bytes = Math.max(0, request.expectedBytes ?? 0);
+		if (bytes <= 0) {
+			bytes = await this.getRemotePathContentSizeByCommand(request.source).catch(() => 0);
+		}
+
+		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
+		if (!routes.length) {
+			return undefined;
+		}
+
+		const failures: string[] = [];
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectTarTransferRoute(request, startedAt, bytes, route);
+				this.clearDirectSshRouteFailure(request.source, request.target, route);
+				return result;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.target, route);
+				failures.push(`${route}: ${formatTransferError(error)}`);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.target);
+		throw new Error(`Direct tar failed: ${failures.join('; ')}`);
+	}
+
+	private async tryDirectTarTransferRoute(request: ITurboFileTransferRequest, startedAt: number, expectedBytes: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
+		const executorEndpoint = route === 'source-push' ? request.source : request.target;
+		const remoteEndpoint = route === 'source-push' ? request.target : request.source;
+		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
+			throw new Error('Direct tar route is missing SSH connection details.');
+		}
+
+		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
+		if (!executorConfigResult.ok) {
+			throw new Error(executorConfigResult.message);
+		}
+
+		const client = await this.connect(executorConfigResult.config);
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		let credential: IRemoteScpCredential | undefined;
+		let stopGrowthTiming: () => void = () => undefined;
+		let lastActivityAt = Date.now();
+		const markActivity = (): void => {
+			lastActivityAt = Date.now();
+		};
+		try {
+			this.throwIfTransferCanceled(request.progressId);
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
+			const sshCommand = buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath);
+			const command = route === 'source-push'
+				? buildTarSourcePushCommand(request.source.path, request.target.path, remoteUserHost, sshCommand, sshpassPrefix)
+				: buildTarTargetPullCommand(request.source.path, request.target.path, remoteUserHost, sshCommand, sshpassPrefix);
+
+			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing direct tar transfer.', true, { strategy: 'tar-direct', route });
+			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, expectedBytes, transferredBytes => {
+				markActivity();
+				this.fireTransferProgress(request, transferredBytes, expectedBytes, 'transfer', 'Direct tar transfer in progress.', false, { strategy: 'tar-direct', route });
+			});
+			this.markTransferDataStarted(request.progressId);
+			await this.execRemote(client, command, {
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Direct tar ${route} produced no target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: () => lastActivityAt
+			});
+			this.throwIfTransferCanceled(request.progressId);
+			const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => expectedBytes);
+			if (expectedBytes > 0 && targetSize !== expectedBytes) {
+				throw new Error(`Direct tar size mismatch: expected ${expectedBytes}, got ${targetSize}.`);
+			}
+			const bytes = expectedBytes > 0 ? expectedBytes : targetSize;
+			this.fireTransferProgress(request, bytes, bytes, 'complete', 'Direct tar completed.', true, { strategy: 'tar-direct', route });
+			return this.createTransferResult(true, 'tar-direct', bytes, 'Direct tar completed.', startedAt, request.progressId);
+		} catch (error) {
+			if (this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			throw error;
+		} finally {
+			stopGrowthTiming();
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+			}
+			unregisterCancel();
+			client.end();
+		}
+	}
+
 	private async tryDirectRsyncTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
 			return undefined;
@@ -2030,23 +2915,47 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		this.throwIfTransferCanceled(request.progressId);
 
-		const route = await this.resolveDirectSshRoute(request.source, request.target, request.progressId);
-		if (route === 'unavailable') {
+		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
+		if (!routes.length) {
 			return undefined;
 		}
 
+		const failures: string[] = [];
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectRsyncTransferRoute(request, startedAt, route);
+				this.clearDirectSshRouteFailure(request.source, request.target, route);
+				return result;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.target, route);
+				failures.push(`${route}: ${formatTransferError(error)}`);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.target);
+		throw new Error(`Direct rsync failed: ${failures.join('; ')}`);
+	}
+
+	private async tryDirectRsyncTransferRoute(request: ITurboFileTransferRequest, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
 		const executorEndpoint = route === 'source-push' ? request.source : request.target;
 		const remoteEndpoint = route === 'source-push' ? request.target : request.source;
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
-			return undefined;
+			throw new Error('Direct rsync route is missing SSH connection details.');
 		}
 		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
 		if (!executorConfigResult.ok) {
-			return undefined;
+			throw new Error(executorConfigResult.message);
 		}
 
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		let lastActivityAt = Date.now();
+		const markActivity = (): void => {
+			lastActivityAt = Date.now();
+		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			const remote = remoteEndpoint.connection;
@@ -2069,7 +2978,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 
-			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true, { strategy: 'rsync-direct' });
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true, { strategy: 'rsync-direct', route });
 
 			const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 			const mkdirCommand = route === 'source-push'
@@ -2095,15 +3004,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (transferredBytes === undefined || transferredBytes < lastRsyncBytes) {
 					return;
 				}
+				markActivity();
 				lastRsyncBytes = transferredBytes;
 				const totalBytes = bytes > 0 ? bytes : transferredBytes;
-				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'rsync-direct', 'Direct rsync transfer in progress.', false, { strategy: 'rsync-direct' });
+				this.fireTransferProgress(request, Math.min(transferredBytes, totalBytes), totalBytes, 'rsync-direct', 'Direct rsync transfer in progress.', false, { strategy: 'rsync-direct', route });
 			};
 
 			this.throwIfTransferCanceled(request.progressId);
-			await this.execRemote(client, mkdirCommand);
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
 			this.throwIfTransferCanceled(request.progressId);
-			await this.execRemote(client, rsyncCommand, { onStdout: handleRsyncOutput, onStderr: handleRsyncOutput });
+			markActivity();
+			await this.execRemote(client, rsyncCommand, {
+				onStdout: handleRsyncOutput,
+				onStderr: handleRsyncOutput,
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Direct rsync ${route} produced no transfer progress for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: () => lastActivityAt
+			});
 			this.throwIfTransferCanceled(request.progressId);
 
 			if (bytes === 0 && lastRsyncBytes > 0) {
@@ -2115,8 +3032,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			this.clearDirectSshRouteCache(request.source, request.target);
-			throw new Error(`Direct rsync failed: ${formatTransferError(error)}`);
+			throw error;
 		} finally {
 			unregisterCancel();
 			client.end();
@@ -2126,78 +3042,104 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	/**
 	 * Unified direct-route detection for all SSH-to-SSH transfers (scp/sftp/rsync).
 	 *
-	 * Decides whether the two devices can reach each other directly and, if so, which
-	 * side should drive the transfer:
-	 * - `source-push`: source can reach target's SSH port, so source pushes the file.
-	 * - `target-pull`: otherwise, if target can reach source's SSH port, target pulls the file.
-	 * - `unavailable`: neither direction is reachable, fall back to relay.
+	 * Returns every currently viable direction in deterministic order:
+	 * - `source-push`: source can reach target's SSH login and should push the payload.
+	 * - `target-pull`: target can reach source's SSH login and should pull the payload.
 	 *
-	 * Both directions are probed in parallel and the first one that confirms a direct route wins,
-	 * so a stuck/failing direction never blocks the decision. A hard deadline caps the whole check
-	 * under ~1s, and results are cached, so transfers start quickly. Probes reuse the already
-	 * pooled SSH connections to keep the check fast.
+	 * Both directions are probed in parallel and capped under ~1s. Transfer failures put only the
+	 * failing direction into a short cooldown, so one bad route cannot keep every 62 -> * transfer
+	 * stuck at 0 bytes; the next direct candidate or same-protocol relay can take over.
 	 */
-	private async resolveDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
+	private async resolveDirectSshRoutes(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<readonly TurboFileDirectSshRoute[]> {
 		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
-			return 'unavailable';
+			return [];
 		}
 
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		// A confirmed direct route is cached for the lifetime of the app session: a direct-transfer
-		// failure clears the entry (see clearDirectSshRouteCache), so a route that later breaks
-		// self-heals on the next attempt. An "unavailable" result is never cached, so a pair that
-		// currently can't direct-connect is always re-probed and upgraded to direct the moment it
-		// becomes reachable.
 		const cached = this.directSshRouteCache.get(cacheKey);
 		if (cached) {
-			return cached;
+			const routes = this.filterDirectSshRoutesByCooldown(cacheKey, cached);
+			if (routes.length > 0) {
+				return routes;
+			}
+			this.directSshRouteCache.delete(cacheKey);
 		}
 
 		const pending = this.directSshRoutePending.get(cacheKey);
 		if (pending) {
-			return pending;
+			const routes = await pending;
+			return this.filterDirectSshRoutesByCooldown(cacheKey, routes);
 		}
 
-		const probe = this.probeDirectSshRoute(source, target, progressId).then(mode => {
-			if (mode !== 'unavailable') {
-				this.directSshRouteCache.set(cacheKey, mode);
+		const probe = this.probeDirectSshRoutes(source, target, progressId).then(routes => {
+			if (routes.length > 0) {
+				this.directSshRouteCache.set(cacheKey, routes);
 			}
-			return mode;
+			return routes;
 		}).finally(() => {
 			this.directSshRoutePending.delete(cacheKey);
 		});
 		this.directSshRoutePending.set(cacheKey, probe);
-		return probe;
+		const routes = await probe;
+		return this.filterDirectSshRoutesByCooldown(cacheKey, routes);
 	}
 
-	private async probeDirectSshRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<TurboFileDirectScpRouteMode> {
+	private async probeDirectSshRoutes(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<readonly TurboFileDirectSshRoute[]> {
 		this.throwIfTransferCanceled(progressId);
-		// Probe both directions in parallel and take the FIRST that confirms a direct route.
-		// The working direction returns in a few hundred ms on a LAN, while a stuck/failing
-		// direction never blocks the decision. A hard deadline guarantees we start the transfer
-		// (direct or relay) within ~1s even if both probes are slow.
-		return await new Promise<TurboFileDirectScpRouteMode>(resolve => {
+		return await new Promise<readonly TurboFileDirectSshRoute[]>(resolve => {
 			let settled = false;
 			let pending = 2;
-			const finish = (mode: TurboFileDirectScpRouteMode): void => {
+			let sourcePushReachable = false;
+			let targetPullReachable = false;
+			const finish = (): void => {
 				if (settled) {
 					return;
 				}
 				settled = true;
 				clearTimeout(deadline);
-				resolve(mode);
+				const routes: TurboFileDirectSshRoute[] = [];
+				if (sourcePushReachable) {
+					routes.push('source-push');
+				}
+				if (targetPullReachable) {
+					routes.push('target-pull');
+				}
+				resolve(routes);
 			};
-			const onProbe = (reachable: boolean, mode: TurboFileDirectScpRouteMode): void => {
-				if (reachable) {
-					finish(mode);
-				} else if (--pending === 0) {
-					finish('unavailable');
+			const onProbe = (reachable: boolean, mode: TurboFileDirectSshRoute): void => {
+				if (mode === 'source-push') {
+					sourcePushReachable = reachable;
+				} else {
+					targetPullReachable = reachable;
+				}
+				if (--pending === 0) {
+					finish();
 				}
 			};
-			const deadline = setTimeout(() => finish('unavailable'), DIRECT_SSH_ROUTE_DECISION_DEADLINE_MS);
+			const deadline = setTimeout(() => finish(), DIRECT_SSH_ROUTE_DECISION_DEADLINE_MS);
 			void this.probeSshRouteReachable(source, target, progressId).then(ok => onProbe(ok, 'source-push'), () => onProbe(false, 'source-push'));
 			void this.probeSshRouteReachable(target, source, progressId).then(ok => onProbe(ok, 'target-pull'), () => onProbe(false, 'target-pull'));
 		});
+	}
+
+	private filterDirectSshRoutesByCooldown(cacheKey: string, routes: readonly TurboFileDirectSshRoute[]): readonly TurboFileDirectSshRoute[] {
+		const now = Date.now();
+		return routes.filter(route => (this.directSshRouteFailureCooldowns.get(getDirectSshRouteFailureKey(cacheKey, route)) ?? 0) <= now);
+	}
+
+	private markDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
+		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
+			return;
+		}
+		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
+		this.directSshRouteFailureCooldowns.set(getDirectSshRouteFailureKey(cacheKey, route), Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
+	}
+
+	private clearDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
+		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
+			return;
+		}
+		this.directSshRouteFailureCooldowns.delete(getDirectSshRouteFailureKey(getDirectSshRouteCacheKey(source.connection, target.connection), route));
 	}
 
 	/**
@@ -2261,7 +3203,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.strategyHint === 'relay') {
 			return undefined;
 		}
-		if (getSshToSshTransferProtocol(request.source) !== 'scp') {
+		const transferMode = getSshToSshTransferProtocol(request.source);
+		if (transferMode !== 'scp' && transferMode !== 'auto-fast') {
 			return undefined;
 		}
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
@@ -2280,26 +3223,50 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const route = await this.resolveDirectSshRoute(request.source, request.target, request.progressId);
-		if (route === 'unavailable') {
+		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
+		if (!routes.length) {
 			return undefined;
 		}
 
+		const failures: string[] = [];
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectScpTransferRoute(request, startedAt, sourceIsDirectory, bytes, route);
+				this.clearDirectSshRouteFailure(request.source, request.target, route);
+				return result;
+			} catch (error) {
+				if (this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.target, route);
+				failures.push(`${route}: ${formatTransferError(error)}`);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.target);
+		throw new Error(`Direct SCP failed: ${failures.join('; ')}`);
+	}
+
+	private async tryDirectScpTransferRoute(request: ITurboFileTransferRequest, startedAt: number, sourceIsDirectory: boolean, bytes: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
 		const executorEndpoint = route === 'source-push' ? request.source : request.target;
 		const remoteEndpoint = route === 'source-push' ? request.target : request.source;
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
-			return undefined;
+			throw new Error('Direct SCP route is missing SSH connection details.');
 		}
 
 		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
 		if (!executorConfigResult.ok) {
-			return undefined;
+			throw new Error(executorConfigResult.message);
 		}
 
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		let credential: IRemoteScpCredential | undefined;
 		let stopGrowthTiming: () => void = () => undefined;
+		let lastActivityAt = Date.now();
+		const markActivity = (): void => {
+			lastActivityAt = Date.now();
+		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
@@ -2316,18 +3283,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const targetArg = route === 'source-push' ? `${remoteUserHost}:${targetPath}` : targetPath;
 			const scpCommand = `${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath, sourceIsDirectory)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`;
 
-			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true, { strategy: 'scp-direct' });
-			await this.execRemote(client, mkdirCommand);
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true, { strategy: 'scp-direct', route });
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
 			this.throwIfTransferCanceled(request.progressId);
+			markActivity();
 			stopGrowthTiming = sourceIsDirectory
 				? this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, transferredBytes => {
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct' });
+					markActivity();
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
 				})
-				: this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection, request.target.path, 0, bytes, transferredBytes => {
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct' });
+				: this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection!, request.target.path, 0, bytes, transferredBytes => {
+					markActivity();
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
 				});
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, scpCommand);
+			await this.execRemote(client, scpCommand, {
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Direct SCP ${route} produced no target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: () => lastActivityAt
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			const targetSize = sourceIsDirectory
 				? await this.getRemotePathSizeByCommand(request.target).catch(() => 0)
@@ -2336,14 +3310,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await this.withDirectorySftp(request.target, sftp => sourceIsDirectory ? this.rmdirRemote(sftp, request.target.path) : this.unlinkRemote(sftp, request.target.path)).catch(() => undefined);
 				throw new Error(`Direct SCP size mismatch: expected ${bytes}, got ${targetSize}.`);
 			}
-			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SCP transfer completed.', true, { strategy: 'scp-direct' });
+			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SCP transfer completed.', true, { strategy: 'scp-direct', route });
 			return this.createTransferResult(true, 'scp-direct', bytes, 'Direct SCP completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			this.clearDirectSshRouteCache(request.source, request.target);
-			throw new Error(`Direct SCP failed: ${formatTransferError(error)}`);
+			throw error;
 		} finally {
 			stopGrowthTiming();
 			if (credential?.cleanupCommand) {
@@ -2389,20 +3362,40 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		this.throwIfTransferCanceled(request.progressId);
 
-		const route = await this.resolveDirectSshRoute(request.source, request.target, request.progressId);
-		if (route === 'unavailable') {
+		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
+		if (!routes.length) {
 			return undefined;
 		}
 
+		const failures: string[] = [];
+		for (const route of routes) {
+			try {
+				const result = await this.tryDirectSftpTransferRoute(request, startedAt, route);
+				this.clearDirectSshRouteFailure(request.source, request.target, route);
+				return result;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				this.markDirectSshRouteFailure(request.source, request.target, route);
+				failures.push(`${route}: ${formatTransferError(error)}`);
+			}
+		}
+
+		this.clearDirectSshRouteCache(request.source, request.target);
+		throw new Error(`Direct SFTP failed: ${failures.join('; ')}`);
+	}
+
+	private async tryDirectSftpTransferRoute(request: ITurboFileTransferRequest, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
 		const executorEndpoint = route === 'source-push' ? request.source : request.target;
 		const remoteEndpoint = route === 'source-push' ? request.target : request.source;
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
-			return undefined;
+			throw new Error('Direct SFTP route is missing SSH connection details.');
 		}
 
 		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
 		if (!executorConfigResult.ok) {
-			return undefined;
+			throw new Error(executorConfigResult.message);
 		}
 
 		const remote = remoteEndpoint.connection;
@@ -2413,11 +3406,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const client = await this.connect(executorConfigResult.config);
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		let stopGrowthTiming: () => void = () => undefined;
+		let lastActivityAt = Date.now();
+		const markActivity = (): void => {
+			lastActivityAt = Date.now();
+		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 			if (sourceType !== 'file' && sourceType !== 'directory') {
-				return undefined;
+				throw new Error(`Unsupported direct SFTP source type: ${sourceType}.`);
 			}
 			const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
 			let bytes = expectedBytes;
@@ -2425,7 +3422,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => expectedBytes);
 			}
 
-			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SFTP transfer.', true, { strategy: 'sftp-direct' });
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SFTP transfer.', true, { strategy: 'sftp-direct', route });
 			const targetParentPath = getRemoteParentPath(request.target.path);
 			const sourceIsDirectory = sourceType === 'directory';
 			const mkdirCommand = route === 'source-push'
@@ -2440,31 +3437,37 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const transferCommand = `printf %s ${quotePosixShellArg(batch)} | ${sftpCommand}`;
 
 			this.throwIfTransferCanceled(request.progressId);
-			await this.execRemote(client, mkdirCommand);
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
 			this.throwIfTransferCanceled(request.progressId);
+			markActivity();
 			stopGrowthTiming = sourceType === 'directory'
 				? this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, transferredBytes => {
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SFTP transfer in progress.', false, { strategy: 'sftp-direct' });
+					markActivity();
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SFTP transfer in progress.', false, { strategy: 'sftp-direct', route });
 				})
-				: this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection, request.target.path, 0, bytes, transferredBytes => {
-					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SFTP transfer in progress.', false, { strategy: 'sftp-direct' });
+				: this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection!, request.target.path, 0, bytes, transferredBytes => {
+					markActivity();
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SFTP transfer in progress.', false, { strategy: 'sftp-direct', route });
 				});
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, transferCommand);
+			await this.execRemote(client, transferCommand, {
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Direct SFTP ${route} produced no target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: () => lastActivityAt
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			const targetSize = await this.getRemotePathSizeByCommand(request.target).catch(() => bytes);
 			if (bytes > 0 && targetSize !== bytes) {
 				throw new Error(`Direct SFTP size mismatch: expected ${bytes}, got ${targetSize}.`);
 			}
 
-			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SFTP transfer completed.', true, { strategy: 'sftp-direct' });
+			this.fireTransferProgress(request, bytes, bytes, 'transfer', 'Direct SFTP transfer completed.', true, { strategy: 'sftp-direct', route });
 			return this.createTransferResult(true, 'sftp-direct', bytes, 'Direct SFTP completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			this.clearDirectSshRouteCache(request.source, request.target);
-			throw new Error(`Direct SFTP failed: ${formatTransferError(error)}`);
+			throw error;
 		} finally {
 			stopGrowthTiming();
 			unregisterCancel();
@@ -2677,6 +3680,75 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async tryTarRelayTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
+			return undefined;
+		}
+		if (getSshToSshTransferProtocol(request.source) !== 'auto-fast') {
+			return undefined;
+		}
+		if (request.strategyHint === 'direct' || request.source.supportsTar === false || request.target.supportsTar === false || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+
+		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
+		if (sourceType !== 'directory') {
+			return undefined;
+		}
+
+		let bytes = Math.max(0, request.expectedBytes ?? 0);
+		if (bytes <= 0) {
+			bytes = await this.getRemotePathContentSizeByCommand(request.source).catch(() => 0);
+		}
+
+		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
+		const targetConfigResult = await this.createConnectConfig(request.target.connection);
+		if (!sourceConfigResult.ok || !targetConfigResult.ok) {
+			return undefined;
+		}
+
+		let sourceClient: ISSHClient | undefined;
+		let targetClient: ISSHClient | undefined;
+		let stopGrowthTiming: () => void = () => undefined;
+		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
+			sourceClient?.end();
+			targetClient?.end();
+		});
+		try {
+			sourceClient = await this.connect(sourceConfigResult.config);
+			targetClient = await this.connect(targetConfigResult.config);
+			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing tar relay.', true, { strategy: 'tar-relay', route: 'relay' });
+			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, transferredBytes => {
+				this.fireTransferProgress(request, transferredBytes, bytes, 'relay-upload', 'Tar relay transfer in progress.', false, { strategy: 'tar-relay', route: 'relay' });
+			});
+			this.markTransferDataStarted(request.progressId);
+			const sourceStream = await this.openRemoteCommandStream(sourceClient, buildTarCreateFromDirectoryCommand(request.source.path), 'tar relay create');
+			const targetStream = await this.openRemoteCommandStream(targetClient, buildTarExtractToExactDirectoryCommand(request.target.path), 'tar relay extract', true);
+			await pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, targetStream.stream as unknown as NodeJS.WritableStream);
+			await sourceStream.close;
+			await targetStream.close;
+			this.throwIfTransferCanceled(request.progressId);
+			const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
+			if (bytes > 0 && targetSize !== bytes) {
+				throw new Error(`Tar relay size mismatch: expected ${bytes}, got ${targetSize}.`);
+			}
+			const resultBytes = bytes > 0 ? bytes : targetSize;
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar relay completed.', true, { strategy: 'tar-relay', route: 'relay' });
+			this.clearRemoteDirectoryListingCache(request.target);
+			return this.createTransferResult(true, 'tar-relay', resultBytes, 'Tar relay completed.', startedAt, request.progressId);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			throw new Error(`Tar relay failed: ${formatTransferError(error)}`);
+		} finally {
+			stopGrowthTiming();
+			unregisterCancel();
+			sourceClient?.end();
+			targetClient?.end();
+		}
+	}
+
 	private async tryStreamRelayTransfer(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
 			return undefined;
@@ -2751,7 +3823,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh' || !request.source.connection || !request.target.connection) {
 			return undefined;
 		}
-		if (getSshToSshTransferProtocol(request.source) !== 'scp') {
+		const transferMode = getSshToSshTransferProtocol(request.source);
+		if (transferMode !== 'scp' && transferMode !== 'auto-fast') {
 			return undefined;
 		}
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
@@ -3680,41 +4753,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private runCancelableLocalCommand(command: string, args: string[], options: { readonly env?: NodeJS.ProcessEnv } = {}, progressId?: string): Promise<void> {
-		this.throwIfTransferCanceled(progressId);
-		return new Promise((resolve, reject) => {
-			let settled = false;
-			const child = execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024, env: options.env }, (error, _stdout, stderr) => {
-				settled = true;
-				unregisterCancel();
-				if (error) {
-					if (this.isTransferCanceled(progressId)) {
-						reject(new TurboFileTransferCanceledError());
-						return;
-					}
-					reject(new Error(formatLocalCommandError(stderr, error.message)));
-					return;
-				}
-				if (this.isTransferCanceled(progressId)) {
-					reject(new TurboFileTransferCanceledError());
-					return;
-				}
-				resolve();
-			});
-			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
-				if (settled) {
-					return;
-				}
-				killLocalProcessTree(child);
-			});
-			child.once('spawn', () => {
-				if (!settled && this.isTransferCanceled(progressId)) {
-					killLocalProcessTree(child);
-				}
-			});
-		});
-	}
-
 	private registerTransferCancelHandler(progressId: string | undefined, handler: () => void): () => void {
 		if (!progressId) {
 			return () => undefined;
@@ -3736,6 +4774,69 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.transferCancelHandlers.delete(progressId);
 			}
 		};
+	}
+
+	private runCancelableLocalCommand(command: string, args: string[], options: { readonly env?: NodeJS.ProcessEnv; readonly onStdout?: (chunk: string) => void; readonly onStderr?: (chunk: string) => void } = {}, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let stderrTail = '';
+			let unregisterCancel: () => void = () => undefined;
+			const finish = (callback: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				unregisterCancel();
+				callback();
+			};
+			const child = spawn(command, args, { windowsHide: true, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+			child.stdout?.on('data', data => {
+				options.onStdout?.(data.toString());
+			});
+			child.stderr?.on('data', data => {
+				const chunk = data.toString();
+				stderrTail = `${stderrTail}${chunk}`.slice(-64 * 1024);
+				options.onStderr?.(chunk);
+			});
+			child.on('error', error => {
+				finish(() => {
+					if (this.isTransferCanceled(progressId)) {
+						reject(new TurboFileTransferCanceledError());
+					} else {
+						reject(new Error(formatLocalCommandError(stderrTail, error.message)));
+					}
+				});
+			});
+			child.on('close', code => {
+				finish(() => {
+					if (code && code !== 0) {
+						if (this.isTransferCanceled(progressId)) {
+							reject(new TurboFileTransferCanceledError());
+							return;
+						}
+						reject(new Error(formatLocalCommandError(stderrTail, `Local command failed with exit code ${code}.`)));
+						return;
+					}
+					if (this.isTransferCanceled(progressId)) {
+						reject(new TurboFileTransferCanceledError());
+						return;
+					}
+					resolve();
+				});
+			});
+			unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (this.isTransferCanceled(progressId)) {
+					killLocalProcessTree(child);
+					return;
+				}
+			});
+			child.once('spawn', () => {
+				if (!settled && this.isTransferCanceled(progressId)) {
+					killLocalProcessTree(child);
+				}
+			});
+		});
 	}
 
 	private fireTransferProgress(request: { readonly progressId?: string }, transferredBytes: number, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, force = false, extra: Partial<Omit<ITurboFileTransferProgressEvent, 'progressId' | 'transferredBytes' | 'totalBytes' | 'phase' | 'detail'>> = {}): void {
@@ -4299,6 +5400,45 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
+	private openRemoteCommandStream(client: ISSHClient, command: string, context: string, drainStdout = false): Promise<{ readonly stream: ISSHExecStream; readonly close: Promise<void> }> {
+		return new Promise((resolve, reject) => {
+			client.exec(command, (error, stream) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+
+				let stderr = '';
+				let settled = false;
+				const close = new Promise<void>((closeResolve, closeReject) => {
+					const finish = (callback: () => void): void => {
+						if (settled) {
+							return;
+						}
+						settled = true;
+						callback();
+					};
+					stream.stderr.on('data', data => {
+						stderr += data.toString();
+					});
+					if (drainStdout) {
+						stream.on('data', () => undefined);
+					}
+					stream.on('error', err => finish(() => closeReject(err)));
+					stream.on('close', code => {
+						if (code === 0) {
+							finish(() => closeResolve());
+							return;
+						}
+						finish(() => closeReject(new Error(stderr.trim() || `${context} failed with exit code ${code ?? 'unknown'}.`)));
+					});
+				});
+				close.catch(() => undefined);
+				resolve({ stream, close });
+			});
+		});
+	}
+
 	private transformImageBuffer(buffer: Buffer, path: string, targetWidth: number, targetHeight: number, quality: number, format: 'jpeg' | 'png' | 'webp'): IImageBufferResult {
 		const image = nativeImage.createFromBuffer(buffer);
 		if (image.isEmpty()) {
@@ -4351,28 +5491,80 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private execRemote(client: ISSHClient, command: string, options: IRemoteExecOptions = {}): Promise<void> {
 		return new Promise((resolve, reject) => {
+			let settled = false;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			let inactivityTimer: ReturnType<typeof setInterval> | undefined;
+			let streamRef: (NodeJS.ReadWriteStream & { close?: () => void; destroy?: (error?: Error) => void }) | undefined;
+			let lastStreamActivityAt = Date.now();
+			const finish = (callback: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (timeout) {
+					clearTimeout(timeout);
+					timeout = undefined;
+				}
+				if (inactivityTimer) {
+					clearInterval(inactivityTimer);
+					inactivityTimer = undefined;
+				}
+				callback();
+			};
+			const closeStream = (): void => {
+				try {
+					streamRef?.close?.();
+				} catch {
+					// Best-effort cleanup only.
+				}
+				try {
+					streamRef?.destroy?.();
+				} catch {
+					// Best-effort cleanup only.
+				}
+			};
 			client.exec(command, (error, stream) => {
 				if (error) {
-					reject(error);
+					finish(() => reject(error));
 					return;
 				}
 
+				streamRef = stream as unknown as NodeJS.ReadWriteStream & { close?: () => void; destroy?: (error?: Error) => void };
 				let stderr = '';
+				if (options.timeoutMs && options.timeoutMs > 0) {
+					timeout = setTimeout(() => {
+						closeStream();
+						finish(() => reject(new Error(`Remote command timed out after ${options.timeoutMs} ms.`)));
+					}, options.timeoutMs);
+				}
+				if (options.inactivityTimeoutMs && options.inactivityTimeoutMs > 0) {
+					inactivityTimer = setInterval(() => {
+						const externalActivityAt = options.getActivityTime?.() ?? 0;
+						const lastActivityAt = Math.max(lastStreamActivityAt, externalActivityAt);
+						if (Date.now() - lastActivityAt <= options.inactivityTimeoutMs!) {
+							return;
+						}
+						closeStream();
+						finish(() => reject(new Error(options.inactivityMessage ?? `Remote command produced no progress for ${options.inactivityTimeoutMs} ms.`)));
+					}, DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS);
+				}
 				stream.on('data', data => {
 					// Drain stdout so remote commands can finish reliably.
+					lastStreamActivityAt = Date.now();
 					options.onStdout?.(data.toString());
 				});
 				stream.stderr.on('data', data => {
+					lastStreamActivityAt = Date.now();
 					const chunk = data.toString();
 					stderr += chunk;
 					options.onStderr?.(chunk);
 				});
 				stream.on('close', code => {
 					if (code === 0) {
-						resolve();
+						finish(() => resolve());
 						return;
 					}
-					reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`));
+					finish(() => reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`)));
 				});
 			});
 		});
@@ -4541,6 +5733,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			return await this.withDirectorySshClient(endpoint, async client => {
 				const output = await this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path));
+				return parseSizeCommandOutput(output.toString());
+			});
+		} catch {
+			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+		}
+	}
+
+	private async getRemotePathContentSizeByCommand(endpoint: ITurboFileTransferEndpoint): Promise<number> {
+		if (endpoint.kind !== 'ssh' || looksLikeWindowsPath(endpoint.path)) {
+			return this.getRemotePathSizeByCommand(endpoint);
+		}
+		try {
+			return await this.withDirectorySshClient(endpoint, async client => {
+				const output = await this.execRemoteBytes(client, buildPosixContentSizeCommand(endpoint.path));
 				return parseSizeCommandOutput(output.toString());
 			});
 		} catch {
@@ -5025,7 +6231,6 @@ async function readWindowsClipboardFilePaths(): Promise<string[]> {
 	return paths;
 }
 
-
 async function readWindowsClipboardDropListPaths(): Promise<string[]> {
 	if (platform() !== 'win32') {
 		return [];
@@ -5047,6 +6252,7 @@ foreach ($item in $items) {
 		.filter(Boolean)
 		.map(line => Buffer.from(line, 'base64').toString('utf8'));
 }
+
 function parseWindowsClipboardBuffer(buffer: Buffer, encoding: BufferEncoding): string[] {
 	if (!buffer.byteLength) {
 		return [];
@@ -5318,6 +6524,9 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		return 'remote-copy';
 	}
 	const protocol = getSshToSshTransferProtocol(source);
+	if (protocol === 'auto-fast') {
+		return 'scp-direct';
+	}
 	if (protocol === 'rsync') {
 		return source.supportsRsync === true && target.supportsRsync === true ? 'rsync-direct' : 'rsync-relay';
 	}
@@ -5325,11 +6534,13 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 }
 
 function getSshToSshTransferProtocol(source: ITurboFileTransferEndpoint): TurboFileTransferProtocol {
-	return source.preferredProtocol ?? 'scp';
+	return source.preferredProtocol ?? 'auto-fast';
 }
 
 function getSshToSshRelayStrategy(protocol: TurboFileTransferProtocol): ITurboFileTransferResult['strategy'] {
 	switch (protocol) {
+		case 'auto-fast':
+			return 'tar-relay';
 		case 'rsync':
 			return 'rsync-relay';
 		case 'sftp':
@@ -5342,6 +6553,8 @@ function getSshToSshRelayStrategy(protocol: TurboFileTransferProtocol): ITurboFi
 
 function formatTransferProtocolName(protocol: TurboFileTransferProtocol): string {
 	switch (protocol) {
+		case 'auto-fast':
+			return 'Auto-fast';
 		case 'rsync':
 			return 'Rsync';
 		case 'sftp':
@@ -5352,13 +6565,20 @@ function formatTransferProtocolName(protocol: TurboFileTransferProtocol): string
 	}
 }
 
+function isExplicitCommandTransferMode(protocol: TurboFileTransferProtocol | undefined): boolean {
+	return protocol === 'rsync' || protocol === 'scp';
+}
+
 function formatTransferError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
 function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined, connection: ITurboFileSshConnectionOptions | undefined): Array<'scp' | 'rsync'> {
+	if (preferredProtocol === 'auto-fast' || preferredProtocol === undefined) {
+		return ['scp'];
+	}
 	if (preferredProtocol === 'rsync') {
-		return canUseLocalRsyncCommand(connection) ? ['rsync', 'scp'] : ['scp'];
+		return connection ? ['rsync'] : ['scp'];
 	}
 	if (preferredProtocol === 'scp') {
 		return ['scp'];
@@ -5367,10 +6587,7 @@ function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransf
 }
 
 function canUseLocalRsyncCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
-	if (!connection) {
-		return false;
-	}
-	return !!connection.privateKeyPath && !connection.password;
+	return !!connection;
 }
 
 function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
@@ -5378,6 +6595,64 @@ function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOption
 		return false;
 	}
 	return !!connection.password || !!connection.privateKeyPath || !!connection.privateKey || !connection.passphrase;
+}
+
+async function withNativeOpenSshArgs<T>(connection: ITurboFileSshConnectionOptions, tool: ILocalSshTool, remoteCommand: string, task: (args: string[], env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+	let tempPrivateKeyPath: string | undefined;
+	let tempPasswordPath: string | undefined;
+	let tempAskPassPath: string | undefined;
+	const args = [
+		'-T',
+		'-o', 'StrictHostKeyChecking=accept-new',
+		'-o', 'UserKnownHostsFile=/dev/null',
+		'-o', 'Compression=no',
+		'-o', 'IPQoS=throughput',
+		'-o', 'RekeyLimit=16G',
+		'-o', 'ConnectTimeout=5',
+		'-o', 'ConnectionAttempts=1',
+		'-o', 'ServerAliveInterval=15',
+		'-o', 'ServerAliveCountMax=2',
+		'-o', 'LogLevel=ERROR'
+	];
+	let env: NodeJS.ProcessEnv = tool.env;
+	const askPassSecret = connection.password ?? connection.passphrase;
+	if (askPassSecret) {
+		tempPasswordPath = join(tmpdir(), `turbofile-native-ssh-${randomUUID()}.secret`);
+		tempAskPassPath = join(tmpdir(), `turbofile-native-ssh-${randomUUID()}.cmd`);
+		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
+		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
+		env = {
+			...tool.env,
+			SSH_ASKPASS: tempAskPassPath,
+			SSH_ASKPASS_REQUIRE: 'force',
+			DISPLAY: 'turbofile'
+		};
+		args.push('-o', 'NumberOfPasswordPrompts=1');
+		args.push('-o', 'PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		args.push('-o', 'BatchMode=yes');
+	}
+	if (connection.port && connection.port !== 22) {
+		args.push('-p', String(connection.port));
+	}
+	if (connection.privateKeyPath) {
+		args.push('-i', toOpenSshLocalPath(connection.privateKeyPath));
+	} else if (connection.privateKey) {
+		tempPrivateKeyPath = join(tmpdir(), `turbofile-native-ssh-${randomUUID()}.key`);
+		await fsp.writeFile(tempPrivateKeyPath, connection.privateKey, { mode: 0o600 });
+		args.push('-i', toOpenSshLocalPath(tempPrivateKeyPath));
+	}
+	args.push(`${connection.username}@${connection.host}`, remoteCommand);
+
+	try {
+		return await task(args, env);
+	} finally {
+		await Promise.all([
+			tempPrivateKeyPath ? fsp.rm(tempPrivateKeyPath, { force: true }).catch(() => undefined) : undefined,
+			tempPasswordPath ? fsp.rm(tempPasswordPath, { force: true }).catch(() => undefined) : undefined,
+			tempAskPassPath ? fsp.rm(tempAskPassPath, { force: true }).catch(() => undefined) : undefined
+		]);
+	}
 }
 
 async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnectionOptions, task: (args: string[], env?: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
@@ -5390,6 +6665,7 @@ async function withNativeOpenSshScpBaseArgs<T>(connection: ITurboFileSshConnecti
 	const args = [
 		'-q',
 		'-o', 'StrictHostKeyChecking=accept-new',
+		'-o', 'UserKnownHostsFile=/dev/null',
 		'-o', 'Compression=no',
 		'-o', 'IPQoS=throughput',
 		'-o', 'RekeyLimit=16G',
@@ -5453,15 +6729,149 @@ function isRecoverableLocalCommandTransferError(error: unknown): boolean {
 	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error/i.test(message);
 }
 
-function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions): string {
+let localSshToolPromise: Promise<ILocalSshTool> | undefined;
+let localRsyncToolPromise: Promise<ILocalRsyncTool> | undefined;
+
+function resolveLocalSshTool(): Promise<ILocalSshTool> {
+	localSshToolPromise ??= doResolveLocalSshTool();
+	return localSshToolPromise;
+}
+
+async function doResolveLocalSshTool(): Promise<ILocalSshTool> {
+	if (platform() !== 'win32') {
+		return createLocalSshTool('ssh');
+	}
+	for (const candidate of getBundledLocalSshCandidates()) {
+		if (await localPathExists(candidate)) {
+			return createLocalSshTool(candidate);
+		}
+	}
+	return createLocalSshTool('ssh.exe');
+}
+
+function createLocalSshTool(executable: string): ILocalSshTool {
+	const executableDirectory = /[\\/]/.test(executable) ? dirname(executable) : undefined;
+	const env = createLocalToolEnvironment(executableDirectory);
+	return { executable, env };
+}
+
+function resolveLocalRsyncTool(): Promise<ILocalRsyncTool> {
+	localRsyncToolPromise ??= doResolveLocalRsyncTool();
+	return localRsyncToolPromise;
+}
+
+async function doResolveLocalRsyncTool(): Promise<ILocalRsyncTool> {
+	if (platform() !== 'win32') {
+		return createLocalRsyncTool('rsync', 'posix');
+	}
+	for (const candidate of getBundledLocalRsyncCandidates()) {
+		if (await localPathExists(candidate)) {
+			return createLocalRsyncTool(candidate, 'cygwin');
+		}
+	}
+	return createLocalRsyncTool('rsync.exe', 'cygwin');
+}
+
+async function createLocalRsyncTool(executable: string, pathFlavor: ILocalRsyncTool['pathFlavor']): Promise<ILocalRsyncTool> {
+	const executableDirectory = /[\\/]/.test(executable) ? dirname(executable) : undefined;
+	const sshCandidate = executableDirectory ? join(executableDirectory, 'ssh.exe') : undefined;
+	const sshExecutable = sshCandidate && await localPathExists(sshCandidate) ? sshCandidate : undefined;
+	const env = createLocalToolEnvironment(executableDirectory);
+	if (executableDirectory) {
+		env.CWRSYNCHOME ??= executableDirectory;
+	}
+	return { executable, sshExecutable, pathFlavor, env };
+}
+
+function createLocalToolEnvironment(executableDirectory: string | undefined): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	if (executableDirectory) {
+		const pathDelimiter = platform() === 'win32' ? ';' : ':';
+		env.PATH = [executableDirectory, env.PATH].filter((value): value is string => !!value).join(pathDelimiter);
+	}
+	if (platform() === 'win32' && env.USERPROFILE) {
+		env.HOME = env.USERPROFILE;
+	}
+	return env;
+}
+
+function getBundledLocalRsyncCandidates(): string[] {
+	const relativePath = join('resources', 'turbofile', 'rsync', 'win32', 'rsync.exe');
+	const roots = [
+		safeGetElectronAppPath(),
+		join(safeGetElectronAppPath(), 'out'),
+		process.resourcesPath,
+		process.resourcesPath ? join(process.resourcesPath, 'app') : undefined,
+		process.cwd(),
+		join(process.cwd(), 'out')
+	].filter((value): value is string => !!value);
+	return [...new Set(roots.map(root => join(root, relativePath)))];
+}
+
+function getBundledLocalSshCandidates(): string[] {
+	return getBundledLocalRsyncCandidates().map(candidate => join(dirname(candidate), 'ssh.exe'));
+}
+
+function safeGetElectronAppPath(): string {
+	try {
+		return app.getAppPath();
+	} catch {
+		return process.cwd();
+	}
+}
+
+async function localPathExists(path: string): Promise<boolean> {
+	try {
+		await fsp.access(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function withLocalRsyncSshEnvironment<T>(connection: ITurboFileSshConnectionOptions, tool: ILocalRsyncTool, task: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+	const askPassSecret = connection.password ?? connection.passphrase;
+	if (!askPassSecret) {
+		return task(tool.env);
+	}
+
+	let tempPasswordPath: string | undefined;
+	let tempAskPassPath: string | undefined;
+	try {
+		tempPasswordPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.secret`);
+		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.cmd`);
+		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
+		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
+		return await task({
+			...tool.env,
+			SSH_ASKPASS: tempAskPassPath,
+			SSH_ASKPASS_REQUIRE: 'force',
+			DISPLAY: 'turbofile'
+		});
+	} finally {
+		await Promise.all([
+			tempPasswordPath ? fsp.rm(tempPasswordPath, { force: true }).catch(() => undefined) : undefined,
+			tempAskPassPath ? fsp.rm(tempAskPassPath, { force: true }).catch(() => undefined) : undefined
+		]);
+	}
+}
+
+function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions, sshExecutable?: string): string {
+	const hasAskPassSecret = !!(connection.password ?? connection.passphrase);
 	const parts = [
-		'ssh',
+		formatLocalRsyncCommand(sshExecutable ?? 'ssh'),
 		'-T',
-		'-o BatchMode=yes',
 		'-o StrictHostKeyChecking=accept-new',
+		'-o UserKnownHostsFile=/dev/null',
 		'-o Compression=no',
 		'-o LogLevel=ERROR'
 	];
+	if (hasAskPassSecret) {
+		parts.push('-o NumberOfPasswordPrompts=1');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (connection.privateKeyPath) {
 		parts.push(`-i ${quoteLocalShellArg(toOpenSshLocalPath(connection.privateKeyPath))}`);
 	}
@@ -5471,15 +6881,23 @@ function buildLocalRsyncSshTransport(connection: ITurboFileSshConnectionOptions)
 	return parts.join(' ');
 }
 
+function formatLocalRsyncCommand(command: string): string {
+	return /[\\/]/.test(command) ? quoteLocalShellArg(toOpenSshLocalPath(command)) : command;
+}
+
 function formatRsyncRemoteSpec(connection: ITurboFileSshConnectionOptions, remotePath: string): string {
 	return `${connection.username}@${connection.host}:${remotePath}`;
 }
 
-function toRsyncLocalPath(path: string): string {
+function toRsyncLocalPath(path: string, flavor: ILocalRsyncTool['pathFlavor'] = 'cygwin'): string {
 	const normalized = path.replace(/\\/g, '/');
 	const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
 	if (driveMatch) {
-		return `/cygdrive/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+		if (flavor === 'posix') {
+			return normalized;
+		}
+		const drive = driveMatch[1].toLowerCase();
+		return `/cygdrive/${drive}/${driveMatch[2]}`;
 	}
 	return normalized;
 }
@@ -5494,6 +6912,10 @@ function quoteLocalShellArg(value: string): string {
 
 function getDirectSshRouteCacheKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions): string {
 	return `${getSshConnectionRouteKey(source)}=>${getSshConnectionRouteKey(target)}`;
+}
+
+function getDirectSshRouteFailureKey(cacheKey: string, route: TurboFileDirectSshRoute): string {
+	return `${cacheKey}:${route}`;
 }
 
 /**
@@ -5668,6 +7090,84 @@ function buildTransferDependencyInstallCommand(packages: readonly TurboFileTrans
 	].join(' ');
 }
 
+function buildTarCreateFromDirectoryCommand(path: string): string {
+	return `command -v tar >/dev/null 2>&1 && tar -cf - -C ${quotePosixShellArg(path)} .`;
+}
+
+function buildTarCreateFromItemsCommand(parentPath: string, names: readonly string[]): string {
+	const itemArgs = names.map(name => quotePosixShellArg(name)).join(' ');
+	return `command -v tar >/dev/null 2>&1 && tar -cf - -C ${quotePosixShellArg(parentPath)} -- ${itemArgs}`;
+}
+
+function buildTarExtractToExactDirectoryCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target} && tar -xf - -C ${target}`;
+}
+
+function buildTarExtractToDirectoryCommand(targetDirectory: string, targetNames: readonly string[]): string {
+	const target = quotePosixShellArg(targetDirectory);
+	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
+	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}tar -xf - -C ${target}`;
+}
+
+function buildTarSourcePushCommand(sourcePath: string, targetPath: string, targetUserHost: string, sshCommand: string, sshpassPrefix: string): string {
+	const prepareTarget = `rm -rf -- ${quotePosixShellArg(targetPath)} && mkdir -p -- ${quotePosixShellArg(targetPath)} && command -v tar >/dev/null 2>&1`;
+	const extractTarget = `tar -xf - -C ${quotePosixShellArg(targetPath)}`;
+	const remoteShell = `${sshpassPrefix}${sshCommand} ${quotePosixShellArg(targetUserHost)}`;
+	return `command -v tar >/dev/null 2>&1 && ${remoteShell} ${quotePosixShellArg(prepareTarget)} && tar -cf - -C ${quotePosixShellArg(sourcePath)} . | ${remoteShell} ${quotePosixShellArg(extractTarget)}`;
+}
+
+function buildTarItemsSourcePushCommand(parentPath: string, names: readonly string[], targetDirectory: string, targetNames: readonly string[], targetUserHost: string, sshCommand: string, sshpassPrefix: string): string {
+	const target = quotePosixShellArg(targetDirectory);
+	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
+	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	const prepareTarget = `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}true`;
+	const extractTarget = `tar -xf - -C ${target}`;
+	const remoteShell = `${sshpassPrefix}${sshCommand} ${quotePosixShellArg(targetUserHost)}`;
+	return `${remoteShell} ${quotePosixShellArg(prepareTarget)} && ${buildTarCreateFromItemsCommand(parentPath, names)} | ${remoteShell} ${quotePosixShellArg(extractTarget)}`;
+}
+
+function buildTarTargetPullCommand(sourcePath: string, targetPath: string, sourceUserHost: string, sshCommand: string, sshpassPrefix: string): string {
+	const createSource = `command -v tar >/dev/null 2>&1 && tar -cf - -C ${quotePosixShellArg(sourcePath)} .`;
+	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${quotePosixShellArg(targetPath)} && mkdir -p -- ${quotePosixShellArg(targetPath)} && ${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${quotePosixShellArg(targetPath)}`;
+}
+
+function buildTarItemsTargetPullCommand(parentPath: string, names: readonly string[], targetDirectory: string, targetNames: readonly string[], sourceUserHost: string, sshCommand: string, sshpassPrefix: string): string {
+	const target = quotePosixShellArg(targetDirectory);
+	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
+	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	const createSource = buildTarCreateFromItemsCommand(parentPath, names);
+	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${target}`;
+}
+
+function waitForLocalProcessClose(child: ReturnType<typeof spawn>, context: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let stderr = '';
+		child.stderr?.on('data', data => {
+			stderr += data.toString();
+		});
+		child.on('error', reject);
+		child.on('close', code => {
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			reject(new Error(stderr.trim() || `${context} failed with exit code ${code ?? 'unknown'}.`));
+		});
+	});
+}
+
+function createProgressPassThrough(onDelta?: (delta: number) => void): PassThrough {
+	const stream = new PassThrough({ highWaterMark: 4 * 1024 * 1024 });
+	if (onDelta) {
+		stream.on('data', chunk => {
+			onDelta(Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk)));
+		});
+	}
+	return stream;
+}
+
 function runLocalCommand(command: string, args: string[], options: { readonly env?: NodeJS.ProcessEnv } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
 		execFile(command, args, { windowsHide: true, maxBuffer: 10 * 1024 * 1024, env: options.env }, (error, _stdout, stderr) => {
@@ -5680,7 +7180,7 @@ function runLocalCommand(command: string, args: string[], options: { readonly en
 	});
 }
 
-function killLocalProcessTree(child: ReturnType<typeof execFile>): void {
+function killLocalProcessTree(child: ChildProcess): void {
 	if (child.pid && platform() === 'win32') {
 		execFile('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => undefined);
 		return;
@@ -5719,6 +7219,11 @@ function runLocalPowerShellStaScriptBuffer(script: string, maxBuffer = 10 * 1024
 	return runLocalCommandBuffer('powershell.exe', ['-NoProfile', '-STA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(script)], maxBuffer);
 }
 
+function createWindowsDragIcon(): Electron.NativeImage {
+	const icon = nativeImage.createFromDataURL(WINDOWS_DRAG_ICON_DATA_URL);
+	return icon.isEmpty() ? nativeImage.createEmpty() : icon;
+}
+
 async function getWindowsExplorerVisibleLocalNames(path: string): Promise<Set<string> | undefined> {
 	if (platform() !== 'win32') {
 		return undefined;
@@ -5733,16 +7238,20 @@ async function getWindowsExplorerVisibleLocalNames(path: string): Promise<Set<st
 }
 
 function runLocalRobocopyCommand(args: string[]): Promise<void> {
+	return runLocalRobocopyCommandBuffer(args).then(() => undefined);
+}
+
+function runLocalRobocopyCommandBuffer(args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		execFile('robocopy.exe', args, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
+		execFile('robocopy.exe', args, { windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
 			if (!error) {
-				resolve();
+				resolve(stdout);
 				return;
 			}
 
 			const exitCode = typeof error.code === 'number' ? error.code : Number.NaN;
 			if (Number.isFinite(exitCode) && exitCode <= 7) {
-				resolve();
+				resolve(stdout);
 				return;
 			}
 			reject(new Error(formatLocalCommandError(stderr, error.message)));
@@ -5979,6 +7488,10 @@ function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string 
 }
 
 function buildRsyncOptions(includeProgress: boolean): string {
+	return buildLocalRsyncOptionArgs(includeProgress).join(' ');
+}
+
+function buildLocalRsyncOptionArgs(includeProgress: boolean): string[] {
 	const options = [
 		'-a',
 		'--inplace',
@@ -5995,7 +7508,7 @@ function buildRsyncOptions(includeProgress: boolean): string {
 	if (includeProgress) {
 		options.push('--info=progress2');
 	}
-	return options.join(' ');
+	return options;
 }
 
 function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
@@ -6005,13 +7518,18 @@ function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
 }
 
 function buildWindowsSizeCommand(path: string): string {
-	const literalPath = path.replace(/'/g, "''");
-	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $path='${literalPath}'; if (Test-Path -LiteralPath $path -PathType Container) { $sum=(Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if ($null -eq $sum) { [Int64]0 } else { [Int64]$sum } } elseif (Test-Path -LiteralPath $path -PathType Leaf) { [Int64](Get-Item -LiteralPath $path).Length } else { throw 'Path not found' }"`;
+	const target = quotePowerShellLiteral(path);
+	return buildPowerShellCommand(withPowerShellDefaults(`$path=${target}; if (Test-Path -LiteralPath $path -PathType Container) { $dest=Join-Path ([System.IO.Path]::GetTempPath()) 'turbofile-size-probe'; $output=& robocopy $path $dest /L /E /BYTES /R:0 /W:0 /NFL /NDL /NJH /NP /NC /NS /XJ 2>&1; if ($LASTEXITCODE -gt 7) { throw (($output | Out-String).Trim()) }; $match=[regex]::Match(($output | Out-String), '(?im)^\\s*Bytes\\s*:\\s*([0-9][0-9,\\.]*)'); if (-not $match.Success) { throw 'Unable to parse robocopy size output.' }; [Int64]($match.Groups[1].Value -replace '[^0-9]', '') } elseif (Test-Path -LiteralPath $path -PathType Leaf) { [Int64](Get-Item -LiteralPath $path).Length } else { throw 'Path not found' }`));
 }
 
 function buildPosixSizeCommand(path: string): string {
 	const quotedPath = quotePosixShellArg(path);
 	return `p=${quotedPath}; if [ -d "$p" ]; then size=''; if command -v du >/dev/null 2>&1; then size=$(du -sb -- "$p" 2>/dev/null | awk 'NR==1 {print $1; exit}'); if [ -z "$size" ]; then size=$(du -sk -- "$p" 2>/dev/null | awk 'NR==1 {printf "%.0f\\n", $1 * 1024; exit}'); fi; fi; if [ -z "$size" ]; then size=$(find "$p" -type f -printf '%s\\n' 2>/dev/null | awk '{s += $1} END {printf "%.0f\\n", s + 0}'); fi; printf '%s\\n' "$size"; elif [ -f "$p" ] || [ -L "$p" ]; then stat -c '%s' -- "$p"; else echo 'Path not found' >&2; exit 2; fi`;
+}
+
+function buildPosixContentSizeCommand(path: string): string {
+	const quotedPath = quotePosixShellArg(path);
+	return `p=${quotedPath}; if [ -d "$p" ]; then find "$p" -type f -printf '%s\\n' 2>/dev/null | awk '{s += $1} END {printf "%.0f\\n", s + 0}'; elif [ -f "$p" ] || [ -L "$p" ]; then stat -c '%s' -- "$p"; else echo 'Path not found' >&2; exit 2; fi`;
 }
 
 function buildPosixHumanSizeCommand(path: string): string {
@@ -6448,11 +7966,76 @@ async function getLocalPathSize(path: string): Promise<number> {
 	return sizes.reduce((total, size) => total + size, 0);
 }
 
+async function getLocalPathSizeByCommand(path: string): Promise<number> {
+	const stat = await fsp.stat(path);
+	if (!stat.isDirectory()) {
+		return stat.size;
+	}
+
+	if (platform() !== 'win32') {
+		return getLocalPathSize(path);
+	}
+
+	try {
+		const output = await runLocalRobocopyCommandBuffer(buildWindowsDirectorySizeRobocopyArgs(path, join(tmpdir(), 'turbofile-size-probe')));
+		return parseWindowsRobocopySizeOutput(output);
+	} catch {
+		return getLocalPathSize(path);
+	}
+}
+
+async function getLocalBatchTargetSize(targetDirectory: string, targetNames: readonly string[]): Promise<number> {
+	let total = 0;
+	for (const targetName of targetNames) {
+		total += await getLocalPathSize(join(targetDirectory, targetName)).catch(() => 0);
+	}
+	return total;
+}
+
 async function getLocalPathTransferSize(path: string, expectedBytes?: number): Promise<number> {
 	if (expectedBytes && expectedBytes > 0) {
 		return expectedBytes;
 	}
 	return getLocalPathSize(path);
+}
+
+function buildWindowsDirectorySizeRobocopyArgs(sourcePath: string, destinationPath: string): string[] {
+	return [
+		sourcePath,
+		destinationPath,
+		'/L',
+		'/E',
+		'/BYTES',
+		'/R:0',
+		'/W:0',
+		'/NFL',
+		'/NDL',
+		'/NJH',
+		'/NP',
+		'/NC',
+		'/NS',
+		'/XJ'
+	];
+}
+
+function parseWindowsRobocopySizeOutput(output: string): number {
+	const line = output.split(/\r?\n/).find(candidate => /^\s*Bytes\s*:/i.test(candidate));
+	if (!line) {
+		throw new Error(`Unable to parse robocopy size output: ${output.trim() || 'empty output'}`);
+	}
+
+	const firstToken = line.slice(line.indexOf(':') + 1).trim().split(/\s+/)[0] ?? '';
+	const digits = firstToken.replace(/[^\d]/g, '');
+	if (!digits) {
+		throw new Error(`Invalid robocopy size output: ${line.trim()}`);
+	}
+
+	const size = Number(digits);
+	if (!Number.isFinite(size)) {
+		throw new Error(`Invalid robocopy size: ${digits}`);
+	}
+
+	return size;
 }
 
 function compareFileEntries(a: ITurboFileFileEntry, b: ITurboFileFileEntry): number {

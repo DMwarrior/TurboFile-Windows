@@ -1000,17 +1000,53 @@ export class TurboFileEditor extends EditorPane {
 		const items = this.getSelectedTransferItems(side);
 		const labels = items.length ? items.map(i => i.name) : [item.name];
 		event.dataTransfer.setData('text/plain', labels.join('\n'));
+
+		this.tryStartImmediateLocalWindowsDrag(side, event);
+	}
+
+	private tryStartImmediateLocalWindowsDrag(side: 'left' | 'right', event: DragEvent): void {
+		const device = this.getPaneDevice(side);
+		if (device?.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			return;
+		}
+
+		const dragItems: ITurboFileWindowsDragItem[] = this.getSelectedTransferItems(side)
+			.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent)
+			.map(candidate => ({
+				sourcePath: candidate.path,
+				name: candidate.name,
+				type: candidate.type,
+				size: candidate.directory ? undefined : candidate.rawSize
+			}));
+		if (!dragItems.length) {
+			return;
+		}
+
+		event.preventDefault();
+		this.hasStartedNativeWindowsDrag = true;
+		void this.sshService.startWindowsFileDrag({
+			source: {
+				kind: 'local',
+				path: this.paneStates[side].path,
+				label: device.name
+			},
+			items: dragItems
+		}).then(result => {
+			if (!result.ok) {
+				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
+				this.render();
+			}
+		}).catch(error => {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `拖出到 Windows 失败：${message}`;
+			this.render();
+		});
 	}
 
 	/**
-	 * Called when the user drags a TurboFile file-row out of the window. Hands off to the main
-	 * process so Windows can pick up a real file drop (Explorer, Desktop, etc.).
-	 *
-	 * - Local Windows source: the main service feeds real file paths into Electron's startDrag,
-	 *   so Explorer receives an actual copy (source files always preserved).
-	 * - SSH source: the main service currently reports that virtual-file drag isn't available in
-	 *   this build; we surface that as a status message and degrade gracefully — internal pane-
-	 *   to-pane drag and the rest of the transfer flow are unaffected.
+	 * Called when the user drags a TurboFile file-row out of the window. Local files are handed to
+	 * Windows directly; remote files are staged through the normal transfer pipeline first so
+	 * Explorer/Desktop still receives real Windows paths.
 	 */
 	private async startWindowsFileDragFromPane(side: 'left' | 'right'): Promise<void> {
 		let task: TurboFileTask | undefined;
@@ -1311,7 +1347,7 @@ export class TurboFileEditor extends EditorPane {
 		meta.appendChild(this.renderInfoLine('地址', device.id === LOCAL_WINDOWS_DEVICE_ID ? device.host : `${device.host}:${device.port || 22}`));
 		meta.appendChild(this.renderInfoLine('用户', device.username || '本机'));
 		meta.appendChild(this.renderInfoLine('默认目录', device.defaultPath || (device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDefaultPath() : '/')));
-		meta.appendChild(this.renderInfoLine('传输协议', this.getDeviceTransferProtocolLabel(device)));
+		meta.appendChild(this.renderInfoLine('传输模式', this.getDeviceTransferProtocolLabel(device)));
 		card.appendChild(meta);
 
 		const actions = $('.turbofile-page-card-actions');
@@ -1342,10 +1378,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private getDeviceTransferProtocolLabel(device: TurboFileDevice): string {
 		switch (device.preferredTransferProtocol) {
+			case 'auto-fast':
+				return device.capabilities.tar || device.capabilities.rsync ? '智能极速（按场景自动）' : '智能极速（自动兜底）';
 			case 'rsync':
-				return device.capabilities.rsync ? 'rsync 极速模式（可用）' : 'rsync 极速模式（未通过检测）';
+				return device.capabilities.rsync ? 'rsync 增量（可用）' : 'rsync 增量（未通过检测）';
 			case 'scp':
-				return device.capabilities.scp ? 'SCP 默认极速（可用）' : 'SCP 默认极速（未通过检测）';
+				return device.capabilities.scp ? 'SCP 文件（可用）' : 'SCP 文件（未通过检测）';
 			case 'sftp':
 			default:
 				return 'SFTP 稳定模式';
@@ -2094,7 +2132,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptions(device));
 		if (!result.ok || !result.capabilities) {
-			return { status: 'error', message: `协议能力检测失败，将按 SFTP 兜底：${result.message}` };
+			return { status: 'error', message: `设备能力检测失败，将按 SFTP 兜底：${result.message}` };
 		}
 
 		const capabilities = this.toDeviceCapabilities(result.capabilities);
@@ -2109,19 +2147,31 @@ export class TurboFileEditor extends EditorPane {
 
 		const result = await this.sshService.detectCapabilities(await this.getSshConnectionOptionsFromDraft(draft, editingDevice));
 		if (!result.ok || !result.capabilities) {
-			return { status: 'error', message: `协议能力检测失败：${result.message}`, missingDependencies: [] };
+			return { status: 'error', message: `设备能力检测失败：${result.message}`, missingDependencies: [] };
 		}
 
 		return this.getProtocolCheckResult(this.normalizeTransferProtocol(draft.preferredTransferProtocol ?? defaultTurboFileTransferProtocol), result.capabilities);
 	}
 
 	private getProtocolCheckResult(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileProtocolCheckResult | undefined {
+		if (protocol === 'auto-fast') {
+			if ((capabilities.tar || capabilities.rsync) && capabilities.scp) {
+				return { status: 'success', message: '智能极速可用：目录优先 tar+ssh，单文件优先 SCP；rsync 仅在选择 rsync 增量时使用。', capabilities, missingDependencies: [] };
+			}
+			if (capabilities.scp || capabilities.sftp) {
+				return { status: 'success', message: '未检测到完整 rsync/tar/scp 能力，将自动使用可用协议兜底。', capabilities, missingDependencies: [] };
+			}
+			return { status: 'error', message: '未检测到可用传输能力，请检查 SSH/SFTP/SCP。', capabilities, missingDependencies: [] };
+		}
 		if (protocol === 'rsync') {
 			const missingDependencies = this.getMissingProtocolDependencies(protocol, capabilities);
-			if (!missingDependencies.length) {
-				return { status: 'success', message: 'rsync 可用，sshpass 可用。服务器互传会优先极速模式。', capabilities, missingDependencies };
+			if (capabilities.rsync) {
+				const message = capabilities.sshpass
+					? 'rsync 可用，sshpass 可用。重复同步会使用 rsync 增量模式。'
+					: 'rsync 可用。本地与 SSH 互传可直接使用；SSH 设备互传密码路线建议安装 sshpass。';
+				return { status: 'success', message, capabilities, missingDependencies };
 			}
-			return { status: 'error', message: `缺少 ${missingDependencies.join('、')}，服务器互传将按 SFTP 兜底。`, capabilities, missingDependencies };
+			return { status: 'error', message: `缺少 ${missingDependencies.join('、')}，rsync 增量不可用。`, capabilities, missingDependencies };
 		}
 		if (protocol === 'scp') {
 			return capabilities.scp
@@ -2150,7 +2200,8 @@ export class TurboFileEditor extends EditorPane {
 			ssh: capabilities.ssh,
 			sftp: capabilities.sftp,
 			scp: capabilities.scp,
-			rsync: capabilities.rsync && capabilities.sshpass,
+			rsync: capabilities.rsync,
+			tar: capabilities.tar ?? capabilities.archive,
 			shell: capabilities.shell,
 			archive: capabilities.archive
 		};
@@ -2344,7 +2395,7 @@ export class TurboFileEditor extends EditorPane {
 			if (sourceSide && sourceSide !== side) {
 				event.preventDefault();
 				if (event.dataTransfer) {
-					event.dataTransfer.dropEffect = this.getDropTransferOperation(event);
+					event.dataTransfer.dropEffect = 'copy';
 				}
 				this.setExternalDropTargetSide(undefined);
 				return;
@@ -2353,7 +2404,7 @@ export class TurboFileEditor extends EditorPane {
 			if (this.hasExternalDropData(event)) {
 				event.preventDefault();
 				if (event.dataTransfer) {
-					event.dataTransfer.dropEffect = this.getDropTransferOperation(event);
+					event.dataTransfer.dropEffect = 'copy';
 				}
 				this.setExternalDropTargetSide(side);
 				return;
@@ -2373,17 +2424,13 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== side) {
-				if (this.getDropTransferOperation(event) === 'move') {
-					void this.moveSelected(sourceSide, side);
-				} else {
-					void this.transferSelected(sourceSide, side);
-				}
+				void this.transferSelected(sourceSide, side);
 				return;
 			}
 
 			const externalPaths = this.extractExternalDropPaths(event);
 			if (externalPaths.length) {
-				void this.transferExternalPaths(side, externalPaths, this.getDropTransferOperation(event));
+				void this.transferExternalPaths(side, externalPaths, 'copy');
 			}
 		});
 		list.addEventListener('contextmenu', event => this.showPaneContextMenu(side, event));
@@ -3218,7 +3265,7 @@ export class TurboFileEditor extends EditorPane {
 			right.appendChild(this.renderStatusbarItem(Codicon.archive, `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`, '已传输'));
 			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
 			if (protocol) {
-				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输协议'));
+				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输模式'));
 			}
 			const cancel = this.createIconButton(Codicon.close, '取消运行中的传输', 'turbofile-statusbar-cancel');
 			this.renderDisposables.add(cancel);
@@ -3606,6 +3653,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getTransferStrategyFromProgress(event: ITurboFileTransferProgressEvent): TurboFileTransferStrategy | undefined {
+		if (event.strategy) {
+			return event.strategy;
+		}
 		const detail = event.detail?.toLowerCase() ?? '';
 		if (event.phase === 'rsync-direct') {
 			return detail.includes('parallel') ? 'rsync-direct-parallel' : 'rsync-direct';
@@ -3643,6 +3693,18 @@ export class TurboFileEditor extends EditorPane {
 		if (detail.includes('direct rsync')) {
 			return 'rsync-direct';
 		}
+		if (detail.includes('direct tar')) {
+			return 'tar-direct';
+		}
+		if (detail.includes('tar relay')) {
+			return 'tar-relay';
+		}
+		if (detail.includes('tar upload')) {
+			return 'tar-upload';
+		}
+		if (detail.includes('tar download')) {
+			return 'tar-download';
+		}
 		if (detail.includes('remote copy')) {
 			return 'remote-copy';
 		}
@@ -3654,26 +3716,39 @@ export class TurboFileEditor extends EditorPane {
 
 	private getTransferProtocolLabel(strategy: string | undefined): string | undefined {
 		switch (strategy) {
+			case 'tar-direct':
+				return 'tar 直连';
+			case 'tar-relay':
+				return 'tar 中转';
+			case 'tar-upload':
+				return 'tar 上传';
+			case 'tar-download':
+				return 'tar 下载';
 			case 'rsync-direct':
 			case 'rsync-direct-parallel':
-				return '直连 rsync';
+				return 'rsync 直连';
 			case 'sftp-direct':
-				return '直连 sftp';
+				return 'sftp 直连';
 			case 'scp-direct':
-				return '直连 scp';
+				return 'scp 直连';
+			case 'scp-relay':
+				return 'scp 中转';
 			case 'sftp-upload':
+				return 'sftp 上传';
 			case 'sftp-download':
-				return '直连 sftp';
+				return 'sftp 下载';
 			case 'scp-upload':
+				return 'scp 上传';
 			case 'scp-download':
-				return '直连 scp';
+				return 'scp 下载';
 			case 'rsync-upload':
+				return 'rsync 上传';
 			case 'rsync-download':
-				return '直连 rsync';
+				return 'rsync 下载';
 			case 'rsync-relay':
-				return '中转 rsync';
+				return 'rsync 中转';
 			case 'sftp-relay':
-				return '中转 sftp';
+				return 'sftp 中转';
 			case 'remote-copy':
 				return '同机复制';
 			case 'local-copy':
@@ -3692,6 +3767,9 @@ export class TurboFileEditor extends EditorPane {
 			return 'local-copy';
 		}
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			if (targetDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
+				return 'tar-upload';
+			}
 			if (targetDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(targetDevice)) {
 				return 'rsync-upload';
 			}
@@ -3701,6 +3779,9 @@ export class TurboFileEditor extends EditorPane {
 			return 'sftp-upload';
 		}
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			if (sourceDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
+				return 'tar-download';
+			}
 			if (sourceDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(sourceDevice)) {
 				return 'rsync-download';
 			}
@@ -3712,23 +3793,28 @@ export class TurboFileEditor extends EditorPane {
 		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			return 'remote-copy';
 		}
-		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)
-			&& sourceDevice.preferredTransferProtocol === 'rsync'
-			&& targetDevice.preferredTransferProtocol === 'rsync'
-			&& sourceDevice.capabilities.rsync
-			&& targetDevice.capabilities.rsync) {
-			return sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct';
-		}
-		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)
-			&& sourceDevice.preferredTransferProtocol !== 'sftp'
-			&& targetDevice.preferredTransferProtocol !== 'sftp') {
-			return 'scp-direct';
+		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)) {
+			if (sourceDevice.preferredTransferProtocol === 'auto-fast') {
+				return sourceItem.directory && sourceDevice.capabilities.tar && targetDevice.capabilities.tar ? 'tar-direct' : 'scp-direct';
+			}
+			if (sourceDevice.preferredTransferProtocol === 'rsync') {
+				return sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync
+					? sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct'
+					: 'rsync-relay';
+			}
+			return sourceDevice.preferredTransferProtocol === 'sftp' ? 'sftp-direct' : 'scp-direct';
 		}
 		return 'sftp-direct';
 	}
 
 	private canUseLocalRsyncCommand(device: TurboFileDevice): boolean {
-		return device.authType === 'privateKey' && !!device.privateKeyPath;
+		return device.capabilities.rsync;
+	}
+
+	private shouldDeferSshToSshStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice): boolean {
+		return sourceDevice.id !== LOCAL_WINDOWS_DEVICE_ID
+			&& targetDevice.id !== LOCAL_WINDOWS_DEVICE_ID
+			&& !this.isSameDeviceForNativeOperation(sourceDevice, targetDevice);
 	}
 
 	private formatTransferProgressDetail(phase: ITurboFileTransferProgressEvent['phase'], transferredBytes: number, totalBytes: number): string {
@@ -4781,11 +4867,34 @@ export class TurboFileEditor extends EditorPane {
 		const r = pixel[0];
 		const g = pixel[1];
 		const b = pixel[2];
-		tooltip.textContent = `X: ${x}, Y: ${y}\nRGB (${r}, ${g}, ${b})\nHTML (#${this.toHexColor(r, g, b)})`;
+		tooltip.textContent = `X: ${x}, Y: ${y}\nRGB (${r}, ${g}, ${b})\nHSV (${this.toHsvColor(r, g, b)})`;
 	}
 
-	private toHexColor(r: number, g: number, b: number): string {
-		return [r, g, b].map(value => value.toString(16).padStart(2, '0')).join('');
+	private toHsvColor(r: number, g: number, b: number): string {
+		const red = r / 255;
+		const green = g / 255;
+		const blue = b / 255;
+		const max = Math.max(red, green, blue);
+		const min = Math.min(red, green, blue);
+		const delta = max - min;
+		let hue = 0;
+		if (delta !== 0) {
+			if (max === red) {
+				hue = ((green - blue) / delta) % 6;
+			} else if (max === green) {
+				hue = (blue - red) / delta + 2;
+			} else {
+				hue = (red - green) / delta + 4;
+			}
+			hue *= 60;
+			if (hue < 0) {
+				hue += 360;
+			}
+		}
+
+		const saturation = max === 0 ? 0 : (delta / max) * 100;
+		const value = max * 100;
+		return `${Math.round(hue)}°, ${Math.round(saturation)}%, ${Math.round(value)}%`;
 	}
 
 	private prepareImagePreviewAnalysis(image: TurboFileImageGridImage, src: string): TurboFileImagePreviewAnalysis | undefined {
@@ -6769,11 +6878,12 @@ export class TurboFileEditor extends EditorPane {
 			const expectedBytes = sourceItem.directory
 				? Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, 0)
 				: Math.max(activeItem?.totalBytes ?? 0, activeItem?.rawSize ?? 0, sourceItem.rawSize, 0);
+			const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
 			if (activeItem) {
-				activeItem.strategy = plannedStrategy;
+				activeItem.strategy = initialStrategy;
 			}
 			if (options.task) {
-				options.task.strategy = plannedStrategy;
+				options.task.strategy = initialStrategy;
 			}
 			if (options.task) {
 				this.updateTask(options.task, `正在传输：${sourceItem.name} -> ${targetDevice.name}`, Math.max(35, options.task.progress));
@@ -6836,9 +6946,10 @@ export class TurboFileEditor extends EditorPane {
 			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
 			const expectedBytes = items.reduce((sum, item) => sum + (item.directory ? 0 : Math.max(0, item.rawSize)), 0);
 			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, items[0]);
-			task.strategy = plannedStrategy;
+			const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
+			task.strategy = initialStrategy;
 			for (const transferItem of task.transferItems) {
-				transferItem.strategy = plannedStrategy;
+				transferItem.strategy = initialStrategy;
 			}
 			this.updateTask(task, `正在批量传输 0/${items.length}`, 8);
 			const result = await this.sshService.transferBatch({
@@ -7071,7 +7182,7 @@ export class TurboFileEditor extends EditorPane {
 		if (device) {
 			this.paneDirectoryCache.delete(this.getPaneDirectoryCacheKey(device, state.path));
 		}
-		this.statusMessage = `\u5df2\u91cd\u547d\u540d\uff1a${item.name} -> ${targetName}`;
+		this.statusMessage = `已重命名：${item.name} -> ${targetName}`;
 		this.rememberPaneDeviceSnapshot(side);
 		this.render();
 		return snapshot;
@@ -9337,7 +9448,8 @@ export class TurboFileEditor extends EditorPane {
 			path,
 			connection: await this.getSshConnectionOptions(device),
 			label: device.name,
-			supportsRsync: device.preferredTransferProtocol === 'rsync' && device.capabilities.rsync,
+			supportsRsync: device.capabilities.rsync,
+			supportsTar: device.capabilities.tar ?? device.capabilities.archive,
 			preferredProtocol: device.preferredTransferProtocol
 		};
 	}
@@ -9482,7 +9594,8 @@ export class TurboFileEditor extends EditorPane {
 				ssh: false,
 				sftp: false,
 				scp: true,
-				rsync: false,
+				rsync: true,
+				tar: true,
 				shell: true,
 				archive: true
 			},
@@ -9501,12 +9614,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private getConfiguredLocalWindowsTransferProtocol(): TurboFileTransferProtocol {
 		const protocol = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, StorageScope.PROFILE);
-		return protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
+		return protocol === 'auto-fast' || protocol === 'rsync' || protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
 	}
 
 	private saveLocalWindowsDevice(draft: TurboFileDeviceDraft): TurboFileDevice {
 		const defaultPath = draft.defaultPath?.trim() || this.getLocalWindowsDefaultPath();
-		const preferredTransferProtocol = draft.preferredTransferProtocol === 'sftp' ? 'sftp' : 'scp';
+		const preferredTransferProtocol = this.normalizeTransferProtocol(draft.preferredTransferProtocol ?? defaultTurboFileTransferProtocol);
 		this.storageService.store(TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY, defaultPath, StorageScope.PROFILE, StorageTarget.MACHINE);
 		this.storageService.store(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, preferredTransferProtocol, StorageScope.PROFILE, StorageTarget.MACHINE);
 		this.localWindowsDevice = {
@@ -9880,7 +9993,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private normalizeTransferProtocol(value: string): TurboFileTransferProtocol {
-		return value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
+		return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
 	}
 
 	private renderDeviceForm(): HTMLElement {
@@ -9952,7 +10065,7 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 
-			message.textContent = draft.preferredTransferProtocol === 'sftp' ? '正在保存设备...' : '正在保存并检测协议能力...';
+			message.textContent = draft.preferredTransferProtocol === 'sftp' ? '正在保存设备...' : '正在保存并检测设备能力...';
 			try {
 				const previousLocalWindowsDefaultPath = isEditingLocalWindows ? this.getLocalWindowsDeviceDefaultPath() : undefined;
 				let savedDevice = isEditingLocalWindows ? this.saveLocalWindowsDevice(draft) : editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
@@ -10039,7 +10152,7 @@ export class TurboFileEditor extends EditorPane {
 		const isLocalWindowsDevice = editingDevice?.id === LOCAL_WINDOWS_DEVICE_ID || editingDevice?.platform === 'windows';
 		const field = $('.turbofile-device-field.is-wide');
 		const labelElement = document.createElement('label');
-		labelElement.textContent = '传输协议';
+		labelElement.textContent = '传输模式';
 		labelElement.htmlFor = 'turbofile-device-preferredTransferProtocol';
 
 		const row = $('.turbofile-device-protocol-row');
@@ -10052,11 +10165,12 @@ export class TurboFileEditor extends EditorPane {
 		select.id = 'turbofile-device-preferredTransferProtocol';
 		select.name = 'preferredTransferProtocol';
 		const protocolOptions: [string, string][] = [
-			['scp', 'SCP 默认极速'],
+			['auto-fast', '智能极速（推荐）'],
+			['scp', 'SCP 文件'],
 			['sftp', 'SFTP 稳定模式'],
-			['rsync', 'rsync 极速模式']
+			['rsync', 'rsync 增量']
 		];
-		for (const [value, text] of isLocalWindowsDevice ? protocolOptions.filter(([value]) => value !== 'rsync') : protocolOptions) {
+		for (const [value, text] of protocolOptions) {
 			const option = document.createElement('option');
 			option.value = value;
 			option.textContent = text;
@@ -10071,11 +10185,18 @@ export class TurboFileEditor extends EditorPane {
 		install.type = 'button';
 		install.style.display = 'none';
 
+		const getLocalWindowsProtocolStatus = (): string => {
+			const protocol = this.normalizeTransferProtocol(select.value);
+			return protocol === 'rsync'
+				? 'Windows 本机已内置 rsync，可直接用于本机与 SSH 设备增量传输，无需单独安装 Cygwin/MSYS2。'
+				: '本机模式用于 Windows 与服务器互传，无需 SSH 检测。';
+		};
+
 		const status = $('.turbofile-device-protocol-status');
 		status.style.gridColumn = '1 / -1';
 		status.style.minHeight = '18px';
 		status.style.color = 'var(--vscode-descriptionForeground)';
-		status.textContent = isLocalWindowsDevice ? '本机协议用于 Windows 与服务器互传，无需 SSH 检测。' : select.value === 'sftp' ? 'SFTP 稳定模式，无需额外检测。' : '选择后将自动检测协议能力。';
+		status.textContent = isLocalWindowsDevice ? getLocalWindowsProtocolStatus() : select.value === 'sftp' ? 'SFTP 稳定模式，无需额外检测。' : '选择后将自动检测设备能力。';
 
 		let lastMissingDependencies: readonly TurboFileTransferDependency[] = [];
 		let detectionRun = 0;
@@ -10095,7 +10216,7 @@ export class TurboFileEditor extends EditorPane {
 			lastMissingDependencies = [];
 			setInstallVisible(false);
 			if (isLocalWindowsDevice) {
-				setStatus('idle', '本机协议用于 Windows 与服务器互传，无需 SSH 检测。');
+				setStatus('idle', getLocalWindowsProtocolStatus());
 				return;
 			}
 			if (protocol === 'sftp') {
@@ -10110,7 +10231,7 @@ export class TurboFileEditor extends EditorPane {
 			const runId = ++detectionRun;
 			detect.disabled = true;
 			install.disabled = true;
-			setStatus('testing', '正在检测协议能力...');
+			setStatus('testing', '正在检测设备传输能力...');
 			try {
 				const result = await this.detectDraftProtocolCapabilities(draft, editingDevice);
 				if (runId !== detectionRun) {
@@ -10129,7 +10250,7 @@ export class TurboFileEditor extends EditorPane {
 					return;
 				}
 				const reason = error instanceof Error ? error.message : String(error);
-				setStatus('error', `协议检测失败：${reason}`);
+				setStatus('error', `能力检测失败：${reason}`);
 				setInstallVisible(false);
 			} finally {
 				if (runId === detectionRun) {

@@ -78,7 +78,7 @@ export interface ITurboFileDirectoryListing {
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';
-export type TurboFileTransferProtocol = 'sftp' | 'scp' | 'rsync';
+export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync';
 export type TurboFileTransferDependency = 'rsync' | 'sshpass';
 
 export interface ITurboFileRemoteCapabilities {
@@ -87,6 +87,7 @@ export interface ITurboFileRemoteCapabilities {
 	readonly scp: boolean;
 	readonly rsync: boolean;
 	readonly sshpass: boolean;
+	readonly tar: boolean;
 	readonly shell: boolean;
 	readonly archive: boolean;
 }
@@ -107,6 +108,7 @@ export interface ITurboFileTransferEndpoint {
 	readonly connection?: ITurboFileSshConnectionOptions;
 	readonly label?: string;
 	readonly supportsRsync?: boolean;
+	readonly supportsTar?: boolean;
 	readonly preferredProtocol?: TurboFileTransferProtocol;
 }
 
@@ -153,7 +155,7 @@ export interface ITurboFileStartWindowsDragRequest {
 
 export interface ITurboFileTransferResult {
 	readonly ok: boolean;
-	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'scp-upload' | 'scp-download' | 'rsync-upload' | 'rsync-download' | 'scp-direct' | 'scp-relay' | 'tar-direct' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel' | 'rsync-relay';
+	readonly strategy: 'local-copy' | 'remote-copy' | 'sftp-upload' | 'sftp-download' | 'scp-upload' | 'scp-download' | 'rsync-upload' | 'rsync-download' | 'tar-upload' | 'tar-download' | 'scp-direct' | 'scp-relay' | 'tar-direct' | 'tar-relay' | 'sftp-direct' | 'sftp-relay' | 'rsync-direct' | 'rsync-direct-parallel' | 'rsync-relay';
 	readonly bytes: number;
 	readonly message: string;
 	readonly canceled?: boolean;
@@ -187,6 +189,7 @@ export interface ITurboFileTransferProgressEvent {
 	readonly phase: 'prepare' | 'transfer' | 'relay-download' | 'relay-upload' | 'rsync-direct' | 'complete';
 	readonly detail?: string;
 	readonly strategy?: ITurboFileTransferResult['strategy'];
+	readonly route?: 'source-push' | 'target-pull' | 'relay';
 	readonly completedItems?: number;
 	readonly totalItems?: number;
 	readonly currentName?: string;
