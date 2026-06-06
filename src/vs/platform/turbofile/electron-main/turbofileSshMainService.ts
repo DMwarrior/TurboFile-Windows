@@ -65,6 +65,7 @@ const DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS = 1000;
 const LOCAL_RSYNC_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 const RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS = 2500;
+const RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS = 8000;
 const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 class TurboFileTransferCanceledError extends Error {
@@ -290,6 +291,13 @@ interface IRsyncProgressReporter {
 	readonly reportProgress: (transferredBytes: number, force?: boolean) => void;
 	readonly getLastBytes: () => number;
 	readonly getTotalBytes: () => number;
+	readonly getLastProgressAt: () => number;
+}
+
+interface ILocalParallelRsyncPlan {
+	readonly basePath: string;
+	readonly targetRelativeSegments: readonly string[];
+	readonly entryNames: readonly string[];
 }
 
 interface ILocalSshTool {
@@ -886,10 +894,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
-					this.markTransferDataStarted(request.progressId);
-					const progress = this.createRsyncProgressReporter(request, bytes, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' });
-					await this.runLocalRsyncUpload(request, bytes, progress.reportProgress);
+					this.fireTransferProgress(request, 0, 0, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
+					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' }, () => this.markTransferDataStarted(request.progressId));
+					await this.runLocalRsyncUpload(request, bytes, progress.reportProgress, () => this.shouldProbeRsyncGrowth(progress));
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync upload completed.', true, { strategy: 'rsync-upload' });
 					return this.createTransferResult(true, 'rsync-upload', resultBytes, 'Local rsync upload completed.', startedAt, request.progressId);
@@ -907,6 +914,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (!isRecoverableLocalCommandTransferError(error)) {
 					return undefined;
 				}
+				this.clearTransferDataTiming(request.progressId);
 			}
 		}
 		return undefined;
@@ -921,10 +929,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
-					this.markTransferDataStarted(request.progressId);
-					const progress = this.createRsyncProgressReporter(request, bytes, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' });
-					await this.runLocalRsyncDownload(request, bytes, progress.reportProgress);
+					this.fireTransferProgress(request, 0, 0, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
+					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' }, () => this.markTransferDataStarted(request.progressId));
+					await this.runLocalRsyncDownload(request, bytes, progress.reportProgress, () => this.shouldProbeRsyncGrowth(progress));
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync download completed.', true, { strategy: 'rsync-download' });
 					return this.createTransferResult(true, 'rsync-download', resultBytes, 'Local rsync download completed.', startedAt, request.progressId);
@@ -942,6 +949,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (!isRecoverableLocalCommandTransferError(error)) {
 					return undefined;
 				}
+				this.clearTransferDataTiming(request.progressId);
 			}
 		}
 		return undefined;
@@ -1398,12 +1406,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
+	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void, shouldProbeProgress?: () => boolean): Promise<void> {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
+		void expectedBytes;
 		const connection = request.target.connection;
 		const tool = await resolveLocalRsyncTool();
+		const sourceIsDirectory = (await fsp.stat(request.source.path)).isDirectory();
+		if (sourceIsDirectory) {
+			const parallelPlan = await getLocalParallelRsyncPlan(request.source.path).catch(() => undefined);
+			if (parallelPlan) {
+				await this.runLocalParallelRsyncUpload(request, connection, tool, parallelPlan, onProgress, shouldProbeProgress);
+				return;
+			}
+		}
 		let rsyncProgressBuffer = '';
 		const handleRsyncOutput = (chunk: string): void => {
 			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
@@ -1412,34 +1429,84 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				onProgress?.(transferredBytes);
 			}
 		};
-		const sourceIsDirectory = (await fsp.stat(request.source.path)).isDirectory();
-		await this.withSftp(request.target, async sftp => sourceIsDirectory ? this.ensureRemoteDirectory(sftp, request.target.path) : this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path)), request.progressId);
-		const baselineSize = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
-		const stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, expectedBytes, onProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+		const mkdirTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
+		const stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, 0, onProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, shouldProbeProgress);
 		const sourcePath = toRsyncLocalPath(request.source.path, tool.pathFlavor);
 		try {
-			await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => this.runCancelableLocalCommand(tool.executable, [
-				...buildLocalRsyncOptionArgs(true),
-				'-e',
-				buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
-				sourceIsDirectory ? ensureTrailingRemoteSlash(sourcePath) : sourcePath,
-				formatRsyncRemoteSpec(connection, request.target.path)
-			], {
-				env,
-				onStdout: handleRsyncOutput,
-				onStderr: handleRsyncOutput,
-				inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
-				inactivityMessage: `Local rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
-			}, request.progressId));
+			await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
+				this.markTransferDataStarted(request.progressId);
+				return this.runCancelableLocalCommand(tool.executable, [
+					...buildLocalRsyncOptionArgs(true),
+					buildRsyncPathWithMkdirOption(mkdirTargetPath),
+					'-e',
+					buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
+					sourceIsDirectory ? ensureTrailingRemoteSlash(sourcePath) : sourcePath,
+					formatRsyncRemoteSpec(connection, request.target.path)
+				], {
+					env,
+					onStdout: handleRsyncOutput,
+					onStderr: handleRsyncOutput,
+					inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+					inactivityMessage: `Local rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+				}, request.progressId);
+			});
 		} finally {
 			stopGrowthTiming();
 		}
 	}
 
-	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
+	private async runLocalParallelRsyncUpload(request: ITurboFileTransferRequest, connection: ITurboFileSshConnectionOptions, tool: ILocalRsyncTool, parallelPlan: ILocalParallelRsyncPlan, onProgress?: (transferredBytes: number) => void, shouldProbeProgress?: () => boolean): Promise<void> {
+		const remoteBasePath = joinRemotePathSegments(request.target.path, parallelPlan.targetRelativeSegments);
+		const stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, 0, onProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, shouldProbeProgress);
+		try {
+			await withLocalRsyncSshEnvironment(connection, tool, async (env, identityPath) => {
+				const progressByEntry = new Map<string, number>();
+				const reportEntryProgress = (entryName: string, transferredBytes: number): void => {
+					const previous = progressByEntry.get(entryName) ?? 0;
+					if (transferredBytes <= previous) {
+						return;
+					}
+					progressByEntry.set(entryName, transferredBytes);
+					const totalTransferredBytes = [...progressByEntry.values()].reduce((sum, value) => sum + value, 0);
+					onProgress?.(totalTransferredBytes);
+				};
+				this.markTransferDataStarted(request.progressId);
+				await mapLimit(parallelPlan.entryNames, Math.min(RSYNC_DIRECTORY_PARALLEL_WORKERS, parallelPlan.entryNames.length), async entryName => {
+					let rsyncProgressBuffer = '';
+					const localEntryPath = toRsyncLocalPath(join(parallelPlan.basePath, entryName), tool.pathFlavor);
+					const handleRsyncOutput = (chunk: string): void => {
+						rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+						const transferredBytes = this.parseRsyncProgressBytes(rsyncProgressBuffer);
+						if (transferredBytes !== undefined) {
+							reportEntryProgress(entryName, transferredBytes);
+						}
+					};
+					await this.runCancelableLocalCommand(tool.executable, [
+						...buildLocalRsyncOptionArgs(true),
+						buildRsyncPathWithMkdirOption(remoteBasePath),
+						'-e',
+						buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
+						localEntryPath,
+						formatRsyncRemoteSpec(connection, ensureTrailingRemoteSlash(remoteBasePath))
+					], {
+						env,
+						onStdout: handleRsyncOutput,
+						onStderr: handleRsyncOutput,
+						inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+						inactivityMessage: `Local parallel rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+					}, request.progressId);
+				});
+			});
+		} finally {
+			stopGrowthTiming();
+		}
+	}
+
+	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void, shouldProbeProgress?: () => boolean): Promise<void> {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
+		void expectedBytes;
 		const connection = request.source.connection;
 		const tool = await resolveLocalRsyncTool();
 		let rsyncProgressBuffer = '';
@@ -1457,22 +1524,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} else {
 			await ensureLocalParentDirectory(request.target.path);
 		}
-		const baselineSize = await getLocalPathSize(request.target.path).catch(() => 0);
-		const stopGrowthTiming = this.beginTransferGrowthTiming(request.progressId, () => getLocalPathSize(request.target.path).catch(() => 0), baselineSize, expectedBytes, onProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+		const stopGrowthTiming = this.beginTransferGrowthTiming(request.progressId, () => getLocalPathSize(request.target.path).catch(() => 0), 0, 0, onProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, shouldProbeProgress);
 		try {
-			await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => this.runCancelableLocalCommand(tool.executable, [
-				...buildLocalRsyncOptionArgs(true),
-				'-e',
-				buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
-				formatRsyncRemoteSpec(connection, sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path),
-				toRsyncLocalPath(request.target.path, tool.pathFlavor)
-			], {
-				env,
-				onStdout: handleRsyncOutput,
-				onStderr: handleRsyncOutput,
-				inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
-				inactivityMessage: `Local rsync download produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
-			}, request.progressId));
+			await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
+				this.markTransferDataStarted(request.progressId);
+				return this.runCancelableLocalCommand(tool.executable, [
+					...buildLocalRsyncOptionArgs(true),
+					'-e',
+					buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
+					formatRsyncRemoteSpec(connection, sourceIsDirectory ? ensureTrailingRemoteSlash(request.source.path) : request.source.path),
+					toRsyncLocalPath(request.target.path, tool.pathFlavor)
+				], {
+					env,
+					onStdout: handleRsyncOutput,
+					onStderr: handleRsyncOutput,
+					inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+					inactivityMessage: `Local rsync download produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+				}, request.progressId);
+			});
 		} finally {
 			stopGrowthTiming();
 		}
@@ -1687,63 +1756,66 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const connection = isUpload ? request.targetDirectory.connection! : request.source.connection!;
 		try {
 			const tool = await resolveLocalRsyncTool();
-			const progress = this.createRsyncProgressReporter(request, expectedBytes, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
+			const progress = this.createRsyncProgressReporter(request, 0, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length
-			});
+			}, () => this.markTransferDataStarted(request.progressId));
 			const targetNames = items.map(item => item.targetName);
 
-			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', isUpload ? 'Preparing batch rsync upload.' : 'Preparing batch rsync download.', true, {
+			this.fireTransferProgress(request, 0, 0, 'prepare', isUpload ? 'Preparing batch rsync upload.' : 'Preparing batch rsync download.', true, {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length,
 				currentName: items[0]?.displayName ?? items[0]?.targetName
 			});
-			this.markTransferDataStarted(request.progressId);
 			let baselineSize = 0;
 
 			if (isUpload) {
-				await this.withSftp(request.targetDirectory, sftp => this.ensureRemoteDirectory(sftp, request.targetDirectory.path), request.progressId);
-				baselineSize = await this.getRemoteBatchTargetContentSize(request.targetDirectory, targetNames).catch(() => 0);
-				const stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+				const stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, 0, 0, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 				const sourceArgs = items.map(item => toRsyncLocalPath(item.sourcePath, tool.pathFlavor));
 				try {
-					await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => this.runCancelableLocalCommand(tool.executable, [
-						...buildLocalRsyncOptionArgs(true),
-						'-e',
-						buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
-						...sourceArgs,
-						formatRsyncRemoteSpec(connection, ensureTrailingRemoteSlash(request.targetDirectory.path))
-					], {
-						env,
-						onStdout: progress.handleOutput,
-						onStderr: progress.handleOutput,
-						inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
-						inactivityMessage: `Batch rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
-					}, request.progressId));
+					await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
+						this.markTransferDataStarted(request.progressId);
+						return this.runCancelableLocalCommand(tool.executable, [
+							...buildLocalRsyncOptionArgs(true),
+							buildRsyncPathWithMkdirOption(request.targetDirectory.path),
+							'-e',
+							buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
+							...sourceArgs,
+							formatRsyncRemoteSpec(connection, ensureTrailingRemoteSlash(request.targetDirectory.path))
+						], {
+							env,
+							onStdout: progress.handleOutput,
+							onStderr: progress.handleOutput,
+							inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+							inactivityMessage: `Batch rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+						}, request.progressId);
+					});
 				} finally {
 					stopGrowthTiming();
 				}
 			} else {
 				await ensureLocalDirectory(request.targetDirectory.path);
-				baselineSize = await getLocalBatchTargetSize(request.targetDirectory.path, targetNames).catch(() => 0);
-				const stopGrowthTiming = this.beginTransferGrowthTiming(request.progressId, () => getLocalBatchTargetSize(request.targetDirectory.path, targetNames).catch(() => 0), baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+				const stopGrowthTiming = this.beginTransferGrowthTiming(request.progressId, () => getLocalBatchTargetSize(request.targetDirectory.path, targetNames).catch(() => 0), 0, 0, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 				const sourceArgs = items.map(item => formatRsyncRemoteSpec(connection, item.sourcePath));
 				try {
-					await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => this.runCancelableLocalCommand(tool.executable, [
-						...buildLocalRsyncOptionArgs(true),
-						'-e',
-						buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
-						...sourceArgs,
-						toRsyncLocalPath(request.targetDirectory.path, tool.pathFlavor)
-					], {
-						env,
-						onStdout: progress.handleOutput,
-						onStderr: progress.handleOutput,
-						inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
-						inactivityMessage: `Batch rsync download produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
-					}, request.progressId));
+					await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
+						this.markTransferDataStarted(request.progressId);
+						return this.runCancelableLocalCommand(tool.executable, [
+							...buildLocalRsyncOptionArgs(true),
+							'-e',
+							buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
+							...sourceArgs,
+							toRsyncLocalPath(request.targetDirectory.path, tool.pathFlavor)
+						], {
+							env,
+							onStdout: progress.handleOutput,
+							onStderr: progress.handleOutput,
+							inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+							inactivityMessage: `Batch rsync download produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+						}, request.progressId);
+					});
 				} finally {
 					stopGrowthTiming();
 				}
@@ -1872,7 +1944,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			markActivity();
 			const targetNames = items.map(item => item.targetName);
 			const baselineSize = await this.getRemoteBatchTargetContentSize(request.targetDirectory, targetNames).catch(() => 0);
-			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
@@ -1983,7 +2055,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await this.execRemote(client, mkdirCommand);
 			const targetNames = items.map(item => item.targetName);
 			const baselineSize = await this.getRemoteBatchTargetContentSize(request.targetDirectory, targetNames).catch(() => 0);
-			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: progress.handleOutput, onStderr: progress.handleOutput });
 			this.throwIfTransferCanceled(request.progressId);
@@ -2168,8 +2240,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return total;
 	}
 
-	private beginRemoteBatchTargetGrowthTiming(progressId: string | undefined, targetDirectory: ITurboFileTransferEndpoint, targetNames: readonly string[], baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS): () => void {
-		return this.beginTransferGrowthTiming(progressId, () => this.getRemoteBatchTargetContentSize(targetDirectory, targetNames), baselineSize, expectedBytes, onProgress, pollIntervalMs);
+	private beginRemoteBatchTargetGrowthTiming(progressId: string | undefined, targetDirectory: ITurboFileTransferEndpoint, targetNames: readonly string[], baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS, initialDelayMs = 0, shouldProbe?: () => boolean): () => void {
+		return this.beginTransferGrowthTiming(progressId, () => this.getRemoteBatchTargetContentSize(targetDirectory, targetNames), baselineSize, expectedBytes, onProgress, pollIntervalMs, initialDelayMs, shouldProbe);
 	}
 
 	private async prepareLocalBatchTarTarget(targetDirectory: string, targetNames: readonly string[]): Promise<void> {
@@ -3158,7 +3230,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			markActivity();
 			const baselineSize = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
-			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
@@ -3668,7 +3740,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
 			const baselineSize = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
 			const progress = this.createRsyncProgressReporter(request, expectedBytes, 'rsync-direct', 'Parallel rsync directory transfer in progress.', { strategy: 'rsync-direct-parallel' });
-			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, parallelCommand);
 			this.throwIfTransferCanceled(request.progressId);
@@ -3785,7 +3857,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const progress = this.createRsyncProgressReporter(request, bytes, 'relay-upload', 'Rsync relay transfer in progress.', { strategy: 'rsync-relay' });
 
 			const baselineSize = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
-			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS);
+			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS, () => this.shouldProbeRsyncGrowth(progress));
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, { onStdout: progress.handleOutput, onStderr: progress.handleOutput });
 			this.throwIfTransferCanceled(request.progressId);
@@ -4807,12 +4879,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		let lastBytes = 0;
 		let knownTotalBytes = Math.max(0, totalBytes);
+		let lastProgressAt = 0;
 		const reportProgress = (transferredBytes: number, force = false): void => {
 			const normalizedTransferred = Math.max(0, transferredBytes);
 			if (!force && normalizedTransferred <= lastBytes) {
 				return;
 			}
 			lastBytes = normalizedTransferred;
+			lastProgressAt = Date.now();
 			const effectiveTotalBytes = knownTotalBytes > 0 ? knownTotalBytes : normalizedTransferred;
 			this.fireTransferProgress(request, effectiveTotalBytes > 0 ? Math.min(normalizedTransferred, effectiveTotalBytes) : normalizedTransferred, effectiveTotalBytes, phase, detail, force, extra);
 			if (normalizedTransferred > 0) {
@@ -4832,11 +4906,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			},
 			reportProgress,
 			getLastBytes: () => lastBytes,
-			getTotalBytes: () => knownTotalBytes
+			getTotalBytes: () => knownTotalBytes,
+			getLastProgressAt: () => lastProgressAt
 		};
 	}
 
-	private beginTransferGrowthTiming(progressId: string | undefined, probeSize: () => Promise<number>, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS): () => void {
+	private shouldProbeRsyncGrowth(progress: IRsyncProgressReporter): boolean {
+		const lastProgressAt = progress.getLastProgressAt();
+		return lastProgressAt === 0 || Date.now() - lastProgressAt >= RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS;
+	}
+
+	private beginTransferGrowthTiming(progressId: string | undefined, probeSize: () => Promise<number>, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS, initialDelayMs = 0, shouldProbe?: () => boolean): () => void {
 		if (!progressId) {
 			return () => undefined;
 		}
@@ -4844,8 +4924,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		let stopped = false;
 		this.transferGrowthMonitoredProgressIds.add(progressId);
 		const poll = async (): Promise<void> => {
+			if (initialDelayMs > 0) {
+				await delay(initialDelayMs);
+			}
+			if (stopped) {
+				return;
+			}
 			while (!stopped) {
 				try {
+					if (shouldProbe && !shouldProbe()) {
+						await delay(pollIntervalMs);
+						continue;
+					}
 					const size = await probeSize();
 					const transferredBytes = this.normalizeGrowthProgressBytes(size, baselineSize, expectedBytes);
 					if (transferredBytes > 0) {
@@ -4883,7 +4973,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return Math.max(1, Date.now() - startedAt);
 	}
 
-	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS): () => void {
+	private beginRemoteFileGrowthTiming(progressId: string | undefined, connection: ITurboFileSshConnectionOptions, path: string, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS, initialDelayMs = 0, shouldProbe?: () => boolean): () => void {
 		let monitorClient: ISSHClient | undefined;
 		let monitorSftp: ISFTPWrapper | undefined;
 		let reusableDirectorySessionKey: string | undefined;
@@ -4908,7 +4998,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			const stat = monitorSftp ? await this.remoteStat(monitorSftp, path).catch(() => undefined) : undefined;
 			return stat?.size ?? 0;
-		}, baselineSize, expectedBytes, onProgress, pollIntervalMs);
+		}, baselineSize, expectedBytes, onProgress, pollIntervalMs, initialDelayMs, shouldProbe);
 		return () => {
 			stopped = true;
 			stopGrowthTiming();
@@ -4924,8 +5014,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 	}
 
-	private beginRemotePathGrowthTiming(progressId: string | undefined, endpoint: ITurboFileTransferEndpoint, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS): () => void {
-		return this.beginTransferGrowthTiming(progressId, () => this.getRemotePathSizeByCommand(endpoint), baselineSize, expectedBytes, onProgress, pollIntervalMs);
+	private beginRemotePathGrowthTiming(progressId: string | undefined, endpoint: ITurboFileTransferEndpoint, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS, initialDelayMs = 0, shouldProbe?: () => boolean): () => void {
+		return this.beginTransferGrowthTiming(progressId, () => this.getRemotePathSizeByCommand(endpoint), baselineSize, expectedBytes, onProgress, pollIntervalMs, initialDelayMs, shouldProbe);
 	}
 
 	private isTransferCanceled(progressId: string | undefined): boolean {
@@ -5828,10 +5918,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private parseRsyncProgressSnapshot(chunk: string): IRsyncProgressSnapshot | undefined {
 		let parsed: IRsyncProgressSnapshot | undefined;
-		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9,]*)\s+([0-9]{1,3})%/g;
+		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9., ]*)\s+([0-9]{1,3})%/g;
 		let match: RegExpExecArray | null;
 		while ((match = progressPattern.exec(chunk)) !== null) {
-			const bytes = Number(match[1].replace(/,/g, ''));
+			const bytes = Number(match[1].replace(/[^0-9]/g, ''));
 			const percent = Number(match[2]);
 			if (Number.isFinite(bytes)) {
 				const totalBytes = Number.isFinite(percent) && percent > 0
@@ -7074,7 +7164,7 @@ async function withLocalRsyncSshEnvironment<T>(connection: ITurboFileSshConnecti
 		// "#!/bin/sh" askpass script fails to exec ("ssh_askpass: exec(...): No such file or
 		// directory"), the password is never supplied and rsync falls back to scp. MSYS2/cygwin's
 		// exec recognizes .cmd/.bat files and runs them through cmd.exe, so use a batch askpass that
-		// prints the secret with `type` — the same mechanism the native OpenSSH scp path already uses.
+		// prints the secret with `type`, matching the native OpenSSH scp path.
 		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.cmd`);
 		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
 		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
@@ -7220,6 +7310,14 @@ function getRemoteParentPath(path: string): string {
 		return '/';
 	}
 	return normalized.substring(0, index);
+}
+
+function joinRemotePathSegments(basePath: string, segments: readonly string[]): string {
+	let currentPath = basePath;
+	for (const segment of segments) {
+		currentPath = joinRemotePath(currentPath, segment);
+	}
+	return currentPath;
 }
 
 function buildShellBootstrapCommand(cwd: string): string {
@@ -7748,9 +7846,13 @@ function buildLocalRsyncOptionArgs(includeProgress: boolean): string[] {
 		'--omit-dir-times'
 	];
 	if (includeProgress) {
-		options.push('--info=progress2,flist2');
+		options.push('--info=progress2');
 	}
 	return options;
+}
+
+function buildRsyncPathWithMkdirOption(remoteDirectory: string): string {
+	return `--rsync-path=mkdir -p ${quotePosixShellArg(remoteDirectory)} && rsync`;
 }
 
 function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
@@ -8206,6 +8308,29 @@ async function getLocalPathSize(path: string): Promise<number> {
 		return 0;
 	});
 	return sizes.reduce((total, size) => total + size, 0);
+}
+
+async function getLocalParallelRsyncPlan(sourcePath: string): Promise<ILocalParallelRsyncPlan | undefined> {
+	let currentPath = sourcePath;
+	const targetRelativeSegments: string[] = [];
+	for (;;) {
+		const entries = await fsp.readdir(currentPath, { withFileTypes: true });
+		const directories = entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
+		const files = entries.filter(entry => entry.isFile());
+		if (!files.length && directories.length >= 2 && directories.length <= RSYNC_DIRECTORY_PARALLEL_WORKERS * 8) {
+			return {
+				basePath: currentPath,
+				targetRelativeSegments,
+				entryNames: directories
+			};
+		}
+		if (!files.length && directories.length === 1) {
+			targetRelativeSegments.push(directories[0]);
+			currentPath = join(currentPath, directories[0]);
+			continue;
+		}
+		return undefined;
+	}
 }
 
 async function getLocalPathSizeByCommand(path: string): Promise<number> {
