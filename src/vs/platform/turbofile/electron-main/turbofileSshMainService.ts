@@ -7070,10 +7070,14 @@ async function withLocalRsyncSshEnvironment<T>(connection: ITurboFileSshConnecti
 		}
 
 		tempPasswordPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.secret`);
-		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.sh`);
+		// The bundled rsync ships an MSYS2 ssh.exe but no POSIX shell (/bin/sh is absent), so a
+		// "#!/bin/sh" askpass script fails to exec ("ssh_askpass: exec(...): No such file or
+		// directory"), the password is never supplied and rsync falls back to scp. MSYS2/cygwin's
+		// exec recognizes .cmd/.bat files and runs them through cmd.exe, so use a batch askpass that
+		// prints the secret with `type` — the same mechanism the native OpenSSH scp path already uses.
+		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.cmd`);
 		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
-		const passwordPathForAskPass = quotePosixShellArg(toRsyncLocalPath(tempPasswordPath, tool.pathFlavor));
-		await fsp.writeFile(tempAskPassPath, `#!/bin/sh\ncat ${passwordPathForAskPass}\n`, { mode: 0o700 });
+		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
 		await fsp.chmod(tempAskPassPath, 0o700).catch(() => undefined);
 		return await task({
 			...tool.env,
