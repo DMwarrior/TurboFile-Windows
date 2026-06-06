@@ -5,7 +5,7 @@
 
 export type TurboFileDevicePlatform = 'linux' | 'windows' | 'wsl' | 'unknown';
 export type TurboFileAuthType = 'password' | 'privateKey';
-export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync';
+export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync' | 'tar';
 export const defaultTurboFileTransferProtocol: TurboFileTransferProtocol = 'auto-fast';
 
 export interface TurboFileDevice {

@@ -1341,6 +1341,8 @@ export class TurboFileEditor extends EditorPane {
 				return device.capabilities.tar || device.capabilities.rsync ? '智能极速（按场景自动）' : '智能极速（自动兜底）';
 			case 'rsync':
 				return device.capabilities.rsync ? 'rsync 增量（可用）' : 'rsync 增量（未通过检测）';
+			case 'tar':
+				return device.capabilities.tar ? 'tar 目录传输（可用）' : 'tar 目录传输（将自动兜底）';
 			case 'scp':
 				return device.capabilities.scp ? 'SCP 文件（可用）' : 'SCP 文件（未通过检测）';
 			case 'sftp':
@@ -2131,6 +2133,12 @@ export class TurboFileEditor extends EditorPane {
 				return { status: 'success', message, capabilities, missingDependencies };
 			}
 			return { status: 'error', message: `缺少 ${missingDependencies.join('、')}，rsync 增量不可用。`, capabilities, missingDependencies };
+		}
+		if (protocol === 'tar') {
+			if (capabilities.tar || capabilities.archive) {
+				return { status: 'success', message: 'tar 目录传输可用；tar 失败时会自动兜底。', capabilities, missingDependencies: [] };
+			}
+			return { status: 'success', message: 'tar 未检测到，将自动使用 rsync/SCP/SFTP 兜底。', capabilities, missingDependencies: [] };
 		}
 		if (protocol === 'scp') {
 			return capabilities.scp
@@ -3219,9 +3227,12 @@ export class TurboFileEditor extends EditorPane {
 
 		const right = $('.turbofile-statusbar-section.is-right');
 		if (runningTransfers.length && liveSummary) {
+			const transferSizeText = liveSummary.totalBytes > 0
+				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
+				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : '准备中';
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
 			right.appendChild(this.renderStatusbarItem(Codicon.clock, this.formatRemaining(liveSummary.remainingMs), '剩余时间'));
-			right.appendChild(this.renderStatusbarItem(Codicon.archive, `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`, '已传输'));
+			right.appendChild(this.renderStatusbarItem(Codicon.archive, transferSizeText, '已传输'));
 			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
 			if (protocol) {
 				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输模式'));
@@ -3727,6 +3738,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
 			if (targetDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
+				return targetDevice.capabilities.rsync ? 'rsync-upload' : 'scp-upload';
+			}
+			if (targetDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
 				return 'tar-upload';
 			}
 			if (targetDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(targetDevice)) {
@@ -3739,6 +3753,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
 			if (sourceDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
+				return sourceDevice.capabilities.rsync ? 'rsync-download' : 'scp-download';
+			}
+			if (sourceDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
 				return 'tar-download';
 			}
 			if (sourceDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(sourceDevice)) {
@@ -3754,12 +3771,15 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)) {
 			if (sourceDevice.preferredTransferProtocol === 'auto-fast') {
-				return sourceItem.directory && sourceDevice.capabilities.tar && targetDevice.capabilities.tar ? 'tar-direct' : 'scp-direct';
+				return sourceItem.directory && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync ? 'rsync-direct' : 'scp-direct';
 			}
 			if (sourceDevice.preferredTransferProtocol === 'rsync') {
 				return sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync
 					? sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct'
 					: 'rsync-relay';
+			}
+			if (sourceDevice.preferredTransferProtocol === 'tar') {
+				return sourceItem.directory && sourceDevice.capabilities.tar && targetDevice.capabilities.tar ? 'tar-direct' : 'scp-direct';
 			}
 			return sourceDevice.preferredTransferProtocol === 'sftp' ? 'sftp-direct' : 'scp-direct';
 		}
@@ -9576,7 +9596,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getConfiguredLocalWindowsTransferProtocol(): TurboFileTransferProtocol {
 		const protocol = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, StorageScope.PROFILE);
-		return protocol === 'auto-fast' || protocol === 'rsync' || protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
+		return protocol === 'auto-fast' || protocol === 'rsync' || protocol === 'sftp' || protocol === 'scp' || protocol === 'tar' ? protocol : defaultTurboFileTransferProtocol;
 	}
 
 	private saveLocalWindowsDevice(draft: TurboFileDeviceDraft): TurboFileDevice {
@@ -9955,7 +9975,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private normalizeTransferProtocol(value: string): TurboFileTransferProtocol {
-		return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
+		return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' || value === 'tar' ? value : defaultTurboFileTransferProtocol;
 	}
 
 	private renderDeviceForm(): HTMLElement {
@@ -10128,6 +10148,7 @@ export class TurboFileEditor extends EditorPane {
 		select.name = 'preferredTransferProtocol';
 		const protocolOptions: [string, string][] = [
 			['auto-fast', '智能极速（推荐）'],
+			['tar', 'tar 目录传输'],
 			['scp', 'SCP 文件'],
 			['sftp', 'SFTP 稳定模式'],
 			['rsync', 'rsync 增量']

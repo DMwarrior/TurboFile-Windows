@@ -78,7 +78,7 @@ export interface ITurboFileDirectoryListing {
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';
-export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync';
+export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync' | 'tar';
 export type TurboFileTransferDependency = 'rsync' | 'sshpass';
 
 export interface ITurboFileRemoteCapabilities {
