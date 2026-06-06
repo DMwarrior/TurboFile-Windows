@@ -3227,9 +3227,10 @@ export class TurboFileEditor extends EditorPane {
 
 		const right = $('.turbofile-statusbar-section.is-right');
 		if (runningTransfers.length && liveSummary) {
+			const isRsyncTransferRunning = runningTransfers.some(task => task.strategy?.startsWith('rsync'));
 			const transferSizeText = liveSummary.totalBytes > 0
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
-				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : '准备中';
+				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : isRsyncTransferRunning ? '传输中' : '准备中';
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
 			right.appendChild(this.renderStatusbarItem(Codicon.clock, this.formatRemaining(liveSummary.remainingMs), '剩余时间'));
 			right.appendChild(this.renderStatusbarItem(Codicon.archive, transferSizeText, '已传输'));
