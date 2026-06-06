@@ -2117,7 +2117,7 @@ export class TurboFileEditor extends EditorPane {
 	private getProtocolCheckResult(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileProtocolCheckResult | undefined {
 		if (protocol === 'auto-fast') {
 			if ((capabilities.tar || capabilities.rsync) && capabilities.scp) {
-				return { status: 'success', message: '智能极速可用：目录优先 tar+ssh，单文件优先 SCP；rsync 仅在选择 rsync 增量时使用。', capabilities, missingDependencies: [] };
+				return { status: 'success', message: '智能极速可用：文件夹/多文件优先 rsync，单文件优先 SCP；失败时自动兜底。', capabilities, missingDependencies: [] };
 			}
 			if (capabilities.scp || capabilities.sftp) {
 				return { status: 'success', message: '未检测到完整 rsync/tar/scp 能力，将自动使用可用协议兜底。', capabilities, missingDependencies: [] };
@@ -3737,11 +3737,11 @@ export class TurboFileEditor extends EditorPane {
 			return 'local-copy';
 		}
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (targetDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
-				return targetDevice.capabilities.rsync ? 'rsync-upload' : 'scp-upload';
-			}
 			if (targetDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
 				return 'tar-upload';
+			}
+			if (sourceItem.directory && targetDevice.preferredTransferProtocol !== 'sftp') {
+				return 'rsync-upload';
 			}
 			if (targetDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(targetDevice)) {
 				return 'rsync-upload';
@@ -3752,11 +3752,11 @@ export class TurboFileEditor extends EditorPane {
 			return 'sftp-upload';
 		}
 		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (sourceDevice.preferredTransferProtocol === 'auto-fast' && sourceItem.directory) {
-				return sourceDevice.capabilities.rsync ? 'rsync-download' : 'scp-download';
-			}
 			if (sourceDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
 				return 'tar-download';
+			}
+			if (sourceItem.directory && sourceDevice.preferredTransferProtocol !== 'sftp') {
+				return 'rsync-download';
 			}
 			if (sourceDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(sourceDevice)) {
 				return 'rsync-download';
@@ -3784,6 +3784,26 @@ export class TurboFileEditor extends EditorPane {
 			return sourceDevice.preferredTransferProtocol === 'sftp' ? 'sftp-direct' : 'scp-direct';
 		}
 		return 'sftp-direct';
+	}
+
+	private getPlannedBatchTransferStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): TurboFileTransferStrategy {
+		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			if (targetDevice.preferredTransferProtocol === 'tar') {
+				return 'tar-upload';
+			}
+			if (targetDevice.preferredTransferProtocol !== 'sftp') {
+				return 'rsync-upload';
+			}
+		}
+		if (sourceDevice.id !== LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			if (sourceDevice.preferredTransferProtocol === 'tar') {
+				return 'tar-download';
+			}
+			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
+				return 'rsync-download';
+			}
+		}
+		return this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItems[0]);
 	}
 
 	private canUseLocalRsyncCommand(device: TurboFileDevice): boolean {
@@ -6927,7 +6947,7 @@ export class TurboFileEditor extends EditorPane {
 			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path!);
 			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
 			const expectedBytes = items.reduce((sum, item) => sum + (item.directory ? 0 : Math.max(0, item.rawSize)), 0);
-			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, items[0]);
+			const plannedStrategy = this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, items);
 			const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
 			task.strategy = initialStrategy;
 			for (const transferItem of task.transferItems) {

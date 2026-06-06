@@ -560,9 +560,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					if (request.target.preferredProtocol !== 'sftp') {
 						const commandOrder = request.target.preferredProtocol === 'tar'
 							? ['scp'] as Array<'scp' | 'rsync'>
-							: request.target.preferredProtocol === 'auto-fast' || request.target.preferredProtocol === undefined
-								? ['rsync', 'scp'] as Array<'scp' | 'rsync'>
-								: undefined;
+							: ['rsync', 'scp'] as Array<'scp' | 'rsync'>;
 						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt, commandOrder);
 						if (commandResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
@@ -621,9 +619,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					if (request.source.preferredProtocol !== 'sftp') {
 						const commandOrder = request.source.preferredProtocol === 'tar'
 							? ['scp'] as Array<'scp' | 'rsync'>
-							: request.source.preferredProtocol === 'auto-fast' || request.source.preferredProtocol === undefined
-								? ['rsync', 'scp'] as Array<'scp' | 'rsync'>
-								: undefined;
+							: ['rsync', 'scp'] as Array<'scp' | 'rsync'>;
 						const commandResult = await this.trySshToLocalCommandTransfer(request, bytes, startedAt, commandOrder);
 						if (commandResult?.ok) {
 							return commandResult;
@@ -1656,11 +1652,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 		const protocol = isUpload ? request.targetDirectory.preferredProtocol : request.source.preferredProtocol;
-		if (protocol !== 'rsync' && protocol !== 'auto-fast' && protocol !== undefined) {
-			return undefined;
-		}
-		const endpoint = isUpload ? request.targetDirectory : request.source;
-		if (endpoint.supportsRsync === false) {
+		if (protocol === 'sftp' || protocol === 'tar') {
 			return undefined;
 		}
 		if (isUpload && looksLikeWindowsPath(request.targetDirectory.path)) {
