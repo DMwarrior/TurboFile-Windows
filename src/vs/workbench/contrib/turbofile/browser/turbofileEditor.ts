@@ -137,13 +137,13 @@ interface TurboFileImageGridImage {
 	height?: number;
 }
 
-type TurboFileImageGridColumns = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
+type TurboFileImageGridColumns = number;
 type TurboFileImageGridViewKind = 'large' | 'medium' | 'compact';
 type TurboFileImageGridSortKey = 'name' | 'date' | 'type' | 'size' | 'dimensions';
 type TurboFileImagePreviewSamplingMode = 'smooth' | 'lossless';
 
 interface TurboFileImageGridViewOption {
-	readonly columns: TurboFileImageGridColumns;
+	readonly columns: TurboFileImageGridColumns | 'max';
 	readonly kind: TurboFileImageGridViewKind;
 	readonly label: string;
 }
@@ -421,7 +421,7 @@ interface TurboFileIconPath {
 }
 const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
 	{ columns: 4, kind: 'large', label: '大图网格' },
-	{ columns: 12, kind: 'medium', label: '标准网格' }
+	{ columns: 'max', kind: 'medium', label: '最大列数' }
 ];
 const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKey; readonly label: string }[] = [
 	{ key: 'name', label: '名称' },
@@ -431,7 +431,7 @@ const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKe
 	{ key: 'dimensions', label: '尺寸' }
 ];
 const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-const IMAGE_GRID_COLUMN_STEPS: readonly TurboFileImageGridColumns[] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+const IMAGE_GRID_COLUMN_MIN = 4;
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 16;
@@ -4104,6 +4104,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!state) {
 			return page;
 		}
+		this.normalizeImageGridStateColumns(state);
 		const range = this.getImageGridVirtualRange(state);
 
 		const header = $('.turbofile-image-page-header');
@@ -4170,16 +4171,21 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderImageGridViewButton(state: TurboFileImageGridState, option: TurboFileImageGridViewOption): HTMLButtonElement {
 		const button = $('button.turbofile-image-page-action') as HTMLButtonElement;
+		const columns = this.resolveImageGridViewColumns(option);
 		button.type = 'button';
 		button.title = option.label;
 		button.setAttribute('aria-label', option.label);
-		button.setAttribute('aria-pressed', String(state.columns === option.columns));
-		if (state.columns === option.columns) {
+		button.setAttribute('aria-pressed', String(state.columns === columns));
+		if (state.columns === columns) {
 			button.classList.add('is-active');
 		}
 		button.appendChild(this.renderImageGridViewIcon(option.kind));
-		button.addEventListener('click', () => this.setImageGridColumns(option.columns));
+		button.addEventListener('click', () => this.setImageGridColumns(columns));
 		return button;
+	}
+
+	private resolveImageGridViewColumns(option: TurboFileImageGridViewOption): TurboFileImageGridColumns {
+		return option.columns === 'max' ? this.getImageGridMaxColumns() : option.columns;
 	}
 
 	private renderImageGridViewIcon(kind: TurboFileImageGridViewKind): HTMLElement {
@@ -7901,6 +7907,14 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
+	private normalizeImageGridStateColumns(state: TurboFileImageGridState): void {
+		const nextColumns = this.normalizeImageGridColumns(state.columns);
+		if (state.columns !== nextColumns) {
+			state.columns = nextColumns;
+			this.imageGridRenderedRange = undefined;
+		}
+	}
+
 	private setImageGridSort(key: TurboFileImageGridSortKey): void {
 		const state = this.imageGridState;
 		if (!state) {
@@ -8512,24 +8526,22 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridCtrlWheelDeltaRemainder += event.deltaY * deltaModeScale;
 		while (this.imageGridCtrlWheelDeltaRemainder <= -IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD) {
 			this.imageGridCtrlWheelDeltaRemainder += IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD;
-			this.setImageGridColumns((state.columns - 1) as TurboFileImageGridColumns);
+			this.setImageGridColumns(state.columns - 1);
 		}
 		while (this.imageGridCtrlWheelDeltaRemainder >= IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD) {
 			this.imageGridCtrlWheelDeltaRemainder -= IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD;
-			this.setImageGridColumns((state.columns + 1) as TurboFileImageGridColumns);
+			this.setImageGridColumns(state.columns + 1);
 		}
 	}
 
 	private normalizeImageGridColumns(columns: number): TurboFileImageGridColumns {
 		const rounded = Math.round(columns);
-		if (rounded <= IMAGE_GRID_COLUMN_STEPS[0]) {
-			return IMAGE_GRID_COLUMN_STEPS[0];
-		}
-		const max = IMAGE_GRID_COLUMN_STEPS[IMAGE_GRID_COLUMN_STEPS.length - 1];
-		if (rounded >= max) {
-			return max;
-		}
-		return rounded as TurboFileImageGridColumns;
+		return clampNumber(rounded, IMAGE_GRID_COLUMN_MIN, this.getImageGridMaxColumns());
+	}
+
+	private getImageGridMaxColumns(): TurboFileImageGridColumns {
+		const width = this.getImageGridBodyWidth();
+		return Math.max(IMAGE_GRID_COLUMN_MIN, Math.floor((width + IMAGE_GRID_CARD_GAP) / (IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_GAP)));
 	}
 
 	private updateImageGridVirtualSlice(state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
