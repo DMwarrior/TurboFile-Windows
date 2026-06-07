@@ -2337,6 +2337,9 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	display: flex;
 	align-items: center;
 	gap: 6px;
+	line-height: calc(var(--turbofile-browser-font-size, 14px) + 8px);
+	padding-bottom: 2px;
+	box-sizing: border-box;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
