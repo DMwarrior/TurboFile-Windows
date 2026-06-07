@@ -77,23 +77,28 @@
 
 .turbofile-workbench.is-turbofile-light {
 	--tf-bg: #ffffff;
-	--tf-bg-secondary: #f3f3f3;
+	--tf-bg-secondary: #f7f7f7;
 	--tf-surface: #ffffff;
-	--tf-surface-muted: #f8f8f8;
-	--tf-text: #111111;
-	--tf-text-muted: #6b7280;
-	--tf-text-weak: #9e9e9e;
-	--tf-brand-blue: #042aff;
-	--tf-brand-blue-dark: #111111;
+	--tf-surface-muted: #f7f7f7;
+	--tf-text: #1a1a1a;
+	--tf-text-muted: #616161;
+	--tf-text-weak: #8a8a8a;
+	--tf-brand-blue: #0078d4;
+	--tf-brand-blue-dark: #1a1a1a;
 	--tf-accent-yellow: #e1ff25;
 	--tf-accent-pink: #ff64da;
 	--tf-success: #22c55e;
 	--tf-danger: #ef4444;
-	--tf-border: #e5e7eb;
-	--tf-card-shadow: 0 1px 2px rgba(17, 31, 104, 0.06);
-	--tf-card-shadow-hover: 0 8px 24px rgba(17, 31, 104, 0.08);
-	--tf-brand-soft: rgba(4, 42, 255, 0.08);
-	--tf-brand-soft-hover: rgba(4, 42, 255, 0.12);
+	--tf-border: #e5e5e5;
+	--tf-card-shadow: none;
+	--tf-card-shadow-hover: none;
+	--tf-brand-soft: #e5f3ff;
+	--tf-brand-soft-hover: #d7ebff;
+	--tf-windows-nav-bg: #f7f7f7;
+	--tf-windows-hover: #f0f0f0;
+	--tf-windows-selected: #e5f3ff;
+	--tf-windows-selected-border: #99d1ff;
+	--tf-windows-selected-neutral: #e5e5e5;
 	--tf-yellow-soft: rgba(225, 255, 37, 0.26);
 	--tf-pink-soft: rgba(255, 100, 218, 0.16);
 	--turbofile-unified-background: var(--tf-bg);
@@ -195,6 +200,26 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbof
 	--turbofile-editor-unified-background: #ffffff;
 	--turbofile-file-surface-final: #ffffff;
 	--turbofile-editor-file-surface: var(--turbofile-file-surface-final);
+}
+
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.sidebar,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.sidebar {
+	background-color: #f7f7f7 !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar,
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar > .titlebar-container,
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar .titlebar-left,
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar .titlebar-center,
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar .titlebar-right,
+body.turbofile-shell.turbofile-main-editor-visible.turbofile-editor-theme-light .monaco-workbench .part.titlebar .window-controls-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar > .titlebar-container,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar .titlebar-left,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar .titlebar-center,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar .titlebar-right,
+body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench:has(.turbofile-workbench.is-turbofile-light) .part.titlebar .window-controls-container {
+	background-color: #ffffff !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.editor,
@@ -4576,7 +4601,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 
 .vs .turbofile-workbench,
 .vs .turbofile-workbench * {
-	scrollbar-color: #d1d5db #ffffff;
+	scrollbar-color: #c8c8c8 #ffffff;
 }
 
 .vs .turbofile-workbench,
@@ -4593,7 +4618,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs .turbofile-page-nav,
 .vs .turbofile-route-nav {
 	border-color: var(--tf-border);
-	background: var(--tf-bg);
+	background: var(--tf-windows-nav-bg, var(--tf-bg-secondary));
 	color: var(--tf-text);
 }
 
@@ -4609,13 +4634,13 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs .turbofile-route-nav-item:hover,
 .vs .turbofile-route-collapse:hover {
 	color: var(--tf-brand-blue-dark);
-	background: var(--tf-bg-secondary);
+	background: var(--tf-windows-hover, var(--tf-bg-secondary));
 }
 
 .vs .turbofile-page-nav-item.is-active,
 .vs .turbofile-route-nav-item.is-active {
-	color: var(--tf-brand-blue);
-	background: var(--tf-brand-soft);
+	color: var(--tf-brand-blue-dark);
+	background: var(--tf-windows-selected-neutral, var(--tf-bg-secondary));
 }
 
 .vs .turbofile-page-nav-item.is-active::before {
@@ -4726,9 +4751,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs .turbofile-sidebar-text-button:hover,
 .vs .turbofile-image-page-columns-button:hover,
 .vs .turbofile-sync-direction:not(:disabled):hover {
-	color: var(--tf-brand-blue);
-	border-color: color-mix(in srgb, var(--tf-brand-blue) 28%, var(--tf-border));
-	background: var(--tf-bg-secondary);
+	color: var(--tf-brand-blue-dark);
+	border-color: var(--tf-border);
+	background: var(--tf-windows-hover, var(--tf-bg-secondary));
 }
 
 .vs .turbofile-page-button.is-primary,
@@ -4772,9 +4797,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs .turbofile-secondary-button:hover,
 .vs .turbofile-image-preview-close:hover,
 .vs .turbofile-image-preview-nav-button:hover {
-	color: var(--tf-brand-blue);
-	border-color: var(--tf-border);
-	background: var(--tf-bg-secondary);
+	color: var(--tf-brand-blue-dark);
+	border-color: transparent;
+	background: var(--tf-windows-hover, var(--tf-bg-secondary));
 }
 
 .vs .turbofile-primary-button {
@@ -4869,13 +4894,13 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs .turbofile-file-row:hover,
 .vs .turbofile-device-select-option:hover,
 .vs .turbofile-sync-row:hover {
-	background: var(--tf-bg-secondary);
+	background: var(--tf-windows-hover, var(--tf-bg-secondary));
 }
 
 .vs .turbofile-file-row.is-selected,
 .vs .turbofile-sync-row.is-reversed {
 	color: var(--tf-brand-blue-dark);
-	background: var(--tf-brand-soft);
+	background: var(--tf-windows-selected, var(--tf-brand-soft));
 }
 
 .vs .turbofile-device-select-option.is-selected,
@@ -5035,20 +5060,23 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light {
 	--tf-image-bg: #ffffff;
 	--tf-image-surface: #ffffff;
-	--tf-image-surface-muted: #f3f3f3;
-	--tf-image-border: #e5e7eb;
-	--tf-image-text: #111111;
-	--tf-image-muted: #6b7280;
-	--tf-image-subtle: #9e9e9e;
-	--tf-image-brand: #042aff;
-	--tf-image-hover-shadow: 0 8px 24px rgba(17, 31, 104, 0.08);
-	--tf-image-card-shadow: 0 1px 2px rgba(17, 31, 104, 0.06);
+	--tf-image-surface-muted: #f7f7f7;
+	--tf-image-border: #e5e5e5;
+	--tf-image-text: #1a1a1a;
+	--tf-image-muted: #616161;
+	--tf-image-subtle: #8a8a8a;
+	--tf-image-brand: #0078d4;
+	--tf-image-hover-bg: #f0f0f0;
+	--tf-image-selected-bg: #e5f3ff;
+	--tf-image-selected-ring: #99d1ff;
+	--tf-image-hover-shadow: none;
+	--tf-image-card-shadow: none;
 	--tf-image-overlay: rgba(255, 255, 255, 0.86);
-	--tf-image-control-bg: rgba(255, 255, 255, 0.92);
-	--tf-image-control-hover: #f3f3f3;
-	--tf-image-control-text: #111111;
-	--tf-image-control-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -4px rgba(0, 0, 0, 0.10);
-	--tf-image-frame-bg: #f4f5f7;
+	--tf-image-control-bg: rgba(255, 255, 255, 0.96);
+	--tf-image-control-hover: #f0f0f0;
+	--tf-image-control-text: #1a1a1a;
+	--tf-image-control-shadow: none;
+	--tf-image-frame-bg: #f7f7f7;
 	--tf-image-info-bg: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.62));
 	--tf-image-info-text: #ffffff;
 }
@@ -5064,6 +5092,9 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 	--tf-image-muted: #a3a3a3;
 	--tf-image-subtle: #737373;
 	--tf-image-brand: #7aa2ff;
+	--tf-image-hover-bg: color-mix(in srgb, var(--tf-image-brand) 7%, transparent);
+	--tf-image-selected-bg: color-mix(in srgb, var(--tf-image-brand) 10%, transparent);
+	--tf-image-selected-ring: color-mix(in srgb, var(--tf-image-brand) 24%, transparent);
 	--tf-image-hover-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
 	--tf-image-card-shadow: none;
 	--tf-image-overlay: rgba(5, 5, 5, 0.84);
