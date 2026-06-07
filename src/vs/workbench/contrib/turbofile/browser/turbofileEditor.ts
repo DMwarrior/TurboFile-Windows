@@ -440,7 +440,7 @@ const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
 const IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD = 100;
-const IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD = 100;
+const IMAGE_GRID_CTRL_WHEEL_STEP_THRESHOLD = 32;
 const IMAGE_PREVIEW_ZOOM_MIN = 0.01;
 const IMAGE_PREVIEW_ZOOM_MAX = 40;
 const IMAGE_PREVIEW_BUTTON_ZOOM_DELTA = 3.5;
@@ -4152,7 +4152,7 @@ export class TurboFileEditor extends EditorPane {
 		const body = $('.turbofile-image-page-body');
 		body.scrollTop = state.scrollTop;
 		body.addEventListener('scroll', () => this.handleImageGridScroll(body), { passive: true });
-		body.addEventListener('wheel', event => this.handleImageGridWheel(event, body), { passive: false });
+		page.addEventListener('wheel', event => this.handleImageGridWheel(event, body), { passive: false, capture: true });
 		const grid = $('.turbofile-image-page-grid');
 		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
 		this.renderImageGridSlice(grid, state, range);
