@@ -5201,14 +5201,14 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card {
-	padding: 0;
-	border: 1px solid var(--tf-image-border);
-	border-radius: 12px;
-	background: var(--tf-image-surface);
+	padding: 4px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	background: transparent;
 	color: var(--tf-image-text);
-	box-shadow: var(--tf-image-card-shadow);
-	overflow: hidden;
-	transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+	box-shadow: none;
+	overflow: visible;
+	transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 	contain-intrinsic-size: 220px 218px;
 }
 
@@ -5217,9 +5217,10 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card:hover,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card:hover,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card:hover {
-	border-color: color-mix(in srgb, var(--tf-image-brand) 30%, var(--tf-image-border));
-	box-shadow: var(--tf-image-hover-shadow);
-	transform: translateY(-1px);
+	border-color: transparent;
+	background: var(--tf-image-hover-bg, color-mix(in srgb, var(--tf-image-brand) 7%, transparent));
+	box-shadow: none;
+	transform: none;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card:active,
@@ -5237,7 +5238,8 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card.is-selected {
 	border-color: var(--tf-image-brand);
 	outline: none;
-	box-shadow: 0 0 0 2px color-mix(in srgb, var(--tf-image-brand) 18%, transparent), var(--tf-image-hover-shadow);
+	background: var(--tf-image-selected-bg, color-mix(in srgb, var(--tf-image-brand) 10%, transparent));
+	box-shadow: 0 0 0 1px var(--tf-image-selected-ring, color-mix(in srgb, var(--tf-image-brand) 24%, transparent));
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card::after,
@@ -5255,10 +5257,10 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview {
 	position: relative;
 	aspect-ratio: 220 / 150;
-	border-radius: inherit;
-	padding: 8px;
+	border-radius: 0;
+	padding: 0;
 	box-sizing: border-box;
-	background: var(--tf-image-frame-bg);
+	background: transparent;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card-preview img,
@@ -5267,7 +5269,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview img {
 	object-fit: contain;
-	border-radius: 6px;
+	border-radius: 0;
 	background: transparent;
 	transition: opacity 200ms ease;
 }
@@ -5358,7 +5360,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card-placeholder,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card-placeholder,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-placeholder {
-	background: var(--tf-image-surface-muted);
+	background: transparent;
 	color: var(--tf-image-muted);
 }
 
