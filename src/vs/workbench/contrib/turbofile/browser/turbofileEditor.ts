@@ -139,6 +139,7 @@ interface TurboFileImageGridImage {
 
 type TurboFileImageGridColumns = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
 type TurboFileImageGridViewKind = 'large' | 'medium' | 'compact';
+type TurboFileImageGridSortKey = 'name' | 'date' | 'type' | 'size' | 'dimensions';
 type TurboFileImagePreviewSamplingMode = 'smooth' | 'lossless';
 
 interface TurboFileImageGridViewOption {
@@ -153,6 +154,8 @@ interface TurboFileImageGridState {
 	readonly images: TurboFileImageGridImage[];
 	selectedIndex: number;
 	columns: TurboFileImageGridColumns;
+	sortKey: TurboFileImageGridSortKey;
+	sortDescending: boolean;
 	previewVisible: boolean;
 	previewOrigin: 'file-list' | 'grid';
 	previewZoom: number;
@@ -420,6 +423,14 @@ const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
 	{ columns: 4, kind: 'large', label: '大图网格' },
 	{ columns: 12, kind: 'medium', label: '标准网格' }
 ];
+const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKey; readonly label: string }[] = [
+	{ key: 'name', label: '名称' },
+	{ key: 'date', label: '修改日期' },
+	{ key: 'type', label: '类型' },
+	{ key: 'size', label: '大小' },
+	{ key: 'dimensions', label: '尺寸' }
+];
+const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const IMAGE_GRID_COLUMN_STEPS: readonly TurboFileImageGridColumns[] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
@@ -589,6 +600,8 @@ export class TurboFileEditor extends EditorPane {
 	private devices: TurboFileDevice[] = [];
 	private previewState: TurboFilePreviewState | undefined;
 	private imageGridState: TurboFileImageGridState | undefined;
+	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
+	private imageGridSortDescending = false;
 	private syncPreviewState: TurboFileSyncPreviewState | undefined;
 	private dialogState: TurboFileDialogState | undefined;
 	private imageGridObserver: IntersectionObserver | undefined;
@@ -4118,6 +4131,7 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(headerLeft);
 
 		const actions = $('.turbofile-image-page-actions');
+		actions.appendChild(this.renderImageGridSortControl(state));
 		for (const option of IMAGE_GRID_VIEW_OPTIONS) {
 			actions.appendChild(this.renderImageGridViewButton(state, option));
 		}
@@ -4176,6 +4190,94 @@ export class TurboFileEditor extends EditorPane {
 			icon.appendChild($('span'));
 		}
 		return icon;
+	}
+
+	private renderImageGridSortControl(state: TurboFileImageGridState): HTMLElement {
+		const select = $('.turbofile-image-page-sort');
+		const button = $('button.turbofile-image-page-sort-button') as HTMLButtonElement;
+		const menu = $('.turbofile-image-page-sort-menu');
+		button.type = 'button';
+		button.title = '排序方式';
+		button.setAttribute('aria-haspopup', 'listbox');
+		button.setAttribute('aria-expanded', 'false');
+		button.setAttribute('aria-label', '排序方式');
+		button.appendChild(renderIcon(Codicon.listOrdered));
+		button.appendChild($('span.turbofile-image-page-sort-label', undefined, this.getImageGridSortLabel(state)));
+		button.appendChild(renderIcon(state.sortDescending ? Codicon.arrowDown : Codicon.arrowUp));
+		button.appendChild(renderIcon(Codicon.chevronDown));
+
+		menu.setAttribute('role', 'listbox');
+		menu.setAttribute('aria-label', '图片排序方式');
+		for (const option of IMAGE_GRID_SORT_OPTIONS) {
+			const isActive = state.sortKey === option.key;
+			const item = $('button.turbofile-image-page-sort-option') as HTMLButtonElement;
+			item.type = 'button';
+			item.setAttribute('role', 'option');
+			item.setAttribute('aria-selected', isActive ? 'true' : 'false');
+			if (isActive) {
+				item.classList.add('is-active');
+			}
+			const check = $('span.turbofile-image-page-sort-check');
+			if (isActive) {
+				check.appendChild(renderIcon(Codicon.check));
+			}
+			item.appendChild(check);
+			item.appendChild($('span.turbofile-image-page-sort-option-label', undefined, option.label));
+			if (isActive) {
+				item.appendChild(renderIcon(state.sortDescending ? Codicon.arrowDown : Codicon.arrowUp));
+			}
+			item.addEventListener('click', event => {
+				event.preventDefault();
+				event.stopPropagation();
+				select.classList.remove('is-open');
+				button.setAttribute('aria-expanded', 'false');
+				this.setImageGridSort(option.key);
+			});
+			menu.appendChild(item);
+		}
+
+		const closeMenu = () => {
+			select.classList.remove('is-open');
+			button.setAttribute('aria-expanded', 'false');
+		};
+		const toggleMenu = (event: MouseEvent | KeyboardEvent) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const nextOpen = !select.classList.contains('is-open');
+			select.classList.toggle('is-open', nextOpen);
+			button.setAttribute('aria-expanded', String(nextOpen));
+			if (nextOpen) {
+				const active = menu.querySelector<HTMLElement>('.turbofile-image-page-sort-option.is-active') ?? menu.querySelector<HTMLElement>('.turbofile-image-page-sort-option');
+				active?.focus();
+			}
+		};
+		button.addEventListener('click', toggleMenu);
+		button.addEventListener('keydown', event => {
+			if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+				toggleMenu(event);
+			}
+		});
+		const ownerWindow = getWindow(select);
+		const handleWindowClick = (event: MouseEvent) => {
+			if (!select.contains(event.target as Node | null)) {
+				closeMenu();
+			}
+		};
+		const handleWindowKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape' && select.classList.contains('is-open')) {
+				event.preventDefault();
+				closeMenu();
+				button.focus();
+			}
+		};
+		ownerWindow.addEventListener('click', handleWindowClick);
+		ownerWindow.addEventListener('keydown', handleWindowKeydown);
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('click', handleWindowClick) });
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('keydown', handleWindowKeydown) });
+
+		select.appendChild(button);
+		select.appendChild(menu);
+		return select;
 	}
 
 	private renderImageGridSlice(grid: HTMLElement, state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
@@ -7377,6 +7479,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		sortImageGridImages(images, this.imageGridSortKey, this.imageGridSortDescending);
 		const selectedIndex = selectedPath ? Math.max(0, images.findIndex(image => image.item.path === selectedPath)) : 0;
 		this.previewState = undefined;
 		this.imagePreviewAnalysis = undefined;
@@ -7387,6 +7490,8 @@ export class TurboFileEditor extends EditorPane {
 			images,
 			selectedIndex,
 			columns: 12,
+			sortKey: this.imageGridSortKey,
+			sortDescending: this.imageGridSortDescending,
 			previewVisible,
 			previewOrigin,
 			previewZoom: 1,
@@ -7794,6 +7899,37 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.render();
+	}
+
+	private setImageGridSort(key: TurboFileImageGridSortKey): void {
+		const state = this.imageGridState;
+		if (!state) {
+			return;
+		}
+		// Match Windows Explorer: clicking the active field flips the direction, picking a
+		// different field switches to it in ascending order.
+		const nextDescending = state.sortKey === key ? !state.sortDescending : false;
+		state.sortKey = key;
+		state.sortDescending = nextDescending;
+		this.imageGridSortKey = key;
+		this.imageGridSortDescending = nextDescending;
+
+		const selectedPath = state.images[state.selectedIndex]?.item.path;
+		sortImageGridImages(state.images, key, nextDescending);
+		if (selectedPath) {
+			const nextIndex = state.images.findIndex(image => image.item.path === selectedPath);
+			if (nextIndex >= 0) {
+				state.selectedIndex = nextIndex;
+			}
+		}
+		this.imageGridRenderedRange = undefined;
+		this.clearImageGridThumbnailQueue();
+		this.clearImageGridLoadedImageIndexes();
+		this.render();
+	}
+
+	private getImageGridSortLabel(state: TurboFileImageGridState): string {
+		return IMAGE_GRID_SORT_OPTIONS.find(option => option.key === state.sortKey)?.label ?? '名称';
 	}
 
 	private getImagePreviewCaption(state: TurboFileImageGridState): string {
@@ -10983,6 +11119,37 @@ function isHiddenFileName(name: string): boolean {
 
 function isImageFile(name: string): boolean {
 	return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+}
+
+function getFileExtensionLower(name: string): string {
+	const dotIndex = name.lastIndexOf('.');
+	return dotIndex > 0 ? name.slice(dotIndex + 1).toLowerCase() : '';
+}
+
+function compareImageGridImagesBy(a: TurboFileImageGridImage, b: TurboFileImageGridImage, key: TurboFileImageGridSortKey): number {
+	switch (key) {
+		case 'size':
+			return (a.item.rawSize || 0) - (b.item.rawSize || 0);
+		case 'date':
+			return (a.item.rawModified || 0) - (b.item.rawModified || 0);
+		case 'type':
+			return IMAGE_GRID_SORT_COLLATOR.compare(getFileExtensionLower(a.item.name), getFileExtensionLower(b.item.name));
+		case 'dimensions':
+			return ((a.width || 0) * (a.height || 0)) - ((b.width || 0) * (b.height || 0));
+		case 'name':
+		default:
+			return IMAGE_GRID_SORT_COLLATOR.compare(a.item.name, b.item.name);
+	}
+}
+
+function sortImageGridImages(images: TurboFileImageGridImage[], key: TurboFileImageGridSortKey, descending: boolean): void {
+	images.sort((a, b) => {
+		let comparison = compareImageGridImagesBy(a, b, key);
+		if (comparison === 0 && key !== 'name') {
+			comparison = IMAGE_GRID_SORT_COLLATOR.compare(a.item.name, b.item.name);
+		}
+		return descending ? -comparison : comparison;
+	});
 }
 
 function isArchiveFile(name: string): boolean {

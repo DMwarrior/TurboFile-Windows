@@ -3439,6 +3439,114 @@ body.hc-black .turbofile-live-transfer-panel {
 	font-size: 14px;
 }
 
+.turbofile-image-page-sort {
+	position: relative;
+	display: inline-flex;
+	pointer-events: auto;
+}
+
+.turbofile-image-page-sort-button {
+	height: 28px;
+	border: 0;
+	border-radius: 7px;
+	padding: 0 8px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: var(--tf-image-control-bg);
+	color: var(--tf-image-control-text);
+	box-shadow: var(--tf-image-control-shadow);
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: 600;
+	transition: background 160ms ease, color 160ms ease;
+}
+
+.turbofile-image-page-sort-button:hover,
+.turbofile-image-page-sort.is-open .turbofile-image-page-sort-button {
+	background: var(--tf-image-control-hover);
+}
+
+.turbofile-image-page-sort-button .codicon {
+	font-size: 14px;
+	flex: 0 0 auto;
+}
+
+.turbofile-image-page-sort-button .codicon-chevron-down {
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+.turbofile-image-page-sort-label {
+	white-space: nowrap;
+}
+
+.turbofile-image-page-sort-menu {
+	position: absolute;
+	z-index: 50;
+	top: calc(100% + 4px);
+	right: 0;
+	min-width: 168px;
+	display: none;
+	padding: 4px 0;
+	border: 1px solid var(--tf-image-border);
+	border-radius: 8px;
+	background: var(--tf-image-surface, var(--tf-image-control-bg));
+	color: var(--tf-image-text, var(--tf-image-control-text));
+	box-shadow: var(--tf-image-control-shadow);
+}
+
+.turbofile-image-page-sort.is-open .turbofile-image-page-sort-menu {
+	display: block;
+}
+
+.turbofile-image-page-sort-option {
+	width: 100%;
+	min-height: 30px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 10px;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font-size: 12px;
+	font-weight: 600;
+	text-align: left;
+	cursor: pointer;
+}
+
+.turbofile-image-page-sort-option:hover,
+.turbofile-image-page-sort-option:focus {
+	background: var(--tf-image-control-hover);
+	outline: none;
+}
+
+.turbofile-image-page-sort-check {
+	width: 14px;
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--tf-image-brand);
+}
+
+.turbofile-image-page-sort-check .codicon {
+	font-size: 13px;
+}
+
+.turbofile-image-page-sort-option-label {
+	flex: 1;
+	white-space: nowrap;
+}
+
+.turbofile-image-page-sort-option .codicon-arrow-up,
+.turbofile-image-page-sort-option .codicon-arrow-down {
+	font-size: 12px;
+	flex: 0 0 auto;
+	color: var(--tf-image-brand);
+}
+
 .turbofile-image-page-view-icon {
 	width: 14px;
 	height: 14px;
