@@ -5070,7 +5070,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 /* Ultralytics-style image explorer and preview. Scoped to image surfaces only. */
 .vs .turbofile-workbench,
 .turbofile-workbench.is-turbofile-light {
-	--tf-image-bg: #ffffff;
+	--tf-image-bg: #f1f1f1;
 	--tf-image-surface: #ffffff;
 	--tf-image-surface-muted: #f7f7f7;
 	--tf-image-border: #e5e5e5;
@@ -5096,7 +5096,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .vs-dark .turbofile-workbench,
 .hc-black .turbofile-workbench,
 .turbofile-workbench.is-turbofile-dark {
-	--tf-image-bg: #050505;
+	--tf-image-bg: #202020;
 	--tf-image-surface: #141414;
 	--tf-image-surface-muted: #1f1f1f;
 	--tf-image-border: rgba(255, 255, 255, 0.1);
@@ -5237,6 +5237,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-grid,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-grid {
 	gap: 16px;
+	background: transparent;
 }
 
 .vs .turbofile-workbench .turbofile-image-page-card,
