@@ -5115,7 +5115,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-page,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page {
 	grid-template-rows: 38px minmax(0, 1fr);
-	background: var(--tf-image-bg);
+	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
 	color: var(--tf-image-text);
 }
 
@@ -5126,7 +5126,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-header {
 	padding: 0 16px;
 	border-bottom: 0;
-	background: var(--tf-image-bg);
+	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
 }
 
 .vs .turbofile-workbench .turbofile-image-page-actions,
@@ -5218,7 +5218,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-body,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-body {
 	padding: 8px 16px 24px;
-	background: var(--tf-image-bg);
+	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
 }
 
 .vs .turbofile-workbench .turbofile-image-page-grid,
