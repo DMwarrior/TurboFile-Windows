@@ -37,7 +37,7 @@ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickin
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext } from '../../../common/editor.js';
+import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext, IUntypedFileEditorInput } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
@@ -8785,6 +8785,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.previewState = undefined;
+		if (this.imageGridState) {
+			this.closeImageGridPage();
+		}
 		const reportOpenError = (error: unknown) => {
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = `打开失败：${message}`;
@@ -8795,17 +8798,18 @@ export class TurboFileEditor extends EditorPane {
 			const resource = device.id === LOCAL_WINDOWS_DEVICE_ID
 				? URI.file(item.path)
 				: this.ensureRemoteFileSystemProvider().registerFile(device, this.getSshConnectionOptions(device), item);
-			const languageId = this.languageService.guessLanguageIdByFilepathOrFirstLine(resource) ?? undefined;
-
-			void this.editorService.openEditor({
+			const editorInput: IUntypedFileEditorInput = {
 				resource,
-				languageId,
+				forceFile: true,
 				options: {
 					pinned: true,
+					revealIfOpened: true,
 					override: DEFAULT_EDITOR_ASSOCIATION.id,
 					index: this.getDocumentEditorTargetIndex()
 				}
-			}).catch(reportOpenError);
+			};
+
+			await this.editorService.openEditor(editorInput);
 		} catch (error) {
 			reportOpenError(error);
 		}
