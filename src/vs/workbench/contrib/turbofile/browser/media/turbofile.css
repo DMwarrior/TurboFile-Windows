@@ -2381,16 +2381,26 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-inline-rename .monaco-inputbox {
 	width: 100%;
+	min-height: 28px;
+	box-sizing: border-box;
+	overflow: visible;
+}
+
+.turbofile-inline-rename .monaco-inputbox > .ibwrapper {
 	min-height: 26px;
+	overflow: visible;
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	height: 24px;
-	padding: 2px 4px 3px;
+	height: 26px;
+	min-height: 26px;
+	padding: 1px 4px 4px;
+	box-sizing: border-box;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
 	line-height: 21px;
+	overflow: visible;
 }
 
 .turbofile-file-meta {
