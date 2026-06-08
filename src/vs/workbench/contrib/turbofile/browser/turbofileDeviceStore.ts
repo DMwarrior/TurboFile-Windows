@@ -45,7 +45,7 @@ function getDefaultCapabilitiesForPlatform(platform: TurboFileDevicePlatform | u
 }
 
 function normalizeTransferProtocol(value: unknown): TurboFileTransferProtocol {
-	return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
+	return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' || value === 'tar' ? value : defaultTurboFileTransferProtocol;
 }
 
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [

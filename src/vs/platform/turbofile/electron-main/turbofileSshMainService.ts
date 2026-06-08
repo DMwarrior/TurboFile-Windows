@@ -292,6 +292,7 @@ interface IRsyncProgressReporter {
 	readonly reportProgressWithTotal: (transferredBytes: number, totalBytes: number | undefined) => void;
 	readonly getLastBytes: () => number;
 	readonly getTotalBytes: () => number;
+	readonly getActivityTime: () => number | undefined;
 }
 
 interface ILocalParallelRsyncPlan {
@@ -737,7 +738,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const directResult = await this.trySshToSshDirectTransfer(protocol, request, startedAt);
 				this.throwIfTransferCanceled(request.progressId);
 				if (directResult?.ok) {
-					this.fireTransferProgress(request, directResult.bytes, directResult.bytes, 'complete', `${formatTransferProtocolName(protocol)} direct completed.`, true, { strategy: directResult.strategy });
+					this.fireTransferProgress(request, directResult.bytes, directResult.bytes, 'complete', `${formatTransferStrategyName(directResult.strategy)} completed.`, true, { strategy: directResult.strategy });
 					this.clearRemoteDirectoryListingCache(request.target);
 					return directResult;
 				}
@@ -754,7 +755,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const relayResult = await this.trySshToSshRelayTransfer(protocol, request, startedAt);
 				this.throwIfTransferCanceled(request.progressId);
 				if (relayResult?.ok) {
-					this.fireTransferProgress(request, relayResult.bytes, relayResult.bytes, 'complete', `${formatTransferProtocolName(protocol)} relay completed.`, true, { strategy: relayResult.strategy });
+					this.fireTransferProgress(request, relayResult.bytes, relayResult.bytes, 'complete', `${formatTransferStrategyName(relayResult.strategy)} completed.`, true, { strategy: relayResult.strategy });
 					this.clearRemoteDirectoryListingCache(request.target);
 					return relayResult;
 				}
@@ -1749,6 +1750,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (isDownload && (looksLikeWindowsPath(request.source.path) || items.some(item => looksLikeWindowsPath(item.sourcePath)))) {
 			return undefined;
 		}
+		if (!canBatchRsyncPreserveTargetNames(items)) {
+			return undefined;
+		}
 
 		const connection = isUpload ? request.targetDirectory.connection! : request.source.connection!;
 		try {
@@ -1847,6 +1851,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.targetDirectory.path) || items.some(item => looksLikeWindowsPath(item.sourcePath))) {
+			return undefined;
+		}
+		if (!canBatchRsyncPreserveTargetNames(items)) {
 			return undefined;
 		}
 
@@ -1969,6 +1976,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.targetDirectory.path) || items.some(item => looksLikeWindowsPath(item.sourcePath))) {
 			return undefined;
 		}
+		if (!canBatchRsyncPreserveTargetNames(items)) {
+			return undefined;
+		}
 
 		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
 		if (!sourceConfigResult.ok) {
@@ -2034,7 +2044,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const baselineSize = await this.getRemoteBatchTargetContentSize(request.targetDirectory, targetNames).catch(() => 0);
 			stopGrowthTiming = this.beginRemoteBatchTargetGrowthTiming(request.progressId, request.targetDirectory, targetNames, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS);
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, rsyncCommand, { onStdout: progress.handleOutput, onStderr: progress.handleOutput });
+			await this.execRemote(client, rsyncCommand, {
+				onStdout: progress.handleOutput,
+				onStderr: progress.handleOutput,
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Batch rsync relay produced no transfer progress or target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: progress.getActivityTime
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			const finalTargetBytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchTargetContentSize(request.targetDirectory, targetNames).catch(() => baselineSize);
 			const bytes = expectedBytes > 0 ? expectedBytes : Math.max(progress.getLastBytes(), finalTargetBytes - baselineSize, 0);
@@ -3719,7 +3735,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const progress = this.createRsyncProgressReporter(request, expectedBytes, 'rsync-direct', 'Parallel rsync directory transfer in progress.', { strategy: 'rsync-direct-parallel' });
 			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, expectedBytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS);
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, parallelCommand);
+			await this.execRemote(client, parallelCommand, {
+				onStdout: progress.handleOutput,
+				onStderr: progress.handleOutput,
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Parallel rsync directory produced no transfer progress or target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: progress.getActivityTime
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			const targetSize = await this.getRemotePathSizeByCommand(request.target).catch(() => baselineSize + expectedBytes);
 			const bytes = expectedBytes > 0 ? expectedBytes : Math.max(progress.getLastBytes(), targetSize - baselineSize, 0);
@@ -3833,7 +3855,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const baselineSize = await this.getRemotePathSizeByCommand(request.target).catch(() => 0);
 			stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, progress.reportProgress, RSYNC_GROWTH_PROGRESS_POLL_INTERVAL_MS, RSYNC_GROWTH_PROGRESS_INITIAL_DELAY_MS);
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, rsyncCommand, { onStdout: progress.handleOutput, onStderr: progress.handleOutput });
+			await this.execRemote(client, rsyncCommand, {
+				onStdout: progress.handleOutput,
+				onStderr: progress.handleOutput,
+				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+				inactivityMessage: `Rsync relay produced no transfer progress or target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+				getActivityTime: progress.getActivityTime
+			});
 			this.throwIfTransferCanceled(request.progressId);
 			if (bytes === 0) {
 				const targetSize = await this.getRemotePathSizeByCommand(request.target).catch(() => baselineSize);
@@ -4853,12 +4881,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		let lastBytes = 0;
 		let knownTotalBytes = Math.max(0, totalBytes);
+		let lastActivityAt: number | undefined;
 		const reportProgress = (transferredBytes: number, force = false): void => {
 			const normalizedTransferred = Math.max(0, transferredBytes);
 			if (!force && normalizedTransferred <= lastBytes) {
 				return;
 			}
 			lastBytes = normalizedTransferred;
+			lastActivityAt = Date.now();
 			const effectiveTotalBytes = knownTotalBytes > 0 ? knownTotalBytes : normalizedTransferred;
 			this.fireTransferProgress(request, effectiveTotalBytes > 0 ? Math.min(normalizedTransferred, effectiveTotalBytes) : normalizedTransferred, effectiveTotalBytes, phase, detail, force, extra);
 			if (normalizedTransferred > 0) {
@@ -4882,7 +4912,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			reportProgress,
 			reportProgressWithTotal,
 			getLastBytes: () => lastBytes,
-			getTotalBytes: () => knownTotalBytes
+			getTotalBytes: () => knownTotalBytes,
+			getActivityTime: () => lastActivityAt
 		};
 	}
 
@@ -5599,8 +5630,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					// Fall through to clearing the tool cache below.
 				}
 			}
-			const cacheKey = this.getRemoteImageToolCacheKey(endpoint.connection);
-			this.remoteImageToolCache.set(cacheKey, { checkedAt: Date.now(), tool: undefined });
+			// A single corrupt/unsupported image should not disable thumbnail acceleration for
+			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
 		}
 	}
@@ -6839,8 +6870,16 @@ function formatTransferProtocolName(protocol: TurboFileTransferProtocol): string
 	}
 }
 
+function formatTransferStrategyName(strategy: ITurboFileTransferResult['strategy']): string {
+	return strategy.replace(/-/g, ' ');
+}
+
 function formatTransferError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function canBatchRsyncPreserveTargetNames(items: readonly ITurboFileBatchTransferItem[]): boolean {
+	return items.every(item => item.targetName === getTransferName(item.sourcePath));
 }
 
 function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined, connection: ITurboFileSshConnectionOptions | undefined): Array<'scp' | 'rsync'> {
@@ -7121,19 +7160,21 @@ async function withLocalRsyncSshEnvironment<T>(connection: ITurboFileSshConnecti
 			return await task(tool.env, tempPrivateKeyPath);
 		}
 
+		const isWindowsHost = platform() === 'win32';
 		tempPasswordPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.secret`);
-		// The bundled rsync ships an MSYS2 ssh.exe but no POSIX shell (/bin/sh is absent), so a
-		// "#!/bin/sh" askpass script fails to exec ("ssh_askpass: exec(...): No such file or
-		// directory"), the password is never supplied and rsync falls back to scp. MSYS2/cygwin's
-		// exec recognizes .cmd/.bat files and runs them through cmd.exe, so use a batch askpass that
-		// prints the secret with `type`, matching the native OpenSSH scp path.
-		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}.cmd`);
+		tempAskPassPath = join(tmpdir(), `turbofile-rsync-${randomUUID()}${isWindowsHost ? '.cmd' : '.sh'}`);
 		await fsp.writeFile(tempPasswordPath, askPassSecret, { mode: 0o600 });
-		await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
+		if (isWindowsHost) {
+			// Keep SSH_ASKPASS as a native Windows path. The bundled rsync still needs cygwin-style
+			// file paths, but MSYS2 ssh.exe can exec a .cmd askpass only when it receives C:\... here.
+			await fsp.writeFile(tempAskPassPath, `@echo off\r\ntype "${tempPasswordPath.replace(/"/g, '""')}"\r\n`, { mode: 0o700 });
+		} else {
+			await fsp.writeFile(tempAskPassPath, `#!/bin/sh\ncat ${quotePosixShellArg(tempPasswordPath)}\n`, { mode: 0o700 });
+		}
 		await fsp.chmod(tempAskPassPath, 0o700).catch(() => undefined);
 		return await task({
 			...tool.env,
-			SSH_ASKPASS: toRsyncLocalPath(tempAskPassPath, tool.pathFlavor),
+			SSH_ASKPASS: isWindowsHost ? tempAskPassPath : toRsyncLocalPath(tempAskPassPath, tool.pathFlavor),
 			SSH_ASKPASS_REQUIRE: 'force',
 			DISPLAY: 'turbofile'
 		}, tempPrivateKeyPath);
@@ -7607,7 +7648,12 @@ function buildOptimizedRsyncSshCommand(port: number, hasPassword = false, sshBin
 		'-o ControlPersist=300',
 		'-o ControlPath=/tmp/turbofile-ssh-%r@%h:%p'
 	];
-	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (hasPassword) {
+		parts.push('-o BatchMode=no');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (port && port !== 22) {
 		parts.push(`-p ${port}`);
 	}
@@ -7629,7 +7675,12 @@ function buildOptimizedSftpCommand(port: number, hasPassword = false): string {
 		'-o UserKnownHostsFile=/dev/null',
 		'-o LogLevel=ERROR'
 	];
-	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (hasPassword) {
+		parts.push('-o BatchMode=no');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (port && port !== 22) {
 		parts.push(`-P ${port}`);
 	}
@@ -7652,7 +7703,12 @@ function buildDirectScpCommand(port: number, hasPassword = false, identityPath?:
 		'-o UserKnownHostsFile=/dev/null',
 		'-o LogLevel=ERROR'
 	];
-	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (hasPassword) {
+		parts.push('-o BatchMode=no');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (identityPath) {
 		parts.push(`-i ${quotePosixShellArg(identityPath)}`);
 	}
@@ -7680,7 +7736,12 @@ function buildDirectScpSshCommand(port: number, hasPassword = false, identityPat
 		'-o UserKnownHostsFile=/dev/null',
 		'-o LogLevel=ERROR'
 	];
-	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (hasPassword) {
+		parts.push('-o BatchMode=no');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (identityPath) {
 		parts.push(`-i ${quotePosixShellArg(identityPath)}`);
 	}
@@ -7703,7 +7764,12 @@ function buildCompatibleSshCommand(port: number, hasPassword = false): string {
 		'-o UserKnownHostsFile=/dev/null',
 		'-o LogLevel=ERROR'
 	];
-	parts.push(hasPassword ? '-o PreferredAuthentications=password,keyboard-interactive,publickey' : '-o BatchMode=yes');
+	if (hasPassword) {
+		parts.push('-o BatchMode=no');
+		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');
+	} else {
+		parts.push('-o BatchMode=yes');
+	}
 	if (port && port !== 22) {
 		parts.push(`-p ${port}`);
 	}

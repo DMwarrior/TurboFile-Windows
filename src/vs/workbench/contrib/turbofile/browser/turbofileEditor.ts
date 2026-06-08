@@ -354,6 +354,8 @@ interface TurboFileTransferExecutionResult {
 	readonly canceled?: boolean;
 }
 
+type TurboFileDeviceRuntimeStatus = 'unknown' | 'testing' | 'online' | 'offline';
+
 interface TurboFileSyncPlanDirection {
 	readonly sourceSide: 'left' | 'right';
 	readonly targetSide: 'left' | 'right';
@@ -633,6 +635,7 @@ export class TurboFileEditor extends EditorPane {
 	private editingDeviceId: string | undefined;
 	private deviceFormMessage = '';
 	private readonly deviceConnectionMessages = new Map<string, { status: 'testing' | 'success' | 'error'; message: string }>();
+	private readonly deviceRuntimeStatuses = new Map<string, TurboFileDeviceRuntimeStatus>();
 	private availableColorThemes: IWorkbenchColorTheme[] = [];
 	private isLoadingColorThemes = false;
 	private hasLoadedColorThemes = false;
@@ -1302,7 +1305,9 @@ export class TurboFileEditor extends EditorPane {
 		titleText.textContent = device.name;
 		title.appendChild(titleText);
 		const status = $('span.turbofile-device-card-status');
-		status.textContent = '在线';
+		const runtimeStatus = this.getDeviceRuntimeStatus(device);
+		status.classList.add(`is-${runtimeStatus}`);
+		status.textContent = this.getDeviceRuntimeStatusLabel(runtimeStatus);
 		title.appendChild(status);
 		card.appendChild(title);
 
@@ -1328,6 +1333,32 @@ export class TurboFileEditor extends EditorPane {
 			card.appendChild(message);
 		}
 		return card;
+	}
+
+	private getDeviceRuntimeStatus(device: TurboFileDevice): TurboFileDeviceRuntimeStatus {
+		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'online';
+		}
+		return this.deviceRuntimeStatuses.get(device.id) ?? 'unknown';
+	}
+
+	private setDeviceRuntimeStatus(device: TurboFileDevice | string, status: TurboFileDeviceRuntimeStatus): void {
+		const deviceId = typeof device === 'string' ? device : device.id;
+		this.deviceRuntimeStatuses.set(deviceId, deviceId === LOCAL_WINDOWS_DEVICE_ID ? 'online' : status);
+	}
+
+	private getDeviceRuntimeStatusLabel(status: TurboFileDeviceRuntimeStatus): string {
+		switch (status) {
+			case 'online':
+				return '在线';
+			case 'testing':
+				return '检测中';
+			case 'offline':
+				return '离线';
+			case 'unknown':
+			default:
+				return '未检测';
+		}
 	}
 
 	private getDeviceCardTone(device: TurboFileDevice): number {
@@ -2050,6 +2081,7 @@ export class TurboFileEditor extends EditorPane {
 		const affectedSides = (['left', 'right'] as const).filter(side => this.paneStates[side].deviceId === device.id);
 		await this.deviceStore.deleteDevice(device.id);
 		this.deviceConnectionMessages.delete(device.id);
+		this.deviceRuntimeStatuses.delete(device.id);
 		this.devices = this.deviceStore.loadDevices();
 		this.ensurePaneDeviceSelection();
 		for (const side of affectedSides) {
@@ -2075,16 +2107,19 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.deviceConnectionMessages.set(device.id, { status: 'testing', message: '正在测试 SSH 连接...' });
+		this.setDeviceRuntimeStatus(device, 'testing');
 		this.render();
 		const task = this.beginTask('ssh-test', `测试 ${device.name}`, `${device.username}@${device.host}:${device.port || 22}`);
 		const result = await this.sshService.testConnection(await this.getSshConnectionOptions(device));
 		if (result.ok) {
 			this.finishTask(task, 'success', `SSH 连接成功：${device.name}`);
 			this.deviceConnectionMessages.set(device.id, { status: 'success', message: `SSH 连接成功：${device.name}` });
+			this.setDeviceRuntimeStatus(device, 'online');
 			this.statusMessage = `SSH 连接成功：${device.name}`;
 		} else {
 			this.finishTask(task, 'error', `SSH 连接失败：${result.message}`, { error: result.message });
 			this.deviceConnectionMessages.set(device.id, { status: 'error', message: `SSH 连接失败：${result.message}` });
+			this.setDeviceRuntimeStatus(device, 'offline');
 			this.statusMessage = `SSH 连接失败：${result.message}`;
 		}
 		this.render();
@@ -2723,6 +2758,7 @@ export class TurboFileEditor extends EditorPane {
 			if (this.paneRequestSeq[side] === requestId) {
 				const message = error instanceof Error ? error.message : String(error);
 				state.error = message;
+				this.setDeviceRuntimeStatus(device, 'offline');
 				this.statusMessage = `${device.name} 目录刷新失败：${message}`;
 			}
 		} finally {
@@ -3601,7 +3637,11 @@ export class TurboFileEditor extends EditorPane {
 
 		if (event.phase === 'complete' || transferredBytes >= totalBytes || now - (task.lastProgressRenderAt ?? 0) > 150) {
 			task.lastProgressRenderAt = now;
-			this.render();
+			if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
+				this.refreshTaskbar();
+			} else {
+				this.render();
+			}
 		}
 	}
 
@@ -5855,6 +5895,7 @@ export class TurboFileEditor extends EditorPane {
 			state.path = listing.path;
 			state.items = listing.items;
 			state.error = undefined;
+			this.setDeviceRuntimeStatus(device, 'online');
 			this.rememberPaneDevicePath(side, device, listing.path);
 			this.prefetchNeighborDirectories(device, listing.path, listing.items);
 			this.clearPaneSelection(side);
@@ -5864,6 +5905,7 @@ export class TurboFileEditor extends EditorPane {
 			if (this.paneRequestSeq[side] === requestId) {
 				const message = error instanceof Error ? error.message : String(error);
 				state.error = message;
+				this.setDeviceRuntimeStatus(device, 'offline');
 				this.statusMessage = `${device.name} 目录刷新失败：${message}`;
 			}
 		} finally {
@@ -5894,6 +5936,7 @@ export class TurboFileEditor extends EditorPane {
 			const listing = device.id === LOCAL_WINDOWS_DEVICE_ID
 				? await this.sshService.listLocalDirectory(path, force)
 				: await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force);
+			this.setDeviceRuntimeStatus(device, 'online');
 			const entry = {
 				expiresAt: Date.now() + PANE_DIRECTORY_CACHE_TTL_MS,
 				path: listing.path,
@@ -5956,6 +5999,7 @@ export class TurboFileEditor extends EditorPane {
 		state.items = listing.items;
 		state.error = undefined;
 		state.loading = false;
+		this.setDeviceRuntimeStatus(device, 'online');
 		this.clearPaneSelection(side);
 		this.rememberPaneDevicePath(side, device, listing.path);
 		this.rememberPaneDeviceSnapshot(side);
@@ -5994,7 +6038,25 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getPaneDirectoryCacheKey(device: TurboFileDevice, path: string): string {
-		return `${device.id}|${device.host}|${device.port || 0}|${path}`;
+		return `${device.id}|${device.host}|${device.port || 0}|${device.username}|${device.authType ?? ''}|${path}`;
+	}
+
+	private clearPaneDirectoryCachesForDevice(deviceId: string): void {
+		for (const key of Array.from(this.paneDirectoryCache.keys())) {
+			if (key.startsWith(`${deviceId}|`)) {
+				this.paneDirectoryCache.delete(key);
+			}
+		}
+		for (const key of Array.from(this.paneDirectoryInflight.keys())) {
+			if (key.startsWith(`${deviceId}|`)) {
+				this.paneDirectoryInflight.delete(key);
+			}
+		}
+		for (const key of Array.from(this.paneDeviceSnapshots.keys())) {
+			if (key.endsWith(`|${deviceId}`)) {
+				this.paneDeviceSnapshots.delete(key);
+			}
+		}
 	}
 
 	private trimPaneDirectoryCache(): void {
@@ -8347,7 +8409,6 @@ export class TurboFileEditor extends EditorPane {
 				quality: request.quality,
 				format: 'jpeg',
 				interpolation: 'lanczos',
-				forceOriginal: true,
 				maxBytes: 128 * 1024 * 1024,
 				sourceSize: image.item.rawSize,
 				sourceModified: image.item.rawModified
@@ -10183,6 +10244,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.rememberPaneDeviceSnapshot(side);
+		++this.paneRequestSeq[side];
 		state.deviceId = device.id;
 		const targetPath = this.getInitialPaneDevicePath(side, device);
 		const snapshot = this.getPaneDeviceSnapshot(side, device);
@@ -10308,14 +10370,17 @@ export class TurboFileEditor extends EditorPane {
 					savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
 					this.devices = this.deviceStore.loadDevices();
 				}
+				this.clearPaneDirectoryCachesForDevice(savedDevice.id);
 				this.ensurePaneDeviceSelection();
 				const refreshedLocalWindowsPanes = isEditingLocalWindows
 					? this.syncLocalWindowsDefaultPath(previousLocalWindowsDefaultPath ?? this.getLocalWindowsDefaultPath(), savedDevice.defaultPath || this.getLocalWindowsDeviceDefaultPath())
 					: false;
 				if (capabilityResult) {
 					this.deviceConnectionMessages.set(savedDevice.id, capabilityResult);
+					this.setDeviceRuntimeStatus(savedDevice, capabilityResult.status === 'error' ? 'offline' : 'online');
 				} else if (isEditingLocalWindows) {
 					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: '本机配置已保存，Windows 与服务器互传会按所选协议执行。' });
+					this.setDeviceRuntimeStatus(savedDevice, 'online');
 				} else if (savedDevice.preferredTransferProtocol === 'sftp') {
 					this.deviceConnectionMessages.set(savedDevice.id, { status: 'success', message: 'SFTP 稳定模式，无需额外检测。' });
 				}
@@ -11213,7 +11278,7 @@ function isHiddenFileName(name: string): boolean {
 }
 
 function isImageFile(name: string): boolean {
-	return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+	return /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(name);
 }
 
 function getFileExtensionLower(name: string): string {
@@ -11264,6 +11329,12 @@ function getMimeType(name: string): string {
 	}
 	if (lower.endsWith('.webp')) {
 		return 'image/webp';
+	}
+	if (lower.endsWith('.avif')) {
+		return 'image/avif';
+	}
+	if (lower.endsWith('.ico')) {
+		return 'image/x-icon';
 	}
 	if (lower.endsWith('.bmp')) {
 		return 'image/bmp';
