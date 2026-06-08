@@ -138,15 +138,8 @@ interface TurboFileImageGridImage {
 }
 
 type TurboFileImageGridColumns = number;
-type TurboFileImageGridViewKind = 'large' | 'medium' | 'compact';
 type TurboFileImageGridSortKey = 'name' | 'date' | 'type' | 'size' | 'dimensions';
 type TurboFileImagePreviewSamplingMode = 'smooth' | 'lossless';
-
-interface TurboFileImageGridViewOption {
-	readonly columns: TurboFileImageGridColumns | 'max';
-	readonly kind: TurboFileImageGridViewKind;
-	readonly label: string;
-}
 
 interface TurboFileImageGridState {
 	readonly side: 'left' | 'right';
@@ -154,6 +147,7 @@ interface TurboFileImageGridState {
 	readonly images: TurboFileImageGridImage[];
 	selectedIndex: number;
 	columns: TurboFileImageGridColumns;
+	thumbnailScale: number;
 	sortKey: TurboFileImageGridSortKey;
 	sortDescending: boolean;
 	previewVisible: boolean;
@@ -419,10 +413,7 @@ interface TurboFileIconPath {
 	readonly d: string;
 	readonly fillRule?: 'evenodd';
 }
-const IMAGE_GRID_VIEW_OPTIONS: readonly TurboFileImageGridViewOption[] = [
-	{ columns: 4, kind: 'large', label: '大图网格' },
-	{ columns: 'max', kind: 'medium', label: '最大列数' }
-];
+const IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
 const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKey; readonly label: string }[] = [
 	{ key: 'name', label: '名称' },
 	{ key: 'date', label: '修改日期' },
@@ -4133,9 +4124,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const actions = $('.turbofile-image-page-actions');
 		actions.appendChild(this.renderImageGridSortControl(state));
-		for (const option of IMAGE_GRID_VIEW_OPTIONS) {
-			actions.appendChild(this.renderImageGridViewButton(state, option));
-		}
+		actions.appendChild(this.renderImageGridScaleControl(state));
 		const closeIcon = $('button.turbofile-image-page-action.is-close') as HTMLButtonElement;
 		closeIcon.type = 'button';
 		closeIcon.title = '关闭';
@@ -4155,6 +4144,7 @@ export class TurboFileEditor extends EditorPane {
 		page.addEventListener('wheel', event => this.handleImageGridWheel(event, body), { passive: false, capture: true });
 		const grid = $('.turbofile-image-page-grid');
 		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
+		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
 		this.renderImageGridSlice(grid, state, range);
 		body.appendChild(grid);
 		page.appendChild(body);
@@ -4169,33 +4159,88 @@ export class TurboFileEditor extends EditorPane {
 		return page;
 	}
 
-	private renderImageGridViewButton(state: TurboFileImageGridState, option: TurboFileImageGridViewOption): HTMLButtonElement {
-		const button = $('button.turbofile-image-page-action') as HTMLButtonElement;
-		const columns = this.resolveImageGridViewColumns(option);
+	private renderImageGridScaleControl(state: TurboFileImageGridState): HTMLElement {
+		const select = $('.turbofile-image-page-scale');
+		const button = $('button.turbofile-image-page-scale-button') as HTMLButtonElement;
+		const menu = $('.turbofile-image-page-scale-menu');
 		button.type = 'button';
-		button.title = option.label;
-		button.setAttribute('aria-label', option.label);
-		button.setAttribute('aria-pressed', String(state.columns === columns));
-		if (state.columns === columns) {
-			button.classList.add('is-active');
-		}
-		button.appendChild(this.renderImageGridViewIcon(option.kind));
-		button.addEventListener('click', () => this.setImageGridColumns(columns));
-		return button;
-	}
+		button.title = '图片放大倍率';
+		button.setAttribute('aria-haspopup', 'listbox');
+		button.setAttribute('aria-expanded', 'false');
+		button.setAttribute('aria-label', '图片放大倍率');
+		button.appendChild(renderIcon(Codicon.zoomIn));
+		button.appendChild($('span.turbofile-image-page-scale-label', undefined, this.getImageGridScaleLabel(state.thumbnailScale)));
+		button.appendChild(renderIcon(Codicon.chevronDown));
 
-	private resolveImageGridViewColumns(option: TurboFileImageGridViewOption): TurboFileImageGridColumns {
-		return option.columns === 'max' ? this.getImageGridMaxColumns() : option.columns;
-	}
-
-	private renderImageGridViewIcon(kind: TurboFileImageGridViewKind): HTMLElement {
-		const icon = $('span.turbofile-image-page-view-icon') as HTMLElement;
-		icon.classList.add(`is-${kind}`);
-		const cellCount = kind === 'large' ? 4 : kind === 'medium' ? 9 : 3;
-		for (let index = 0; index < cellCount; index++) {
-			icon.appendChild($('span'));
+		menu.setAttribute('role', 'listbox');
+		menu.setAttribute('aria-label', '图片放大倍率');
+		for (const scale of IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS) {
+			const isActive = state.thumbnailScale === scale;
+			const item = $('button.turbofile-image-page-scale-option') as HTMLButtonElement;
+			item.type = 'button';
+			item.setAttribute('role', 'option');
+			item.setAttribute('aria-selected', isActive ? 'true' : 'false');
+			if (isActive) {
+				item.classList.add('is-active');
+			}
+			const check = $('span.turbofile-image-page-scale-check');
+			if (isActive) {
+				check.appendChild(renderIcon(Codicon.check));
+			}
+			item.appendChild(check);
+			item.appendChild($('span.turbofile-image-page-scale-option-label', undefined, this.getImageGridScaleLabel(scale)));
+			item.addEventListener('click', event => {
+				event.preventDefault();
+				event.stopPropagation();
+				select.classList.remove('is-open');
+				button.setAttribute('aria-expanded', 'false');
+				this.setImageGridThumbnailScale(scale);
+			});
+			menu.appendChild(item);
 		}
-		return icon;
+
+		const closeMenu = () => {
+			select.classList.remove('is-open');
+			button.setAttribute('aria-expanded', 'false');
+		};
+		const toggleMenu = (event: MouseEvent | KeyboardEvent) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const nextOpen = !select.classList.contains('is-open');
+			select.classList.toggle('is-open', nextOpen);
+			button.setAttribute('aria-expanded', String(nextOpen));
+			if (nextOpen) {
+				const active = menu.querySelector<HTMLElement>('.turbofile-image-page-scale-option.is-active') ?? menu.querySelector<HTMLElement>('.turbofile-image-page-scale-option');
+				active?.focus();
+			}
+		};
+		button.addEventListener('click', toggleMenu);
+		button.addEventListener('keydown', event => {
+			if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+				toggleMenu(event);
+			}
+		});
+		const ownerWindow = getWindow(select);
+		const handleWindowClick = (event: MouseEvent) => {
+			if (!select.contains(event.target as Node | null)) {
+				closeMenu();
+			}
+		};
+		const handleWindowKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape' && select.classList.contains('is-open')) {
+				event.preventDefault();
+				closeMenu();
+				button.focus();
+			}
+		};
+		ownerWindow.addEventListener('click', handleWindowClick);
+		ownerWindow.addEventListener('keydown', handleWindowKeydown);
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('click', handleWindowClick) });
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('keydown', handleWindowKeydown) });
+
+		select.appendChild(button);
+		select.appendChild(menu);
+		return select;
 	}
 
 	private renderImageGridSortControl(state: TurboFileImageGridState): HTMLElement {
@@ -4289,6 +4334,7 @@ export class TurboFileEditor extends EditorPane {
 	private renderImageGridSlice(grid: HTMLElement, state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
 		clearNode(grid);
 		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
+		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
 		this.releaseImageGridImagesOutsideRange(state, range);
 
 		if (range.topSpacerHeight > 0) {
@@ -7496,6 +7542,7 @@ export class TurboFileEditor extends EditorPane {
 			images,
 			selectedIndex,
 			columns: 12,
+			thumbnailScale: 1,
 			sortKey: this.imageGridSortKey,
 			sortDescending: this.imageGridSortDescending,
 			previewVisible,
@@ -7905,6 +7952,38 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.render();
+	}
+
+	private setImageGridThumbnailScale(scale: number): void {
+		if (!this.imageGridState) {
+			return;
+		}
+		const nextScale = this.normalizeImageGridThumbnailScale(scale);
+		if (this.imageGridState.thumbnailScale === nextScale) {
+			return;
+		}
+		this.imageGridState.thumbnailScale = nextScale;
+		this.imageGridRenderedRange = undefined;
+		this.clearImageGridThumbnailQueue();
+		this.clearImageGridLoadedImageIndexes();
+		for (const image of this.imageGridState.images) {
+			this.releaseImageBlobUrl(image.thumbnailUrl);
+			image.thumbnailUrl = undefined;
+			image.thumbnailContent = '';
+			image.thumbnailLoading = false;
+			image.thumbnailError = undefined;
+		}
+		this.render();
+	}
+
+	private normalizeImageGridThumbnailScale(scale: number): number {
+		const rounded = Math.round(scale);
+		return IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS.includes(rounded as typeof IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS[number]) ? rounded : 1;
+	}
+
+	private getImageGridScaleLabel(scale: number): string {
+		const normalized = this.normalizeImageGridThumbnailScale(scale);
+		return normalized === 1 ? '1x' : `${normalized}x`;
 	}
 
 	private normalizeImageGridStateColumns(state: TurboFileImageGridState): void {
@@ -8456,7 +8535,7 @@ export class TurboFileEditor extends EditorPane {
 		const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
 		const ownerWindow = this.container?.ownerDocument.defaultView;
 		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-		const scaled = Math.round(columnWidth * dpr);
+		const scaled = Math.round(columnWidth * dpr * this.normalizeImageGridThumbnailScale(state.thumbnailScale));
 		return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 	}
 
