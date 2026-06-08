@@ -3693,8 +3693,10 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-card-preview img {
-	width: 100%;
-	height: 100%;
+	width: auto;
+	height: auto;
+	max-width: 100%;
+	max-height: 100%;
 	object-fit: contain;
 	display: block;
 }
@@ -5299,6 +5301,10 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview img {
+	width: auto;
+	height: auto;
+	max-width: 100%;
+	max-height: 100%;
 	object-fit: contain;
 	border-radius: 0;
 	background: transparent;
