@@ -1466,8 +1466,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (transferredBytes > previousBytes) {
 					bytesByEntry.set(entryName, transferredBytes);
 				}
-				if (totalBytes !== undefined && totalBytes > (totalByEntry.get(entryName) ?? 0)) {
-					totalByEntry.set(entryName, totalBytes);
+				// Use each worker's LATEST total estimate (not the max): rsync's percentage
+				// over-estimates the total early during the incremental scan and refines as it
+				// completes, so the latest value converges to the real size; keeping the max would
+				// lock in the early over-estimate and inflate the aggregate (e.g. 1.2GB→2.3GB).
+				if (totalBytes !== undefined) {
+					totalByEntry.set(entryName, Math.max(totalBytes, bytesByEntry.get(entryName) ?? 0));
 				}
 				const sumBytes = [...bytesByEntry.values()].reduce((sum, value) => sum + value, 0);
 				const sumTotal = totalByEntry.size >= parallelPlan.entryNames.length
@@ -4896,8 +4900,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		};
 		const reportProgressWithTotal = (transferredBytes: number, totalBytes: number | undefined): void => {
-			if (totalBytes !== undefined && totalBytes > knownTotalBytes) {
-				knownTotalBytes = totalBytes;
+			// rsync derives the total from "bytes ÷ percent". Early on (incremental file-list scan)
+			// the percentage is based on a partial list, so the total is badly over-estimated; it gets
+			// accurate as the scan completes and the percentage climbs. Always take the LATEST estimate
+			// (highest bytes / highest percent = most precise) so the total converges to the real size
+			// instead of being stuck at the early over-estimate. Never let it drop below transferred.
+			if (totalBytes !== undefined) {
+				knownTotalBytes = Math.max(totalBytes, transferredBytes);
 			}
 			reportProgress(transferredBytes);
 		};
