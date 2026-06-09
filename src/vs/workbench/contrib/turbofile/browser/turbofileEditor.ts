@@ -388,6 +388,10 @@ const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
+const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 300;
+const RSYNC_PROGRESS_RENDER_INTERVAL_MS = 800;
+const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = 350;
+const TRANSFER_SPEED_SAMPLE_MAX_COUNT = 8;
 const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
 const TURBOFILE_BROWSER_FONT_FAMILY_STORAGE_KEY = 'turbofile.browser.fontFamily';
 const TURBOFILE_UI_FONT_SIZE_STORAGE_KEY = 'turbofile.ui.fontSize';
@@ -3270,9 +3274,12 @@ export class TurboFileEditor extends EditorPane {
 			const isRsyncTransferRunning = runningTransfers.some(task => task.strategy?.startsWith('rsync'));
 			const transferSizeText = liveSummary.totalBytes > 0
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
-				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : isRsyncTransferRunning ? '扫描文件中…' : '准备中';
+				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : '准备传输';
+			const showElapsedTime = isRsyncTransferRunning || liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
+			const timeText = showElapsedTime ? this.formatElapsed(liveSummary.startedAt) : this.formatRemaining(liveSummary.remainingMs);
+			const timeTitle = showElapsedTime ? '已耗时' : '剩余时间';
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
-			right.appendChild(this.renderStatusbarItem(Codicon.clock, this.formatRemaining(liveSummary.remainingMs), '剩余时间'));
+			right.appendChild(this.renderStatusbarItem(Codicon.clock, timeText, timeTitle));
 			right.appendChild(this.renderStatusbarItem(Codicon.archive, transferSizeText, '已传输'));
 			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
 			if (protocol) {
@@ -3359,12 +3366,19 @@ export class TurboFileEditor extends EditorPane {
 		let totalBytes = 0;
 		let speedBytesPerSecond = 0;
 		let startedAt: number | undefined;
+		const addStartedAt = (candidate: number | undefined): void => {
+			if (candidate === undefined) {
+				return;
+			}
+			startedAt = startedAt === undefined ? candidate : Math.min(startedAt, candidate);
+		};
 		for (const task of tasks) {
-			startedAt = startedAt === undefined ? task.startedAt : Math.min(startedAt, task.startedAt);
+			const taskDataStartedAt = task.transferStartedAt;
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
 				totalBytes += task.totalBytes ?? 0;
 				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
+				addStartedAt(taskDataStartedAt);
 				continue;
 			}
 			const items = this.getLiveTransferItems(task);
@@ -3372,19 +3386,26 @@ export class TurboFileEditor extends EditorPane {
 				transferredBytes += item.transferredBytes;
 				totalBytes += this.getLiveTransferItemTotal(item);
 				speedBytesPerSecond += item.status === 'running' ? item.speedBytesPerSecond : 0;
+				addStartedAt(item.transferStartedAt ?? taskDataStartedAt);
 			}
 		}
 		const remainingBytes = Math.max(0, totalBytes - transferredBytes);
+		const remainingMs = totalBytes > 0 && transferredBytes < totalBytes && speedBytesPerSecond > 0
+			? (remainingBytes / speedBytesPerSecond) * 1000
+			: undefined;
 		return {
 			transferredBytes,
 			totalBytes,
 			speedBytesPerSecond,
-			remainingMs: speedBytesPerSecond > 0 ? (remainingBytes / speedBytesPerSecond) * 1000 : undefined,
+			remainingMs,
 			startedAt
 		};
 	}
 
 	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem): number {
+		if (item.status === 'running' && item.strategy?.startsWith('rsync') && item.totalBytes <= 0) {
+			return 0;
+		}
 		return Math.max(item.totalBytes, item.rawSize, item.transferredBytes, 0);
 	}
 
@@ -3394,6 +3415,14 @@ export class TurboFileEditor extends EditorPane {
 
 	private formatRemaining(milliseconds: number | undefined): string {
 		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
+	}
+
+	private formatElapsed(startedAt: number | undefined): string {
+		if (startedAt === undefined) {
+			return '--';
+		}
+		const elapsedMs = Math.max(0, Date.now() - startedAt);
+		return elapsedMs < 1000 ? '<1 s' : formatDuration(elapsedMs);
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
@@ -3586,8 +3615,10 @@ export class TurboFileEditor extends EditorPane {
 
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
-		const knownTotalBytes = activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
-		const totalBytes = event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
+		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
+		const hideRsyncTotalWhileRunning = strategy?.startsWith('rsync') && event.phase !== 'complete';
+		const knownTotalBytes = hideRsyncTotalWhileRunning ? 0 : activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
+		const totalBytes = hideRsyncTotalWhileRunning ? 0 : event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
@@ -3600,7 +3631,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const now = Date.now();
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
-		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
 		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete' && transferredBytes > 0;
 		if (isDataPhase && task.transferStartedAt === undefined) {
 			task.transferStartedAt = now;
@@ -3620,22 +3650,21 @@ export class TurboFileEditor extends EditorPane {
 			if (event.phase === 'complete') {
 				activeItem.endedAt = now;
 			}
-			this.appendTransferSpeedSample(activeItem.speedSamples, speed);
 		}
 		const aggregate = this.getLiveTransferAggregate([task]);
 		task.transferredBytes = activeItem ? aggregate.transferredBytes : transferredBytes;
 		task.totalBytes = activeItem ? aggregate.totalBytes : totalBytes;
-		task.speedBytesPerSecond = speed;
+		task.speedBytesPerSecond = activeItem ? aggregate.speedBytesPerSecond : speed;
 		task.remainingMs = aggregate.remainingMs;
 		task.strategy = strategy;
 		task.progress = activeItem && aggregate.totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((aggregate.transferredBytes / aggregate.totalBytes) * 100)))
 			: event.phase === 'complete' ? 100 : progress;
 		task.detail = detail;
-		this.appendTransferSpeedSample(task.speedSamples ??= [], speed);
 		this.statusMessage = detail;
 
-		if (event.phase === 'complete' || transferredBytes >= totalBytes || now - (task.lastProgressRenderAt ?? 0) > 150) {
+		const renderIntervalMs = strategy?.startsWith('rsync') ? RSYNC_PROGRESS_RENDER_INTERVAL_MS : TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
+		if (event.phase === 'complete' || (totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
 			task.lastProgressRenderAt = now;
 			if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
 				this.refreshTaskbar();
@@ -3645,16 +3674,24 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private calculateTransferSpeed(target: Pick<TurboFileTask, 'lastSampleAt' | 'lastSampleBytes'> | TurboFileTaskTransferItem, transferredBytes: number, now: number): number {
+	private calculateTransferSpeed(target: Pick<TurboFileTask, 'lastSampleAt' | 'lastSampleBytes' | 'speedBytesPerSecond' | 'speedSamples'> | TurboFileTaskTransferItem, transferredBytes: number, now: number): number {
 		const previousAt = target.lastSampleAt;
 		const previousBytes = target.lastSampleBytes;
-		target.lastSampleAt = now;
-		target.lastSampleBytes = transferredBytes;
+		const previousSpeed = target.speedBytesPerSecond ?? 0;
 		if (previousAt === undefined || previousBytes === undefined || now <= previousAt || transferredBytes < previousBytes) {
-			return 0;
+			target.lastSampleAt = now;
+			target.lastSampleBytes = transferredBytes;
+			return previousSpeed;
 		}
 		const elapsed = now - previousAt;
-		return elapsed > 0 ? ((transferredBytes - previousBytes) / elapsed) * 1000 : 0;
+		if (elapsed < TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS) {
+			return previousSpeed;
+		}
+		target.lastSampleAt = now;
+		target.lastSampleBytes = transferredBytes;
+		const rawSpeed = elapsed > 0 ? ((transferredBytes - previousBytes) / elapsed) * 1000 : 0;
+		this.appendTransferSpeedSample(target.speedSamples ??= [], rawSpeed);
+		return this.getSmoothedTransferSpeed(target.speedSamples, previousSpeed);
 	}
 
 	private appendTransferSpeedSample(samples: number[], speed: number): void {
@@ -3662,9 +3699,20 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		samples.push(speed);
-		if (samples.length > 32) {
-			samples.splice(0, samples.length - 32);
+		if (samples.length > TRANSFER_SPEED_SAMPLE_MAX_COUNT) {
+			samples.splice(0, samples.length - TRANSFER_SPEED_SAMPLE_MAX_COUNT);
 		}
+	}
+
+	private getSmoothedTransferSpeed(samples: readonly number[], previousSpeed: number): number {
+		const validSamples = samples.filter(speed => Number.isFinite(speed) && speed > 0);
+		if (!validSamples.length) {
+			return previousSpeed;
+		}
+		const sorted = [...validSamples].sort((a, b) => a - b);
+		const trimmed = sorted.length >= 5 ? sorted.slice(1, -1) : sorted;
+		const average = trimmed.reduce((sum, speed) => sum + speed, 0) / trimmed.length;
+		return previousSpeed > 0 ? previousSpeed * 0.65 + average * 0.35 : average;
 	}
 
 	private getTransferStrategyFromProgress(event: ITurboFileTransferProgressEvent): TurboFileTransferStrategy | undefined {
@@ -3875,6 +3923,9 @@ export class TurboFileEditor extends EditorPane {
 							: '正在传输';
 		if (totalBytes > 0) {
 			return `${phaseLabel}：${formatSize(transferredBytes)} / ${formatSize(totalBytes)}`;
+		}
+		if (transferredBytes > 0) {
+			return `${phaseLabel}：${formatSize(transferredBytes)}`;
 		}
 		return phaseLabel;
 	}
