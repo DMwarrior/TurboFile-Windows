@@ -3373,7 +3373,7 @@ export class TurboFileEditor extends EditorPane {
 			startedAt = startedAt === undefined ? candidate : Math.min(startedAt, candidate);
 		};
 		for (const task of tasks) {
-			const taskDataStartedAt = task.transferStartedAt;
+			const taskDataStartedAt = task.transferStartedAt ?? task.startedAt;
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
 				totalBytes += task.totalBytes ?? 0;
@@ -3596,6 +3596,9 @@ export class TurboFileEditor extends EditorPane {
 			startedAt: Date.now(),
 			progress: 35
 		};
+		if (kind === 'transfer') {
+			task.transferStartedAt = task.startedAt;
+		}
 		this.tasks.unshift(task);
 		if (this.tasks.length > 16) {
 			this.tasks.splice(16);
@@ -3934,7 +3937,13 @@ export class TurboFileEditor extends EditorPane {
 		task.status = status;
 		task.detail = detail;
 		task.endedAt = Date.now();
-		task.durationMs = options.durationMs ?? task.durationMs;
+		if (task.kind === 'transfer') {
+			const timingStartedAt = task.transferStartedAt ?? task.startedAt;
+			const elapsedMs = Math.max(1, task.endedAt - timingStartedAt);
+			task.durationMs = Math.max(task.durationMs ?? 0, options.durationMs ?? 0, elapsedMs);
+		} else {
+			task.durationMs = options.durationMs ?? task.durationMs;
+		}
 		task.progress = status === 'canceled' ? Math.max(task.progress, 0) : 100;
 		task.bytes = options.bytes;
 		task.averageBytesPerSecond = options.averageBytesPerSecond
