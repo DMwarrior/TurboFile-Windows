@@ -5125,7 +5125,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (isFirstDataProgress) {
 			this.markTransferDataStarted(progressId);
 		}
-		if (!force && !isFirstDataProgress && previous && now - previous.lastAt < TRANSFER_PROGRESS_EVENT_INTERVAL_MS && normalizedTransferred < normalizedTotal) {
+		// Throttle in-progress events to one per interval. The completion event (transferred reaches a
+		// known total) always goes through immediately. NOTE: when the total is unknown (0) every
+		// rsync stdout line would otherwise bypass the throttle (transferred is never < 0), flooding
+		// the renderer with thousands of IPC events and starving the main-process event loop, which
+		// slows the transfer itself — so an unknown total must still be throttled.
+		const isCompletionEvent = normalizedTotal > 0 && normalizedTransferred >= normalizedTotal;
+		if (!force && !isFirstDataProgress && !isCompletionEvent && previous && now - previous.lastAt < TRANSFER_PROGRESS_EVENT_INTERVAL_MS) {
 			return;
 		}
 
