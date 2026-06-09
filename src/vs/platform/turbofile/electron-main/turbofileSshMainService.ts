@@ -281,7 +281,6 @@ interface ILocalRsyncTool {
 
 interface IRsyncProgressSnapshot {
 	readonly bytes: number;
-	readonly totalBytes?: number;
 }
 
 type ITransferProgressEventExtra = Partial<Omit<ITurboFileTransferProgressEvent, 'progressId' | 'transferredBytes' | 'totalBytes' | 'phase' | 'detail'>>;
@@ -289,9 +288,7 @@ type ITransferProgressEventExtra = Partial<Omit<ITurboFileTransferProgressEvent,
 interface IRsyncProgressReporter {
 	readonly handleOutput: (chunk: string) => void;
 	readonly reportProgress: (transferredBytes: number, force?: boolean) => void;
-	readonly reportProgressWithTotal: (transferredBytes: number, totalBytes: number | undefined) => void;
 	readonly getLastBytes: () => number;
-	readonly getTotalBytes: () => number;
 	readonly getActivityTime: () => number | undefined;
 }
 
@@ -897,7 +894,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (protocol === 'rsync') {
 					this.fireTransferProgress(request, 0, 0, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
 					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' }, () => this.markTransferDataStarted(request.progressId));
-					await this.runLocalRsyncUpload(request, bytes, progress.reportProgressWithTotal);
+					await this.runLocalRsyncUpload(request, bytes, progress.reportProgress);
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync upload completed.', true, { strategy: 'rsync-upload' });
 					return this.createTransferResult(true, 'rsync-upload', resultBytes, 'Local rsync upload completed.', startedAt, request.progressId);
@@ -932,7 +929,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (protocol === 'rsync') {
 					this.fireTransferProgress(request, 0, 0, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
 					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' }, () => this.markTransferDataStarted(request.progressId));
-					await this.runLocalRsyncDownload(request, bytes, progress.reportProgressWithTotal);
+					await this.runLocalRsyncDownload(request, bytes, progress.reportProgress);
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync download completed.', true, { strategy: 'rsync-download' });
 					return this.createTransferResult(true, 'rsync-download', resultBytes, 'Local rsync download completed.', startedAt, request.progressId);
@@ -1407,7 +1404,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number, totalBytes?: number) => void): Promise<void> {
+	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
@@ -1422,14 +1419,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return;
 			}
 		}
-		// Progress is driven by rsync's own --info=progress2 output (transferred bytes + total derived
-		// from the percentage), which is accurate and real-time without pre-scanning the directory.
+		// Progress is driven by rsync's own --info=progress2 transferred byte count.
+		// Do not derive a total from the percentage: incremental file-list scans make it unstable.
 		let rsyncProgressBuffer = '';
 		const handleRsyncOutput = (chunk: string): void => {
 			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
 			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
 			if (snapshot) {
-				onProgress?.(snapshot.bytes, snapshot.totalBytes);
+				onProgress?.(snapshot.bytes);
 			}
 		};
 		const mkdirTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
@@ -1453,31 +1450,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalParallelRsyncUpload(request: ITurboFileTransferRequest, connection: ITurboFileSshConnectionOptions, tool: ILocalRsyncTool, parallelPlan: ILocalParallelRsyncPlan, onProgress?: (transferredBytes: number, totalBytes?: number) => void): Promise<void> {
+	private async runLocalParallelRsyncUpload(request: ITurboFileTransferRequest, connection: ITurboFileSshConnectionOptions, tool: ILocalRsyncTool, parallelPlan: ILocalParallelRsyncPlan, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		const remoteBasePath = joinRemotePathSegments(request.target.path, parallelPlan.targetRelativeSegments);
 		await withLocalRsyncSshEnvironment(connection, tool, async (env, identityPath) => {
-			// Aggregate each worker's rsync --info=progress2 output: sum transferred bytes across all
-			// entries, and only surface an overall total once every entry has reported one (so the
-			// percentage doesn't briefly overshoot while some workers are still scanning).
+			// Aggregate each worker's rsync --info=progress2 transferred byte count only.
+			// Avoid total-size estimates so the UI never shows an unstable inferred total.
 			const bytesByEntry = new Map<string, number>();
-			const totalByEntry = new Map<string, number>();
-			const reportEntryProgress = (entryName: string, transferredBytes: number, totalBytes: number | undefined): void => {
+			const reportEntryProgress = (entryName: string, transferredBytes: number): void => {
 				const previousBytes = bytesByEntry.get(entryName) ?? 0;
 				if (transferredBytes > previousBytes) {
 					bytesByEntry.set(entryName, transferredBytes);
 				}
-				// Use each worker's LATEST total estimate (not the max): rsync's percentage
-				// over-estimates the total early during the incremental scan and refines as it
-				// completes, so the latest value converges to the real size; keeping the max would
-				// lock in the early over-estimate and inflate the aggregate (e.g. 1.2GB→2.3GB).
-				if (totalBytes !== undefined) {
-					totalByEntry.set(entryName, Math.max(totalBytes, bytesByEntry.get(entryName) ?? 0));
-				}
 				const sumBytes = [...bytesByEntry.values()].reduce((sum, value) => sum + value, 0);
-				const sumTotal = totalByEntry.size >= parallelPlan.entryNames.length
-					? [...totalByEntry.values()].reduce((sum, value) => sum + value, 0)
-					: undefined;
-				onProgress?.(sumBytes, sumTotal);
+				onProgress?.(sumBytes);
 			};
 			this.markTransferDataStarted(request.progressId);
 			await mapLimit(parallelPlan.entryNames, Math.min(RSYNC_DIRECTORY_PARALLEL_WORKERS, parallelPlan.entryNames.length), async entryName => {
@@ -1487,7 +1472,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
 					const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
 					if (snapshot) {
-						reportEntryProgress(entryName, snapshot.bytes, snapshot.totalBytes);
+						reportEntryProgress(entryName, snapshot.bytes);
 					}
 				};
 				await this.runCancelableLocalCommand(tool.executable, [
@@ -1508,20 +1493,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number, totalBytes?: number) => void): Promise<void> {
+	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
 		void expectedBytes;
 		const connection = request.source.connection;
 		const tool = await resolveLocalRsyncTool();
-		// Progress comes from rsync's own --info=progress2 output (accurate, real-time, no pre-scan).
+		// Progress comes from rsync's own --info=progress2 transferred byte count.
 		let rsyncProgressBuffer = '';
 		const handleRsyncOutput = (chunk: string): void => {
 			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
 			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
 			if (snapshot) {
-				onProgress?.(snapshot.bytes, snapshot.totalBytes);
+				onProgress?.(snapshot.bytes);
 			}
 		};
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
@@ -1773,8 +1758,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length,
 				currentName: items[0]?.displayName ?? items[0]?.targetName
 			});
-			// Progress is driven by rsync's own --info=progress2 output via progress.handleOutput
-			// (accurate transferred bytes + total derived from the percentage, real-time, no pre-scan).
+			// Progress is driven by rsync's own --info=progress2 transferred byte count.
 			if (isUpload) {
 				const sourceArgs = items.map(item => toRsyncLocalPath(item.sourcePath, tool.pathFlavor));
 				await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
@@ -4884,7 +4868,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		let lastBytes = 0;
-		let knownTotalBytes = Math.max(0, totalBytes);
+		void totalBytes;
 		let lastActivityAt: number | undefined;
 		const reportProgress = (transferredBytes: number, force = false): void => {
 			const normalizedTransferred = Math.max(0, transferredBytes);
@@ -4893,22 +4877,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			lastBytes = normalizedTransferred;
 			lastActivityAt = Date.now();
-			const effectiveTotalBytes = knownTotalBytes > 0 ? knownTotalBytes : normalizedTransferred;
-			this.fireTransferProgress(request, effectiveTotalBytes > 0 ? Math.min(normalizedTransferred, effectiveTotalBytes) : normalizedTransferred, effectiveTotalBytes, phase, detail, force, extra);
+			this.fireTransferProgress(request, normalizedTransferred, 0, phase, detail, force, extra);
 			if (normalizedTransferred > 0) {
 				onAcceptedProgress?.();
 			}
-		};
-		const reportProgressWithTotal = (transferredBytes: number, totalBytes: number | undefined): void => {
-			// rsync derives the total from "bytes ÷ percent". Early on (incremental file-list scan)
-			// the percentage is based on a partial list, so the total is badly over-estimated; it gets
-			// accurate as the scan completes and the percentage climbs. Always take the LATEST estimate
-			// (highest bytes / highest percent = most precise) so the total converges to the real size
-			// instead of being stuck at the early over-estimate. Never let it drop below transferred.
-			if (totalBytes !== undefined) {
-				knownTotalBytes = Math.max(totalBytes, transferredBytes);
-			}
-			reportProgress(transferredBytes);
 		};
 		return {
 			handleOutput: chunk => {
@@ -4916,12 +4888,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (!snapshot) {
 					return;
 				}
-				reportProgressWithTotal(snapshot.bytes, snapshot.totalBytes);
+				reportProgress(snapshot.bytes);
 			},
 			reportProgress,
-			reportProgressWithTotal,
 			getLastBytes: () => lastBytes,
-			getTotalBytes: () => knownTotalBytes,
 			getActivityTime: () => lastActivityAt
 		};
 	}
@@ -5928,12 +5898,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		let match: RegExpExecArray | null;
 		while ((match = progressPattern.exec(chunk)) !== null) {
 			const bytes = Number(match[1].replace(/[^0-9]/g, ''));
-			const percent = Number(match[2]);
 			if (Number.isFinite(bytes)) {
-				const totalBytes = Number.isFinite(percent) && percent > 0
-					? percent >= 100 ? bytes : Math.max(bytes, Math.ceil((bytes * 100) / percent))
-					: undefined;
-				parsed = totalBytes !== undefined ? { bytes, totalBytes } : { bytes };
+				parsed = { bytes };
 			}
 		}
 		return parsed;
