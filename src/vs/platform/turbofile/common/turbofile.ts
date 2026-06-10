@@ -193,6 +193,9 @@ export interface ITurboFileTransferProgressEvent {
 	readonly completedItems?: number;
 	readonly totalItems?: number;
 	readonly currentName?: string;
+	readonly toCheck?: number;
+	readonly totalChecks?: number;
+	readonly transferIndex?: number;
 }
 
 export interface ITurboFileFileOperationResult {

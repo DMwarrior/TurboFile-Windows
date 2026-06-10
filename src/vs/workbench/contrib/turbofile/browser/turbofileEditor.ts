@@ -3710,7 +3710,7 @@ export class TurboFileEditor extends EditorPane {
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
 			: event.phase === 'complete' ? 100 : Math.max(8, task.progress);
-		let detail = this.formatTransferProgressDetail(event.phase, transferredBytes, totalBytes);
+		let detail = this.formatTransferProgressDetail(event, transferredBytes, totalBytes);
 		if (event.totalItems && event.totalItems > 1) {
 			const completedItems = Math.max(0, Math.min(event.completedItems ?? 0, event.totalItems));
 			const currentName = event.currentName ? `：${event.currentName}` : '';
@@ -3718,7 +3718,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const now = Date.now();
 		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
-		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete' && transferredBytes > 0;
+		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete';
 		if (isDataPhase && task.transferStartedAt === undefined) {
 			task.transferStartedAt = now;
 		}
@@ -3996,7 +3996,8 @@ export class TurboFileEditor extends EditorPane {
 			&& !this.isSameDeviceForNativeOperation(sourceDevice, targetDevice);
 	}
 
-	private formatTransferProgressDetail(phase: ITurboFileTransferProgressEvent['phase'], transferredBytes: number, totalBytes: number): string {
+	private formatTransferProgressDetail(event: ITurboFileTransferProgressEvent, transferredBytes: number, totalBytes: number): string {
+		const phase = event.phase;
 		const phaseLabel = phase === 'relay-download'
 			? '中转下载'
 			: phase === 'relay-upload'
@@ -4008,13 +4009,21 @@ export class TurboFileEditor extends EditorPane {
 						: phase === 'complete'
 							? '传输完成'
 							: '正在传输';
+		const extraParts: string[] = [];
+		if (event.toCheck !== undefined && event.totalChecks !== undefined) {
+			extraParts.push(`to-check ${event.toCheck}/${event.totalChecks}`);
+		}
+		if (event.transferIndex !== undefined) {
+			extraParts.push(`xfr#${event.transferIndex}`);
+		}
+		const extra = extraParts.length > 0 ? ` (${extraParts.join('; ')})` : '';
 		if (totalBytes > 0) {
-			return `${phaseLabel}：${formatSize(transferredBytes)} / ${formatSize(totalBytes)}`;
+			return `${phaseLabel}：${formatSize(transferredBytes)} / ${formatSize(totalBytes)}${extra}`;
 		}
 		if (transferredBytes > 0) {
-			return `${phaseLabel}：${formatSize(transferredBytes)}`;
+			return `${phaseLabel}：${formatSize(transferredBytes)}${extra}`;
 		}
-		return phaseLabel;
+		return extra ? `${phaseLabel} (${extraParts.join('; ')})` : phaseLabel;
 	}
 
 	private finishTask(task: TurboFileTask, status: Exclude<TurboFileTaskStatus, 'running'>, detail: string, options: { bytes?: number; strategy?: string; error?: string; durationMs?: number; averageBytesPerSecond?: number } = {}): void {

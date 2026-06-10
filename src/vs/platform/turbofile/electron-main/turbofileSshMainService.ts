@@ -277,14 +277,17 @@ interface ILocalRsyncTool {
 }
 
 interface IRsyncProgressSnapshot {
-	readonly bytes: number;
+	readonly bytes?: number;
+	readonly toCheck?: number;
+	readonly totalChecks?: number;
+	readonly transferIndex?: number;
 }
 
 type ITransferProgressEventExtra = Partial<Omit<ITurboFileTransferProgressEvent, 'progressId' | 'transferredBytes' | 'totalBytes' | 'phase' | 'detail'>>;
 
 interface IRsyncProgressReporter {
 	readonly handleOutput: (chunk: string) => void;
-	readonly reportProgress: (transferredBytes: number, force?: boolean) => void;
+	readonly reportProgress: (transferredBytes: number, force?: boolean, toCheck?: number, totalChecks?: number, transferIndex?: number) => void;
 	readonly getLastBytes: () => number;
 	readonly getActivityTime: () => number | undefined;
 }
@@ -1409,7 +1412,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const handleRsyncOutput = (chunk: string): void => {
 			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
 			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
-			if (snapshot) {
+			if (snapshot?.bytes !== undefined) {
 				onProgress?.(snapshot.bytes);
 			}
 		};
@@ -1445,7 +1448,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const handleRsyncOutput = (chunk: string): void => {
 			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
 			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
-			if (snapshot) {
+			if (snapshot?.bytes !== undefined) {
 				onProgress?.(snapshot.bytes);
 			}
 		};
@@ -1836,6 +1839,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length,
 				currentName: items[0]?.displayName ?? items[0]?.targetName
 			});
+			this.fireTransferProgress(request, 0, expectedBytes, 'transfer', 'Starting batch rsync direct transfer.', true, {
+				strategy: 'rsync-direct',
+				route,
+				completedItems: 0,
+				totalItems: items.length,
+				currentName: items[0]?.displayName ?? items[0]?.targetName
+			});
 			const rsyncOptions = buildRsyncOptions(true);
 			const rsyncPathOption = route === 'source-push' ? ` ${buildRsyncPathWithMkdirShellOption(request.targetDirectory.path)}` : '';
 			const sourceArgs = route === 'source-push'
@@ -1945,6 +1955,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return undefined;
 			}
 			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch rsync relay transfer.', true, {
+				strategy: 'rsync-relay',
+				completedItems: 0,
+				totalItems: items.length,
+				currentName: items[0]?.displayName ?? items[0]?.targetName
+			});
+			this.fireTransferProgress(request, 0, expectedBytes, 'transfer', 'Starting batch rsync relay transfer.', true, {
 				strategy: 'rsync-relay',
 				completedItems: 0,
 				totalItems: items.length,
@@ -3111,6 +3127,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct rsync transfer.', true, { strategy: 'rsync-direct', route });
+			this.fireTransferProgress(request, 0, bytes, 'transfer', 'Starting direct rsync transfer.', true, { strategy: 'rsync-direct', route });
 
 			const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 			const rsyncOptions = buildRsyncOptions(true);
@@ -3648,7 +3665,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 			const sourceIsDirectory = sourceType === 'directory';
 			let bytes = Math.max(0, request.expectedBytes ?? 0);
-			if (!sourceIsDirectory || bytes === 0) {
+			if (!sourceIsDirectory) {
 				bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => bytes);
 			}
 
@@ -3658,6 +3675,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (!canUseTargetRsync) {
 				return undefined;
 			}
+			this.fireTransferProgress(request, 0, bytes, 'transfer', 'Starting rsync relay transfer.', true, { strategy: 'rsync-relay' });
 
 			const rsyncOptions = [
 				'-a',
@@ -4701,26 +4719,55 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		let lastBytes = 0;
 		void totalBytes;
+		let rsyncProgressBuffer = '';
 		let lastActivityAt: number | undefined;
-		const reportProgress = (transferredBytes: number, force = false): void => {
+		let accepted = false;
+		let lastToCheck: number | undefined;
+		let lastTotalChecks: number | undefined;
+		let lastTransferIndex: number | undefined;
+		const reportProgress = (transferredBytes: number, force = false, toCheck?: number, totalChecks?: number, transferIndex?: number): void => {
+			if (!accepted) {
+				accepted = true;
+				onAcceptedProgress?.();
+			}
 			const normalizedTransferred = Math.max(0, transferredBytes);
-			if (!force && normalizedTransferred <= lastBytes) {
+			const hasMetricChange =
+				(toCheck !== undefined && toCheck !== lastToCheck)
+				|| (totalChecks !== undefined && totalChecks !== lastTotalChecks)
+				|| (transferIndex !== undefined && transferIndex !== lastTransferIndex);
+			if (!force && normalizedTransferred <= lastBytes && !hasMetricChange) {
 				return;
 			}
 			lastBytes = normalizedTransferred;
-			lastActivityAt = Date.now();
-			this.fireTransferProgress(request, normalizedTransferred, 0, phase, detail, force, extra);
-			if (normalizedTransferred > 0) {
-				onAcceptedProgress?.();
+			if (toCheck !== undefined) {
+				lastToCheck = toCheck;
 			}
+			if (totalChecks !== undefined) {
+				lastTotalChecks = totalChecks;
+			}
+			if (transferIndex !== undefined) {
+				lastTransferIndex = transferIndex;
+			}
+			lastActivityAt = Date.now();
+			this.fireTransferProgress(request, normalizedTransferred, 0, phase, detail, force, {
+				...extra,
+				...(toCheck !== undefined ? { toCheck } : {}),
+				...(totalChecks !== undefined ? { totalChecks } : {}),
+				...(transferIndex !== undefined ? { transferIndex } : {})
+			});
 		};
 		return {
 			handleOutput: chunk => {
-				const snapshot = this.parseRsyncProgressSnapshot(chunk);
+				rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
+				const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
 				if (!snapshot) {
+					if (!accepted && onAcceptedProgress) {
+						accepted = true;
+						onAcceptedProgress();
+					}
 					return;
 				}
-				reportProgress(snapshot.bytes);
+				reportProgress(snapshot.bytes ?? lastBytes, false, snapshot.toCheck, snapshot.totalChecks, snapshot.transferIndex);
 			},
 			reportProgress,
 			getLastBytes: () => lastBytes,
@@ -4948,12 +4995,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const previous = this.transferProgressSnapshots.get(progressId);
 		const normalizedTransferred = Math.max(0, transferredBytes);
 		const normalizedTotal = Math.max(0, totalBytes);
-		const isDataProgress = phase !== 'prepare' && phase !== 'complete' && normalizedTransferred > 0;
-		if (isDataProgress && !this.transferFirstPositiveProgressTimes.has(progressId)) {
+		const isDataProgress = phase !== 'prepare' && phase !== 'complete';
+		const wasTransferStarted = this.transferDataStartTimes.has(progressId);
+		if (isDataProgress && !wasTransferStarted) {
+			this.transferDataStartTimes.set(progressId, now);
+		}
+		if (normalizedTransferred > 0 && !this.transferFirstPositiveProgressTimes.has(progressId)) {
 			this.transferFirstPositiveProgressTimes.set(progressId, now);
 		}
 		const isGrowthMonitored = this.transferGrowthMonitoredProgressIds.has(progressId);
-		const isFirstDataProgress = isDataProgress && !isGrowthMonitored && !this.transferDataStartTimes.has(progressId);
+		const isFirstDataProgress = isDataProgress && normalizedTransferred > 0 && !isGrowthMonitored && !wasTransferStarted;
 		if (isFirstDataProgress) {
 			this.markTransferDataStarted(progressId);
 		}
@@ -5733,14 +5784,44 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private parseRsyncProgressSnapshot(chunk: string): IRsyncProgressSnapshot | undefined {
 		let parsed: IRsyncProgressSnapshot | undefined;
 		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9., ]*)\s+([0-9]{1,3})%/g;
+		const toCheckPattern = /to-check=(\d+)\/(\d+)/g;
+		const transferIndexPattern = /xfr#(\d+)/g;
+		let hasParsedMetric = false;
 		let match: RegExpExecArray | null;
 		while ((match = progressPattern.exec(chunk)) !== null) {
 			const bytes = Number(match[1].replace(/[^0-9]/g, ''));
 			if (Number.isFinite(bytes)) {
+				hasParsedMetric = true;
 				parsed = { bytes };
 			}
 		}
-		return parsed;
+		let toCheckMatch: RegExpExecArray | null;
+		while ((toCheckMatch = toCheckPattern.exec(chunk)) !== null) {
+			const toCheck = Number(toCheckMatch[1]);
+			const totalChecks = Number(toCheckMatch[2]);
+			if (Number.isFinite(toCheck) && Number.isFinite(totalChecks)) {
+				hasParsedMetric = true;
+				parsed = parsed ?? { bytes: 0 };
+				parsed = {
+					...parsed,
+					toCheck,
+					totalChecks
+				};
+			}
+		}
+		let transferIndexMatch: RegExpExecArray | null;
+		while ((transferIndexMatch = transferIndexPattern.exec(chunk)) !== null) {
+			const transferIndex = Number(transferIndexMatch[1]);
+			if (Number.isFinite(transferIndex)) {
+				hasParsedMetric = true;
+				parsed = parsed ?? { bytes: 0 };
+				parsed = {
+					...parsed,
+					transferIndex
+				};
+			}
+		}
+		return hasParsedMetric ? parsed : undefined;
 	}
 
 	private async readRemoteDirectoryWithFallback(sftp: ISFTPWrapper, client: ISSHClient, options: ITurboFileSshConnectionOptions, remotePath: string): Promise<IRemoteDirectoryReadResult> {
