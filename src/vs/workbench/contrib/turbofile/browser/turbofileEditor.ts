@@ -4261,7 +4261,7 @@ export class TurboFileEditor extends EditorPane {
 			if (index === state.selectedIndex) {
 				card.classList.add('is-selected');
 			}
-			card.addEventListener('click', event => this.selectImageGridItem(index, event));
+			card.addEventListener('pointerdown', event => this.selectImageGridItemWithPointer(index, event));
 			card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
 			if (image.thumbnailContent) {
 				const thumb = document.createElement('img');
@@ -4319,7 +4319,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const actions = $('.turbofile-image-page-actions');
 		const deleteButton = $('button.turbofile-image-page-action.is-delete.is-danger') as HTMLButtonElement;
-		const selectedCount = this.getImageGridSelectedIndexes(state).length;
+		const selectedCount = this.getImageGridDeleteTargets(state).length;
 		deleteButton.type = 'button';
 		deleteButton.title = selectedCount ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
 		deleteButton.disabled = selectedCount === 0;
@@ -4606,12 +4606,10 @@ export class TurboFileEditor extends EditorPane {
 
 		const name = $('.turbofile-image-page-card-name');
 		name.textContent = image.item.name;
-		name.addEventListener('pointerdown', event => event.stopPropagation());
-		name.addEventListener('click', event => event.stopPropagation());
 		name.addEventListener('dblclick', event => event.stopPropagation());
 		card.appendChild(name);
 
-		card.addEventListener('click', event => this.selectImageGridItem(index, event));
+		card.addEventListener('pointerdown', event => this.selectImageGridItemWithPointer(index, event));
 		card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
 		card.addEventListener('dblclick', event => {
 			event.preventDefault();
@@ -7880,6 +7878,17 @@ export class TurboFileEditor extends EditorPane {
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(index, state.images.length));
 	}
 
+	private selectImageGridItemWithPointer(index: number, event: PointerEvent): void {
+		if (event.button !== 0) {
+			return;
+		}
+		const target = event.currentTarget;
+		if (target instanceof HTMLElement) {
+			target.focus({ preventScroll: true });
+		}
+		this.selectImageGridItem(index, event);
+	}
+
 	private selectImageGridItemWithContextMenu(index: number, event: MouseEvent): void {
 		event.preventDefault();
 		const state = this.imageGridState;
@@ -9258,9 +9267,6 @@ export class TurboFileEditor extends EditorPane {
 		if (selected.length) {
 			return selected;
 		}
-		if (!state.previewVisible) {
-			return [];
-		}
 
 		const image = state.images[state.selectedIndex];
 		return image ? [{ index: state.selectedIndex, image }] : [];
@@ -9283,8 +9289,9 @@ export class TurboFileEditor extends EditorPane {
 
 		const deleteButton = this.container.querySelector<HTMLButtonElement>('.turbofile-image-page-action.is-delete');
 		if (deleteButton) {
-			deleteButton.disabled = selectedIndexes.size === 0;
-			deleteButton.title = selectedIndexes.size ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
+			const deleteTargetCount = this.getImageGridDeleteTargets(state).length;
+			deleteButton.disabled = deleteTargetCount === 0;
+			deleteButton.title = deleteTargetCount ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
 		}
 		const meta = this.container.querySelector<HTMLElement>('.turbofile-task-meta');
 		if (meta && !this.tasks[0]) {
