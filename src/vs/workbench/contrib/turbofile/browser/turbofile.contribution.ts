@@ -239,13 +239,9 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	}
 
 	private updateShellForActiveEditor(): void {
-		// TurboFile pages use the custom shell. Every other editor is a native VS Code document
-		// editor, so restore the normal workbench chrome instead of keeping the TurboFile shell.
-		if (this.getActiveTurboFileEditorInput()) {
-			this.activateTurboFileShell();
-			return;
-		}
-		this.restoreNativeShell();
+		// Always keep the TurboFile shell (custom side nav, hidden activity/status bars) so the
+		// left nav and transfer tab chrome stay identical when a native document editor is active.
+		this.activateTurboFileShell();
 	}
 
 	private activateTurboFileShell(): void {
@@ -262,22 +258,6 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		}
 		this.resizeTurboFileSideBar();
 		this.layoutService.layout();
-	}
-
-	private restoreNativeShell(): void {
-		this.shellMode = 'native';
-		document.body.classList.remove('turbofile-shell');
-		if (!this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
-			this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
-		}
-		if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
-			this.layoutService.setPartHidden(false, Parts.STATUSBAR_PART);
-		}
-		if (this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
-			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
-		}
-		this.layoutService.layout();
-		this.removeNavigation();
 	}
 
 	private async openTurboFilePage(page: TurboFileWorkbenchPage, _hideSideBar: boolean): Promise<void> {
