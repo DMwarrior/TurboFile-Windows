@@ -4253,6 +4253,7 @@ export class TurboFileEditor extends EditorPane {
 				card.classList.add('is-selected');
 			}
 			card.addEventListener('click', event => this.selectImageGridItem(index, event));
+			card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
 			if (image.thumbnailContent) {
 				const thumb = document.createElement('img');
 				thumb.loading = 'lazy';
@@ -4601,7 +4602,8 @@ export class TurboFileEditor extends EditorPane {
 		name.addEventListener('dblclick', event => event.stopPropagation());
 		card.appendChild(name);
 
-		card.addEventListener('click', () => this.selectImageGridItem(index));
+		card.addEventListener('click', event => this.selectImageGridItem(index, event));
+		card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
 		card.addEventListener('dblclick', event => {
 			event.preventDefault();
 			this.openImageGridPreview(index);
@@ -7869,6 +7871,22 @@ export class TurboFileEditor extends EditorPane {
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(index, state.images.length));
 	}
 
+	private selectImageGridItemWithContextMenu(index: number, event: MouseEvent): void {
+		event.preventDefault();
+		const state = this.imageGridState;
+		if (!state || index < 0 || index >= state.images.length) {
+			return;
+		}
+		if (!event.ctrlKey && !event.metaKey && !event.shiftKey && state.selectedIndexes.has(index)) {
+			state.selectedIndex = index;
+			state.selectionAnchorIndex = index;
+			this.updateImageGridSelection();
+			this.updateImageGridSelectionStatus(state);
+			return;
+		}
+		this.selectImageGridItem(index, event);
+	}
+
 	private setSingleImageGridSelection(state: TurboFileImageGridState, index: number): void {
 		state.selectedIndexes.clear();
 		state.selectedIndexes.add(index);
@@ -8208,6 +8226,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const firstDeletedIndex = targets[0].index;
+		const keepPreviewVisible = state.previewVisible;
 		const items = targets.map(({ image }) => image.item);
 		for (const { index, image } of [...targets].sort((a, b) => b.index - a.index)) {
 			this.releaseImageGridImage(image);
@@ -8227,7 +8246,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanY = 0;
 		state.previewFitPending = true;
 		state.previewSamplingMode = 'smooth';
-		state.previewVisible = state.images.length > 0;
+		state.previewVisible = keepPreviewVisible && state.images.length > 0;
 		this.imageGridPreviewRequestSeq++;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
