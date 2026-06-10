@@ -3908,9 +3908,6 @@ export class TurboFileEditor extends EditorPane {
 			if (sourceItem.directory && targetDevice.preferredTransferProtocol !== 'sftp') {
 				return 'rsync-upload';
 			}
-			if ((targetDevice.preferredTransferProtocol === 'rsync' || targetDevice.preferredTransferProtocol === 'auto-fast' || targetDevice.preferredTransferProtocol === undefined) && this.canUseLocalRsyncCommand(targetDevice)) {
-				return 'rsync-upload';
-			}
 			if (targetDevice.preferredTransferProtocol !== 'sftp') {
 				return 'scp-upload';
 			}
@@ -3921,9 +3918,6 @@ export class TurboFileEditor extends EditorPane {
 				return 'tar-download';
 			}
 			if (sourceItem.directory && sourceDevice.preferredTransferProtocol !== 'sftp') {
-				return 'rsync-download';
-			}
-			if ((sourceDevice.preferredTransferProtocol === 'rsync' || sourceDevice.preferredTransferProtocol === 'auto-fast' || sourceDevice.preferredTransferProtocol === undefined) && this.canUseLocalRsyncCommand(sourceDevice)) {
 				return 'rsync-download';
 			}
 			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
@@ -3969,10 +3963,6 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 		return this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItems[0]);
-	}
-
-	private canUseLocalRsyncCommand(device: TurboFileDevice): boolean {
-		return device.capabilities.rsync;
 	}
 
 	private shouldDeferSshToSshStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice): boolean {

@@ -1686,6 +1686,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (!isUpload && !isDownload) {
 			return undefined;
 		}
+		if (items.length <= 1 && items.every(item => item.sourceType !== 'directory')) {
+			return undefined;
+		}
 		const protocol = isUpload ? request.targetDirectory.preferredProtocol : request.source.preferredProtocol;
 		if (protocol === 'sftp' || protocol === 'tar') {
 			return undefined;
@@ -6707,9 +6710,6 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		if (target.preferredProtocol === 'tar') {
 			return 'tar-upload';
 		}
-		if ((target.preferredProtocol === 'rsync' || target.preferredProtocol === 'auto-fast' || target.preferredProtocol === undefined) && canUseLocalRsyncCommand(target.connection)) {
-			return 'rsync-upload';
-		}
 		if (target.preferredProtocol !== 'sftp') {
 			return 'scp-upload';
 		}
@@ -6718,9 +6718,6 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 	if (target.kind === 'local') {
 		if (source.preferredProtocol === 'tar') {
 			return 'tar-download';
-		}
-		if ((source.preferredProtocol === 'rsync' || source.preferredProtocol === 'auto-fast' || source.preferredProtocol === undefined) && canUseLocalRsyncCommand(source.connection)) {
-			return 'rsync-download';
 		}
 		if (source.preferredProtocol !== 'sftp') {
 			return 'scp-download';
@@ -6793,19 +6790,15 @@ function canBatchRsyncPreserveTargetNames(items: readonly ITurboFileBatchTransfe
 
 function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined, connection: ITurboFileSshConnectionOptions | undefined): Array<'scp' | 'rsync'> {
 	if (preferredProtocol === 'auto-fast' || preferredProtocol === undefined) {
-		return connection ? ['rsync', 'scp'] : ['scp'];
+		return ['scp'];
 	}
 	if (preferredProtocol === 'rsync') {
-		return connection ? ['rsync', 'scp'] : ['scp'];
+		return ['scp'];
 	}
 	if (preferredProtocol === 'scp') {
 		return ['scp'];
 	}
 	return preferredProtocol === 'sftp' ? [] : ['scp'];
-}
-
-function canUseLocalRsyncCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
-	return !!connection;
 }
 
 function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
