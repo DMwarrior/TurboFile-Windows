@@ -906,11 +906,14 @@ export class TurboFileEditor extends EditorPane {
 
 		const handleKeydown = (event: KeyboardEvent) => this.handleWorkbenchKeydown(event);
 		this.container.addEventListener('keydown', handleKeydown);
+		const ownerWindow = getWindow(this.container);
+		ownerWindow.addEventListener('keydown', handleKeydown, true);
 		this.renderDisposables.add({ dispose: () => this.container?.removeEventListener('keydown', handleKeydown) });
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('keydown', handleKeydown, true) });
 	}
 
 	private handleWorkbenchKeydown(event: KeyboardEvent): void {
-		if (event.defaultPrevented || event.key !== 'Delete' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
+		if (event.defaultPrevented || (event.key !== 'Delete' && event.code !== 'Delete') || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
 
@@ -929,6 +932,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const target = event.target;
+		if (!this.isKeyboardEventFromTurboFileSurface(target)) {
+			return undefined;
+		}
 		if (this.isEditableKeyboardTarget(target)) {
 			return undefined;
 		}
@@ -956,6 +962,19 @@ export class TurboFileEditor extends EditorPane {
 			return 'right';
 		}
 		return undefined;
+	}
+
+	private isKeyboardEventFromTurboFileSurface(target: EventTarget | null): boolean {
+		if (!this.container) {
+			return false;
+		}
+
+		if (target instanceof Node && this.container.contains(target)) {
+			return true;
+		}
+
+		const ownerDocument = this.container.ownerDocument;
+		return target === ownerDocument.body || target === ownerDocument.documentElement;
 	}
 
 	private getPaneSideFromElement(element: HTMLElement | undefined): 'left' | 'right' | undefined {
