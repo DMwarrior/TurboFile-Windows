@@ -1693,7 +1693,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length
 			}, () => this.markTransferDataStarted(request.progressId));
 
-			this.fireTransferProgress(request, 0, 0, 'prepare', isUpload ? 'Preparing batch rsync upload.' : 'Preparing batch rsync download.', true, {
+			// Fire 'transfer' (not 'prepare') right away: rsync starts immediately and may stay quiet
+			// while scanning its file list, and the last phase label should not read as "preparing".
+			this.fireTransferProgress(request, 0, 0, 'transfer', isUpload ? 'Starting batch rsync upload.' : 'Starting batch rsync download.', true, {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length,

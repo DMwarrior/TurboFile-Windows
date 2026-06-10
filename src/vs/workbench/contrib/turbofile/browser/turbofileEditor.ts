@@ -602,6 +602,7 @@ export class TurboFileEditor extends EditorPane {
 	private syncPreviewState: TurboFileSyncPreviewState | undefined;
 	private dialogState: TurboFileDialogState | undefined;
 	private imageGridObserver: IntersectionObserver | undefined;
+	private liveTransferTicker: number | undefined;
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	private imageGridScrollRaf = 0;
 	private readonly imageGridThumbnailQueue: TurboFileImageGridThumbnailRequest[] = [];
@@ -822,6 +823,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.removeTitlebarThemeToggle();
+		this.clearLiveTransferTicker();
 		this.clearFileListScrollRaf('left');
 		this.clearFileListScrollRaf('right');
 		this.clearFileListRestoreRaf('left');
@@ -3293,7 +3295,7 @@ export class TurboFileEditor extends EditorPane {
 			const isRsyncTransferRunning = runningTransfers.some(task => task.strategy?.startsWith('rsync'));
 			const transferSizeText = liveSummary.totalBytes > 0
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
-				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : '准备传输';
+				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : isRsyncTransferRunning ? '扫描文件中…' : '准备传输';
 			const showElapsedTime = isRsyncTransferRunning || liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
 			const timeText = showElapsedTime ? this.formatElapsed(liveSummary.startedAt) : this.formatRemaining(liveSummary.remainingMs);
 			const timeTitle = showElapsedTime ? '已耗时' : '剩余时间';
@@ -3440,8 +3442,7 @@ export class TurboFileEditor extends EditorPane {
 		if (startedAt === undefined) {
 			return '--';
 		}
-		const elapsedMs = Math.max(0, Date.now() - startedAt);
-		return elapsedMs < 1000 ? '<1 s' : formatDuration(elapsedMs);
+		return formatDuration(Math.max(0, Date.now() - startedAt));
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
@@ -3605,6 +3606,31 @@ export class TurboFileEditor extends EditorPane {
 		this.finishTask(nextTask, 'error', `重试失败：${result.message}`, { error: result.message });
 	}
 
+	private updateLiveTransferTicker(): void {
+		// rsync can stay silent for a while during its file-list scan (no progress events). Keep the
+		// live elapsed time and status ticking with a 1s re-render so the UI never looks frozen in a
+		// "preparing" state while the transfer process is actually running.
+		const hasRunningTransfer = this.tasks.some(task => task.status === 'running' && task.kind === 'transfer');
+		if (hasRunningTransfer && this.liveTransferTicker === undefined && this.container) {
+			this.liveTransferTicker = getWindow(this.container).setInterval(() => {
+				if (!this.tasks.some(task => task.status === 'running' && task.kind === 'transfer')) {
+					this.clearLiveTransferTicker();
+					return;
+				}
+				this.render();
+			}, 1000);
+		} else if (!hasRunningTransfer) {
+			this.clearLiveTransferTicker();
+		}
+	}
+
+	private clearLiveTransferTicker(): void {
+		if (this.liveTransferTicker !== undefined && this.container) {
+			getWindow(this.container).clearInterval(this.liveTransferTicker);
+		}
+		this.liveTransferTicker = undefined;
+	}
+
 	private beginTask(kind: TurboFileTaskKind, label: string, detail: string): TurboFileTask {
 		const task: TurboFileTask = {
 			id: this.taskSequence++,
@@ -3624,6 +3650,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.statusMessage = detail;
 		this.updateInputRunningTaskCount();
+		this.updateLiveTransferTicker();
 		this.render();
 		return task;
 	}
@@ -3992,6 +4019,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.statusMessage = detail;
 		this.updateInputRunningTaskCount();
+		this.updateLiveTransferTicker();
 		this.render();
 	}
 
@@ -11459,10 +11487,7 @@ function trimTrailingSlash(path: string): string {
 }
 
 function formatDuration(milliseconds: number): string {
-	if (milliseconds < 1000) {
-		return `${Math.max(0, Math.round(milliseconds))} ms`;
-	}
-	const seconds = milliseconds / 1000;
+	const seconds = Math.max(0, milliseconds) / 1000;
 	if (seconds < 60) {
 		return `${seconds.toFixed(1)} s`;
 	}
