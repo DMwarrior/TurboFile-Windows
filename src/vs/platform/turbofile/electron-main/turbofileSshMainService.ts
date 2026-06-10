@@ -6,7 +6,7 @@
 import type { ConnectConfig } from 'ssh2';
 import { createReadStream, createWriteStream, promises as fsp } from 'fs';
 import { basename, dirname, join } from 'node:path';
-import { platform, tmpdir } from 'node:os';
+import { networkInterfaces, platform, tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -298,6 +298,13 @@ interface ILocalSshTool {
 	readonly env: NodeJS.ProcessEnv;
 }
 
+interface ILocalWindowsReverseRsyncItem {
+	readonly sourcePath: string;
+	readonly targetPath: string;
+	readonly directory: boolean;
+	readonly name: string;
+}
+
 export class TurboFileSshMainService implements ITurboFileSshService {
 	declare readonly _serviceBrand: undefined;
 
@@ -320,6 +327,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly directSshRoutePending = new Map<string, Promise<readonly TurboFileDirectSshRoute[]>>();
 	private readonly directSshRouteFailureCooldowns = new Map<string, number>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
+	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 
 	onDynamicSshTerminalData(sessionId: string): Event<string> {
@@ -566,6 +574,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						if (tarResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return tarResult;
+						}
+					}
+					if (request.target.preferredProtocol !== 'sftp' && request.target.preferredProtocol !== 'scp') {
+						const reverseRsyncResult = await this.tryLocalToSshReverseParallelRsyncUpload(request, bytes, startedAt);
+						if (reverseRsyncResult?.ok) {
+							this.clearRemoteDirectoryListingCache(request.target);
+							return reverseRsyncResult;
 						}
 					}
 					if (request.target.preferredProtocol !== 'sftp') {
@@ -877,6 +892,178 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			default:
 				return this.tryScpRelayTransfer(request, startedAt);
 		}
+	}
+
+	private async tryLocalToSshReverseParallelRsyncUpload(request: ITurboFileTransferRequest, bytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
+		if (platform() !== 'win32' || request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
+			return undefined;
+		}
+		if (request.target.supportsRsync !== true || looksLikeWindowsPath(request.target.path)) {
+			return undefined;
+		}
+
+		try {
+			const sourceStat = await fsp.stat(request.source.path);
+			if (!sourceStat.isDirectory()) {
+				return undefined;
+			}
+
+			const sourceConnection = await this.resolveLocalWindowsRsyncSourceConnection();
+			if (!sourceConnection) {
+				return undefined;
+			}
+
+			const items = await this.createLocalWindowsReverseRsyncItems(request.source.path, request.target.path);
+			if (items.length < 2) {
+				return undefined;
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'transfer', 'Starting parallel rsync target pull.', true, {
+				strategy: 'rsync-direct-parallel',
+				route: 'target-pull',
+				completedItems: 0,
+				totalItems: items.length,
+				currentName: items[0].name
+			});
+
+			const targetConfigResult = await this.createConnectConfig(request.target.connection);
+			if (!targetConfigResult.ok) {
+				return undefined;
+			}
+
+			const client = await this.connect(targetConfigResult.config);
+			const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+			let stopGrowthTiming: (() => void) | undefined;
+			let lastActivityAt = Date.now();
+			try {
+				const baselineSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => 0);
+				stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, transferredBytes => {
+					lastActivityAt = Date.now();
+					this.fireTransferProgress(request, transferredBytes, bytes, 'rsync-direct', 'Parallel rsync target pull in progress.', false, {
+						strategy: 'rsync-direct-parallel',
+						route: 'target-pull',
+						completedItems: 0,
+						totalItems: items.length
+					});
+				}, 1000);
+
+				const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.target.connection);
+				const sshTransport = buildOptimizedRsyncSshCommand(sourceConnection.port || 22, !!sourceConnection.password, sshBinary);
+				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, items, sshTransport);
+				this.throwIfTransferCanceled(request.progressId);
+				await this.execRemote(client, command, {
+					inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+					inactivityMessage: `Parallel rsync target pull produced no transfer progress for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+					getActivityTime: () => lastActivityAt
+				});
+				this.throwIfTransferCanceled(request.progressId);
+
+				const resultBytes = bytes > 0 ? bytes : await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
+				this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Parallel rsync target pull completed.', true, {
+					strategy: 'rsync-direct-parallel',
+					route: 'target-pull',
+					completedItems: items.length,
+					totalItems: items.length
+				});
+				return this.createTransferResult(true, 'rsync-direct-parallel', resultBytes, 'Parallel rsync target pull completed.', startedAt, request.progressId);
+			} finally {
+				stopGrowthTiming?.();
+				unregisterCancel();
+				client.end();
+			}
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			return undefined;
+		}
+	}
+
+	private async createLocalWindowsReverseRsyncItems(localDirectory: string, remoteTargetDirectory: string): Promise<ILocalWindowsReverseRsyncItem[]> {
+		const rootSourcePath = trimTrailingRemoteSlash(toRsyncLocalPath(localDirectory));
+		const rootEntries = await this.readLocalRsyncSplitEntries(localDirectory);
+		if (!rootEntries.length) {
+			return [];
+		}
+
+		if (rootEntries.length === 1 && rootEntries[0].directory) {
+			const childLocalDirectory = join(localDirectory, rootEntries[0].name);
+			const childEntries = await this.readLocalRsyncSplitEntries(childLocalDirectory).catch(() => []);
+			if (childEntries.length > 1) {
+				return childEntries.map(entry => {
+					const relativePath = `${rootEntries[0].name}/${entry.name}`;
+					return {
+						name: relativePath,
+						directory: entry.directory,
+						sourcePath: joinRemotePath(rootSourcePath, relativePath),
+						targetPath: joinRemotePath(remoteTargetDirectory, relativePath)
+					};
+				});
+			}
+		}
+
+		return rootEntries.map(entry => ({
+			name: entry.name,
+			directory: entry.directory,
+			sourcePath: joinRemotePath(rootSourcePath, entry.name),
+			targetPath: joinRemotePath(remoteTargetDirectory, entry.name)
+		}));
+	}
+
+	private async readLocalRsyncSplitEntries(localDirectory: string): Promise<Array<{ readonly name: string; readonly directory: boolean }>> {
+		const entries = await fsp.readdir(localDirectory, { withFileTypes: true });
+		return entries
+			.filter(entry => entry.isDirectory() || entry.isFile())
+			.map(entry => ({ name: entry.name, directory: entry.isDirectory() }))
+			.sort((a, b) => FILE_ENTRY_NAME_COLLATOR.compare(a.name, b.name));
+	}
+
+	private async resolveLocalWindowsRsyncSourceConnection(): Promise<ITurboFileSshConnectionOptions | undefined> {
+		this.localWindowsRsyncSourceConnectionPromise ??= this.doResolveLocalWindowsRsyncSourceConnection();
+		return this.localWindowsRsyncSourceConnectionPromise;
+	}
+
+	private async doResolveLocalWindowsRsyncSourceConnection(): Promise<ITurboFileSshConnectionOptions | undefined> {
+		const localAddresses = getLocalIpv4Addresses();
+		if (!localAddresses.size) {
+			return undefined;
+		}
+
+		for (const configPath of getLocalWindowsRsyncConfigPaths()) {
+			try {
+				const raw = JSON.parse(await fsp.readFile(configPath, 'utf8')) as unknown;
+				const config = asRecord(raw);
+				const servers = asRecord(config?.servers);
+				if (!servers) {
+					continue;
+				}
+				for (const [id, value] of Object.entries(servers)) {
+					const server = asRecord(value);
+					if (!server || readStringProperty(server, 'os_type') !== 'windows') {
+						continue;
+					}
+					const host = readStringProperty(server, 'host') || id;
+					if (!localAddresses.has(host)) {
+						continue;
+					}
+					const username = readStringProperty(server, 'user');
+					const password = readStringProperty(server, 'password');
+					if (!username || !password) {
+						continue;
+					}
+					return {
+						host,
+						port: readNumberProperty(server, 'port') || 22,
+						username,
+						password
+					};
+				}
+			} catch {
+				// Optional compatibility config; absence simply means this fast route is unavailable.
+			}
+		}
+
+		return undefined;
 	}
 
 	private async tryLocalToSshCommandTransfer(request: ITurboFileTransferRequest, bytes: number, startedAt: number, protocolOrder?: Array<'scp' | 'rsync'>, verifyUploadSize = true): Promise<ITurboFileTransferResult | undefined> {
@@ -7742,6 +7929,75 @@ function buildPosixBatchCommand(sourcePaths: readonly string[], targetDirectory:
 function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string {
 	const sources = sourcePaths.map(path => quotePowerShellLiteral(path)).join(',');
 	return buildPowerShellCommand(withPowerShellDefaults(`$srcs=@(${sources}); foreach ($src in $srcs) { if (Test-Path -LiteralPath $src) { Remove-Item -LiteralPath $src -Force -Recurse } }`));
+}
+
+function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFileSshConnectionOptions, items: readonly ILocalWindowsReverseRsyncItem[], sshTransport: string): string {
+	const rsyncOptions = [...buildLocalRsyncOptionArgs(true), '--iconv=UTF-8,UTF-8'].join(' ');
+	const sshpassPrefix = buildSshpassPrefix(sourceConnection.password);
+	const sourceUserHost = `${sourceConnection.username}@${sourceConnection.host}`;
+	const logPaths = items.map(() => `/tmp/turbofile-rsync-${randomUUID()}.log`);
+	const commands = items.map((item, index) => {
+		const sourcePath = item.directory ? ensureTrailingRemoteSlash(item.sourcePath) : item.sourcePath;
+		const targetPath = item.directory ? ensureTrailingRemoteSlash(item.targetPath) : ensureTrailingRemoteSlash(getRemoteParentPath(item.targetPath));
+		const mkdirPath = item.directory ? item.targetPath : getRemoteParentPath(item.targetPath);
+		const sourceSpec = `${sourceUserHost}:${sourcePath}`;
+		const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(sourceSpec)} ${quotePosixShellArg(targetPath)}`;
+		return `(mkdir -p -- ${quotePosixShellArg(mkdirPath)} && ${rsyncCommand}) > ${quotePosixShellArg(logPaths[index])} 2>&1 & pids="$pids $!"`;
+	});
+	const logArgs = logPaths.map(path => quotePosixShellArg(path)).join(' ');
+	return [
+		'command -v rsync >/dev/null 2>&1',
+		'command -v sshpass >/dev/null 2>&1',
+		'pids=""',
+		...commands,
+		'failed=0',
+		'for pid in $pids; do if ! wait "$pid"; then failed=1; fi; done',
+		`if [ "$failed" -ne 0 ]; then cat ${logArgs} >&2; rm -f -- ${logArgs}; exit 1; fi`,
+		`rm -f -- ${logArgs}`
+	].join('; ');
+}
+
+function getLocalWindowsRsyncConfigPaths(): string[] {
+	const candidates = [
+		process.env.TURBOFILE_LOCAL_WINDOWS_CONFIG,
+		process.env.TURBOFILE_WEB_CONFIG,
+		join(process.cwd(), '..', 'TurboFile-web', 'data', 'config.json'),
+		join(app.getAppPath(), '..', 'TurboFile-web', 'data', 'config.json')
+	].filter((value): value is string => !!value);
+	return Array.from(new Set(candidates));
+}
+
+function getLocalIpv4Addresses(): Set<string> {
+	const addresses = new Set<string>();
+	for (const entries of Object.values(networkInterfaces())) {
+		for (const entry of entries ?? []) {
+			if (entry.family === 'IPv4' && !entry.internal) {
+				addresses.add(entry.address);
+			}
+		}
+	}
+	return addresses;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function readStringProperty(source: Record<string, unknown>, key: string): string | undefined {
+	const value = source[key];
+	return typeof value === 'string' && value ? value : undefined;
+}
+
+function readNumberProperty(source: Record<string, unknown>, key: string): number | undefined {
+	const value = source[key];
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return value;
+	}
+	if (typeof value === 'string' && value.trim()) {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	}
+	return undefined;
 }
 
 function buildRsyncOptions(includeProgress: boolean): string {
