@@ -3322,7 +3322,7 @@ export class TurboFileEditor extends EditorPane {
 			const transferSizeText = liveSummary.totalBytes > 0
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
 				: liveSummary.transferredBytes > 0 || isRsyncTransferRunning ? formatSize(liveSummary.transferredBytes) : '准备传输';
-			const showElapsedTime = isRsyncTransferRunning || liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
+			const showElapsedTime = liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
 			const timeText = showElapsedTime ? this.formatElapsed(liveSummary.startedAt) : this.formatRemaining(liveSummary.remainingMs);
 			const timeTitle = showElapsedTime ? '已耗时' : '剩余时间';
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
@@ -3688,9 +3688,8 @@ export class TurboFileEditor extends EditorPane {
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
-		const hideRsyncTotalWhileRunning = strategy?.startsWith('rsync') && event.phase !== 'complete';
-		const knownTotalBytes = hideRsyncTotalWhileRunning ? 0 : activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
-		const totalBytes = hideRsyncTotalWhileRunning ? 0 : event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
+		const knownTotalBytes = activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
+		const totalBytes = event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))

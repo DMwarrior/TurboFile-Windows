@@ -278,6 +278,7 @@ interface ILocalRsyncTool {
 
 interface IRsyncProgressSnapshot {
 	readonly bytes?: number;
+	readonly percent?: number;
 	readonly toCheck?: number;
 	readonly totalChecks?: number;
 	readonly transferIndex?: number;
@@ -287,7 +288,7 @@ type ITransferProgressEventExtra = Partial<Omit<ITurboFileTransferProgressEvent,
 
 interface IRsyncProgressReporter {
 	readonly handleOutput: (chunk: string) => void;
-	readonly reportProgress: (transferredBytes: number, force?: boolean, toCheck?: number, totalChecks?: number, transferIndex?: number) => void;
+	readonly reportProgress: (transferredBytes: number, force?: boolean, toCheck?: number, totalChecks?: number, transferIndex?: number, percent?: number) => void;
 	readonly getLastBytes: () => number;
 	readonly getActivityTime: () => number | undefined;
 }
@@ -887,9 +888,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, 0, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
-					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' }, () => this.markTransferDataStarted(request.progressId));
-					await this.runLocalRsyncUpload(request, bytes, progress.reportProgress);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
+					const progress = this.createRsyncProgressReporter(request, bytes, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' }, () => this.markTransferDataStarted(request.progressId));
+					await this.runLocalRsyncUpload(request, bytes, progress.handleOutput);
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					await this.verifySshUploadSize(request.target, verifyUploadSize ? bytes : 0, 'Local rsync upload');
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync upload completed.', true, { strategy: 'rsync-upload' });
@@ -924,9 +925,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, 0, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
-					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' }, () => this.markTransferDataStarted(request.progressId));
-					await this.runLocalRsyncDownload(request, bytes, progress.reportProgress);
+					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
+					const progress = this.createRsyncProgressReporter(request, bytes, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' }, () => this.markTransferDataStarted(request.progressId));
+					await this.runLocalRsyncDownload(request, bytes, progress.handleOutput);
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync download completed.', true, { strategy: 'rsync-download' });
 					return this.createTransferResult(true, 'rsync-download', resultBytes, 'Local rsync download completed.', startedAt, request.progressId);
@@ -1413,7 +1414,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
+	private async runLocalRsyncUpload(request: ITurboFileTransferRequest, expectedBytes: number, onProgressOutput?: (chunk: string) => void): Promise<void> {
 		if (request.target.kind !== 'ssh' || !request.target.connection) {
 			throw new Error('Missing SSH target.');
 		}
@@ -1421,16 +1422,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const connection = request.target.connection;
 		const tool = await resolveLocalRsyncTool();
 		const sourceIsDirectory = (await fsp.stat(request.source.path)).isDirectory();
-		// Progress is driven by rsync's own --info=progress2 transferred byte count.
-		// Do not derive a total from the percentage: incremental file-list scans make it unstable.
-		let rsyncProgressBuffer = '';
-		const handleRsyncOutput = (chunk: string): void => {
-			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
-			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
-			if (snapshot?.bytes !== undefined) {
-				onProgress?.(snapshot.bytes);
-			}
-		};
 		const mkdirTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 		const sourcePath = toRsyncLocalPath(request.source.path, tool.pathFlavor);
 		await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
@@ -1443,30 +1434,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				formatRsyncRemoteSpec(connection, request.target.path)
 			], {
 				env,
-				onStdout: handleRsyncOutput,
-				onStderr: handleRsyncOutput,
+				onStdout: onProgressOutput,
+				onStderr: onProgressOutput,
 				inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
 				inactivityMessage: `Local rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
 			}, request.progressId);
 		});
 	}
 
-	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgress?: (transferredBytes: number) => void): Promise<void> {
+	private async runLocalRsyncDownload(request: ITurboFileTransferRequest, expectedBytes: number, onProgressOutput?: (chunk: string) => void): Promise<void> {
 		if (request.source.kind !== 'ssh' || !request.source.connection) {
 			throw new Error('Missing SSH source.');
 		}
 		void expectedBytes;
 		const connection = request.source.connection;
 		const tool = await resolveLocalRsyncTool();
-		// Progress comes from rsync's own --info=progress2 transferred byte count.
-		let rsyncProgressBuffer = '';
-		const handleRsyncOutput = (chunk: string): void => {
-			rsyncProgressBuffer = `${rsyncProgressBuffer}${chunk}`.slice(-2048);
-			const snapshot = this.parseRsyncProgressSnapshot(rsyncProgressBuffer);
-			if (snapshot?.bytes !== undefined) {
-				onProgress?.(snapshot.bytes);
-			}
-		};
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 		const sourceIsDirectory = sourceType === 'directory';
 		if (sourceIsDirectory) {
@@ -1483,8 +1465,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				toRsyncLocalPath(request.target.path, tool.pathFlavor)
 			], {
 				env,
-				onStdout: handleRsyncOutput,
-				onStderr: handleRsyncOutput,
+				onStdout: onProgressOutput,
+				onStderr: onProgressOutput,
 				inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
 				inactivityMessage: `Local rsync download produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
 			}, request.progressId);
@@ -1706,7 +1688,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const connection = isUpload ? request.targetDirectory.connection! : request.source.connection!;
 		try {
 			const tool = await resolveLocalRsyncTool();
-			const progress = this.createRsyncProgressReporter(request, 0, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
+			const progress = this.createRsyncProgressReporter(request, expectedBytes, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length
@@ -1714,7 +1696,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			// Fire 'transfer' (not 'prepare') right away: rsync starts immediately and may stay quiet
 			// while scanning its file list, and the last phase label should not read as "preparing".
-			this.fireTransferProgress(request, 0, 0, 'transfer', isUpload ? 'Starting batch rsync upload.' : 'Starting batch rsync download.', true, {
+			this.fireTransferProgress(request, 0, expectedBytes, 'transfer', isUpload ? 'Starting batch rsync upload.' : 'Starting batch rsync download.', true, {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length,
@@ -4736,19 +4718,28 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		let lastBytes = 0;
-		void totalBytes;
+		let reportedTotalBytes = Math.max(0, totalBytes);
 		let rsyncProgressBuffer = '';
 		let lastActivityAt: number | undefined;
 		let accepted = false;
 		let lastToCheck: number | undefined;
 		let lastTotalChecks: number | undefined;
 		let lastTransferIndex: number | undefined;
-		const reportProgress = (transferredBytes: number, force = false, toCheck?: number, totalChecks?: number, transferIndex?: number): void => {
+		const reportProgress = (transferredBytes: number, force = false, toCheck?: number, totalChecks?: number, transferIndex?: number, percent?: number): void => {
 			if (!accepted) {
 				accepted = true;
 				onAcceptedProgress?.();
 			}
 			const normalizedTransferred = Math.max(0, transferredBytes);
+			if (normalizedTransferred > reportedTotalBytes) {
+				reportedTotalBytes = normalizedTransferred;
+			}
+			if (percent !== undefined && percent > 0 && normalizedTransferred > 0) {
+				const inferredTotalBytes = Math.ceil(normalizedTransferred / Math.min(percent, 100) * 100);
+				if (Number.isFinite(inferredTotalBytes)) {
+					reportedTotalBytes = Math.max(reportedTotalBytes, inferredTotalBytes);
+				}
+			}
 			const hasMetricChange =
 				(toCheck !== undefined && toCheck !== lastToCheck)
 				|| (totalChecks !== undefined && totalChecks !== lastTotalChecks)
@@ -4767,7 +4758,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				lastTransferIndex = transferIndex;
 			}
 			lastActivityAt = Date.now();
-			this.fireTransferProgress(request, normalizedTransferred, 0, phase, detail, force, {
+			this.fireTransferProgress(request, normalizedTransferred, reportedTotalBytes, phase, detail, force, {
 				...extra,
 				...(toCheck !== undefined ? { toCheck } : {}),
 				...(totalChecks !== undefined ? { totalChecks } : {}),
@@ -4785,7 +4776,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}
 					return;
 				}
-				reportProgress(snapshot.bytes ?? lastBytes, false, snapshot.toCheck, snapshot.totalChecks, snapshot.transferIndex);
+				reportProgress(snapshot.bytes ?? lastBytes, false, snapshot.toCheck, snapshot.totalChecks, snapshot.transferIndex, snapshot.percent);
 			},
 			reportProgress,
 			getLastBytes: () => lastBytes,
@@ -5802,15 +5793,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private parseRsyncProgressSnapshot(chunk: string): IRsyncProgressSnapshot | undefined {
 		let parsed: IRsyncProgressSnapshot | undefined;
 		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9., ]*)\s+([0-9]{1,3})%/g;
-		const toCheckPattern = /to-(?:check|chk)=(\d+)\/(\d+)/g;
+		const toCheckPattern = /(?:to-(?:check|chk)|ir-chk)=(\d+)\/(\d+)/g;
 		const transferIndexPattern = /xfr#(\d+)/g;
 		let hasParsedMetric = false;
 		let match: RegExpExecArray | null;
 		while ((match = progressPattern.exec(chunk)) !== null) {
 			const bytes = Number(match[1].replace(/[^0-9]/g, ''));
+			const percent = Number(match[2]);
 			if (Number.isFinite(bytes)) {
 				hasParsedMetric = true;
-				parsed = { bytes };
+				parsed = {
+					bytes,
+					...(Number.isFinite(percent) ? { percent } : {})
+				};
 			}
 		}
 		let toCheckMatch: RegExpExecArray | null;
