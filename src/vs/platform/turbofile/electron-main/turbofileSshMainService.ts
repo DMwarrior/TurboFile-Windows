@@ -571,7 +571,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						const commandOrder = request.target.preferredProtocol === 'tar'
 							? ['scp'] as Array<'scp' | 'rsync'>
 							: ['rsync', 'scp'] as Array<'scp' | 'rsync'>;
-						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt, commandOrder);
+						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt, commandOrder, false);
 						if (commandResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return commandResult;
@@ -606,6 +606,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}, request.progressId);
 				}
 				this.throwIfTransferCanceled(request.progressId);
+				await this.verifySshUploadSize(request.target, stat.isDirectory() ? 0 : bytes, 'SFTP upload');
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'SFTP upload completed.', true, { strategy: 'sftp-upload' });
 				this.clearRemoteDirectoryListingCache(request.target);
 				return this.createTransferResult(true, 'sftp-upload', bytes, 'SFTP upload completed.', startedAt, request.progressId);
@@ -877,7 +878,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async tryLocalToSshCommandTransfer(request: ITurboFileTransferRequest, bytes: number, startedAt: number, protocolOrder?: Array<'scp' | 'rsync'>): Promise<ITurboFileTransferResult | undefined> {
+	private async tryLocalToSshCommandTransfer(request: ITurboFileTransferRequest, bytes: number, startedAt: number, protocolOrder?: Array<'scp' | 'rsync'>, verifyUploadSize = true): Promise<ITurboFileTransferResult | undefined> {
 		if (request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
 			return undefined;
 		}
@@ -890,6 +891,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' }, () => this.markTransferDataStarted(request.progressId));
 					await this.runLocalRsyncUpload(request, bytes, progress.reportProgress);
 					const resultBytes = bytes > 0 ? bytes : progress.getLastBytes();
+					await this.verifySshUploadSize(request.target, verifyUploadSize ? bytes : 0, 'Local rsync upload');
 					this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Local rsync upload completed.', true, { strategy: 'rsync-upload' });
 					return this.createTransferResult(true, 'rsync-upload', resultBytes, 'Local rsync upload completed.', startedAt, request.progressId);
 				}
@@ -897,6 +899,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await this.runLocalScpUpload(request, bytes, transferredBytes => {
 					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Uploading over local SCP.', false, { strategy: 'scp-upload' });
 				});
+				await this.verifySshUploadSize(request.target, verifyUploadSize ? bytes : 0, 'Local SCP upload');
 				this.fireTransferProgress(request, bytes, bytes, 'complete', 'Local SCP upload completed.', true, { strategy: 'scp-upload' });
 				return this.createTransferResult(true, 'scp-upload', bytes, 'Local SCP upload completed.', startedAt, request.progressId);
 			} catch (error) {
@@ -945,6 +948,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		return undefined;
+	}
+
+	private async verifySshUploadSize(target: ITurboFileTransferEndpoint, expectedBytes: number, label: string): Promise<void> {
+		if (target.kind !== 'ssh' || expectedBytes <= 0) {
+			return;
+		}
+		const actualBytes = await this.getRemotePathContentSizeByCommand(target);
+		if (actualBytes === expectedBytes) {
+			return;
+		}
+		await this.deletePath(target, true).catch(() => undefined);
+		throw new Error(`${label} size mismatch: expected ${expectedBytes}, got ${actualBytes}.`);
 	}
 
 	private async tryLocalToSshTarTransfer(request: ITurboFileTransferRequest, expectedBytes: number, startedAt: number): Promise<ITurboFileTransferResult | undefined> {
@@ -5784,7 +5799,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private parseRsyncProgressSnapshot(chunk: string): IRsyncProgressSnapshot | undefined {
 		let parsed: IRsyncProgressSnapshot | undefined;
 		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9., ]*)\s+([0-9]{1,3})%/g;
-		const toCheckPattern = /to-check=(\d+)\/(\d+)/g;
+		const toCheckPattern = /to-(?:check|chk)=(\d+)\/(\d+)/g;
 		const transferIndexPattern = /xfr#(\d+)/g;
 		let hasParsedMetric = false;
 		let match: RegExpExecArray | null;
@@ -6692,7 +6707,7 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		if (target.preferredProtocol === 'tar') {
 			return 'tar-upload';
 		}
-		if (target.preferredProtocol === 'rsync' && canUseLocalRsyncCommand(target.connection)) {
+		if ((target.preferredProtocol === 'rsync' || target.preferredProtocol === 'auto-fast' || target.preferredProtocol === undefined) && canUseLocalRsyncCommand(target.connection)) {
 			return 'rsync-upload';
 		}
 		if (target.preferredProtocol !== 'sftp') {
@@ -6704,7 +6719,7 @@ function getTransferStrategy(source: ITurboFileTransferEndpoint, target: ITurboF
 		if (source.preferredProtocol === 'tar') {
 			return 'tar-download';
 		}
-		if (source.preferredProtocol === 'rsync' && canUseLocalRsyncCommand(source.connection)) {
+		if ((source.preferredProtocol === 'rsync' || source.preferredProtocol === 'auto-fast' || source.preferredProtocol === undefined) && canUseLocalRsyncCommand(source.connection)) {
 			return 'rsync-download';
 		}
 		if (source.preferredProtocol !== 'sftp') {
@@ -6778,7 +6793,7 @@ function canBatchRsyncPreserveTargetNames(items: readonly ITurboFileBatchTransfe
 
 function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined, connection: ITurboFileSshConnectionOptions | undefined): Array<'scp' | 'rsync'> {
 	if (preferredProtocol === 'auto-fast' || preferredProtocol === undefined) {
-		return ['scp'];
+		return connection ? ['rsync', 'scp'] : ['scp'];
 	}
 	if (preferredProtocol === 'rsync') {
 		return connection ? ['rsync', 'scp'] : ['scp'];
@@ -6929,7 +6944,7 @@ function getRemoteDirectoryContentsPath(remotePath: string): string {
 
 function isRecoverableLocalCommandTransferError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error/i.test(message);
+	return /not recognized|ENOENT|No such file|could not create directory|Permission denied|Connection|timed out|failed|lost connection|rsync error|size mismatch/i.test(message);
 }
 
 let localSshToolPromise: Promise<ILocalSshTool> | undefined;

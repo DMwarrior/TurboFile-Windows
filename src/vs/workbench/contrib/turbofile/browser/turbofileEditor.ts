@@ -3923,7 +3923,7 @@ export class TurboFileEditor extends EditorPane {
 			if (sourceItem.directory && targetDevice.preferredTransferProtocol !== 'sftp') {
 				return 'rsync-upload';
 			}
-			if (targetDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(targetDevice)) {
+			if ((targetDevice.preferredTransferProtocol === 'rsync' || targetDevice.preferredTransferProtocol === 'auto-fast' || targetDevice.preferredTransferProtocol === undefined) && this.canUseLocalRsyncCommand(targetDevice)) {
 				return 'rsync-upload';
 			}
 			if (targetDevice.preferredTransferProtocol !== 'sftp') {
@@ -3938,7 +3938,7 @@ export class TurboFileEditor extends EditorPane {
 			if (sourceItem.directory && sourceDevice.preferredTransferProtocol !== 'sftp') {
 				return 'rsync-download';
 			}
-			if (sourceDevice.preferredTransferProtocol === 'rsync' && this.canUseLocalRsyncCommand(sourceDevice)) {
+			if ((sourceDevice.preferredTransferProtocol === 'rsync' || sourceDevice.preferredTransferProtocol === 'auto-fast' || sourceDevice.preferredTransferProtocol === undefined) && this.canUseLocalRsyncCommand(sourceDevice)) {
 				return 'rsync-download';
 			}
 			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
