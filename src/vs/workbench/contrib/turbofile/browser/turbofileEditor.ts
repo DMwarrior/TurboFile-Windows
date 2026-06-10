@@ -146,6 +146,8 @@ interface TurboFileImageGridState {
 	readonly path: string;
 	readonly images: TurboFileImageGridImage[];
 	selectedIndex: number;
+	selectedIndexes: Set<number>;
+	selectionAnchorIndex?: number;
 	columns: TurboFileImageGridColumns;
 	thumbnailScale: number;
 	sortKey: TurboFileImageGridSortKey;
@@ -915,7 +917,15 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private handleWorkbenchKeydown(event: KeyboardEvent): void {
-		if (event.defaultPrevented || (event.key !== 'Delete' && event.code !== 'Delete') || event.ctrlKey || event.metaKey || event.altKey) {
+		if (event.defaultPrevented) {
+			return;
+		}
+
+		if (this.handleImageGridKeyboardShortcut(event)) {
+			return;
+		}
+
+		if ((event.key !== 'Delete' && event.code !== 'Delete') || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
 
@@ -926,6 +936,37 @@ export class TurboFileEditor extends EditorPane {
 
 		event.preventDefault();
 		void this.deleteSelected(side);
+	}
+
+	private handleImageGridKeyboardShortcut(event: KeyboardEvent): boolean {
+		const state = this.imageGridState;
+		if (this.activePage !== 'images' || !state || this.dialogState || this.previewState || this.isDeviceFormVisible || this.isTaskLogVisible) {
+			return false;
+		}
+
+		const target = event.target;
+		if (!this.isKeyboardEventFromTurboFileSurface(target) || this.isEditableKeyboardTarget(target)) {
+			return false;
+		}
+
+		const targetElement = target instanceof HTMLElement ? target : undefined;
+		if (targetElement?.closest('.turbofile-dialog, .turbofile-device-form, .turbofile-image-page-sort.is-open, .turbofile-image-page-scale.is-open')) {
+			return false;
+		}
+
+		if ((event.key === 'Delete' || event.code === 'Delete') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			event.preventDefault();
+			void this.deleteSelectedImageGridItems();
+			return true;
+		}
+
+		if (!state.previewVisible && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'a') {
+			event.preventDefault();
+			this.selectAllImageGridItems();
+			return true;
+		}
+
+		return false;
 	}
 
 	private getDeleteKeyboardTargetSide(event: KeyboardEvent): 'left' | 'right' | undefined {
@@ -4211,7 +4252,7 @@ export class TurboFileEditor extends EditorPane {
 			if (index === state.selectedIndex) {
 				card.classList.add('is-selected');
 			}
-			card.addEventListener('click', () => this.selectImageGridItem(index));
+			card.addEventListener('click', event => this.selectImageGridItem(index, event));
 			if (image.thumbnailContent) {
 				const thumb = document.createElement('img');
 				thumb.loading = 'lazy';
@@ -4267,6 +4308,15 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(headerLeft);
 
 		const actions = $('.turbofile-image-page-actions');
+		const deleteButton = $('button.turbofile-image-page-action.is-delete.is-danger') as HTMLButtonElement;
+		const selectedCount = this.getImageGridSelectedIndexes(state).length;
+		deleteButton.type = 'button';
+		deleteButton.title = selectedCount ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
+		deleteButton.disabled = selectedCount === 0;
+		deleteButton.setAttribute('aria-label', '\u5220\u9664\u9009\u4e2d\u56fe\u7247');
+		deleteButton.appendChild(renderIcon(Codicon.trash));
+		deleteButton.addEventListener('click', () => { void this.deleteSelectedImageGridItems(); });
+		actions.appendChild(deleteButton);
 		actions.appendChild(this.renderImageGridSortControl(state));
 		actions.appendChild(this.renderImageGridScaleControl(state));
 		const closeIcon = $('button.turbofile-image-page-action.is-close') as HTMLButtonElement;
@@ -4287,6 +4337,8 @@ export class TurboFileEditor extends EditorPane {
 		body.addEventListener('scroll', () => this.handleImageGridScroll(body), { passive: true });
 		page.addEventListener('wheel', event => this.handleImageGridWheel(event, body), { passive: false, capture: true });
 		const grid = $('.turbofile-image-page-grid');
+		grid.setAttribute('role', 'listbox');
+		grid.setAttribute('aria-multiselectable', 'true');
 		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
 		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
 		this.renderImageGridSlice(grid, state, range);
@@ -4512,12 +4564,17 @@ export class TurboFileEditor extends EditorPane {
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
 		const card = $('div.turbofile-image-page-card') as HTMLElement;
 		card.tabIndex = 0;
-		card.setAttribute('role', 'button');
+		card.setAttribute('role', 'option');
 		card.title = image.item.name;
 		card.dataset.imageIndex = String(index);
-		if (state.selectedIndex === index) {
+		const isSelected = state.selectedIndexes.has(index);
+		if (isSelected) {
 			card.classList.add('is-selected');
 		}
+		if (state.selectedIndex === index) {
+			card.classList.add('is-focused');
+		}
+		card.setAttribute('aria-selected', isSelected ? 'true' : 'false');
 
 		const preview = $('.turbofile-image-page-card-preview');
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
@@ -4555,7 +4612,7 @@ export class TurboFileEditor extends EditorPane {
 				this.openImageGridPreview(index);
 			} else if (event.key === ' ' || event.key === 'Spacebar') {
 				event.preventDefault();
-				this.selectImageGridItem(index);
+				this.selectImageGridItem(index, event);
 			}
 		});
 		return card;
@@ -7698,7 +7755,20 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		sortImageGridImages(images, this.imageGridSortKey, this.imageGridSortDescending);
-		const selectedIndex = selectedPath ? Math.max(0, images.findIndex(image => image.item.path === selectedPath)) : 0;
+		const selectedPanePaths = new Set(state.selectedPaths);
+		const selectedIndexCandidate = selectedPath
+			? images.findIndex(image => image.item.path === selectedPath)
+			: images.findIndex(image => !!image.item.path && selectedPanePaths.has(image.item.path));
+		const selectedIndex = Math.max(0, selectedIndexCandidate);
+		const selectedIndexes = new Set<number>();
+		for (const [index, image] of images.entries()) {
+			if (image.item.path && (selectedPanePaths.has(image.item.path) || image.item.path === selectedPath)) {
+				selectedIndexes.add(index);
+			}
+		}
+		if (!selectedIndexes.size) {
+			selectedIndexes.add(selectedIndex);
+		}
 		this.previewState = undefined;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
@@ -7707,6 +7777,8 @@ export class TurboFileEditor extends EditorPane {
 			path: state.path,
 			images,
 			selectedIndex,
+			selectedIndexes,
+			selectionAnchorIndex: selectedIndex,
 			columns: 12,
 			thumbnailScale: 1,
 			sortKey: this.imageGridSortKey,
@@ -7769,14 +7841,70 @@ export class TurboFileEditor extends EditorPane {
 		this.clearFileListScrollRaf(side);
 	}
 
-	private selectImageGridItem(index: number): void {
+	private selectImageGridItem(index: number, event?: MouseEvent | KeyboardEvent): void {
 		const state = this.imageGridState;
 		if (!state || index < 0 || index >= state.images.length) {
 			return;
 		}
-		state.selectedIndex = index;
-		this.updateImageGridSelection(index);
+
+		const isToggle = !!event && (event.ctrlKey || event.metaKey);
+		const anchorIndex = state.selectionAnchorIndex;
+		const isRange = !!event?.shiftKey && anchorIndex !== undefined;
+		if (isRange) {
+			this.setImageGridRangeSelection(state, anchorIndex, index);
+		} else if (isToggle) {
+			if (state.selectedIndexes.has(index)) {
+				state.selectedIndexes.delete(index);
+			} else {
+				state.selectedIndexes.add(index);
+			}
+			state.selectedIndex = index;
+			state.selectionAnchorIndex = index;
+		} else {
+			this.setSingleImageGridSelection(state, index);
+		}
+
+		this.updateImageGridSelection();
+		this.updateImageGridSelectionStatus(state);
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(index, state.images.length));
+	}
+
+	private setSingleImageGridSelection(state: TurboFileImageGridState, index: number): void {
+		state.selectedIndexes.clear();
+		state.selectedIndexes.add(index);
+		state.selectedIndex = index;
+		state.selectionAnchorIndex = index;
+	}
+
+	private setImageGridRangeSelection(state: TurboFileImageGridState, anchorIndex: number, index: number): void {
+		state.selectedIndexes.clear();
+		const start = Math.max(0, Math.min(anchorIndex, index));
+		const end = Math.min(state.images.length - 1, Math.max(anchorIndex, index));
+		for (let candidate = start; candidate <= end; candidate++) {
+			state.selectedIndexes.add(candidate);
+		}
+		state.selectedIndex = index;
+	}
+
+	private selectAllImageGridItems(): void {
+		const state = this.imageGridState;
+		if (!state || state.previewVisible) {
+			return;
+		}
+
+		state.selectedIndexes.clear();
+		for (let index = 0; index < state.images.length; index++) {
+			state.selectedIndexes.add(index);
+		}
+		if (state.images.length) {
+			state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.images.length - 1));
+			state.selectionAnchorIndex = state.selectedIndex;
+		} else {
+			state.selectedIndex = 0;
+			state.selectionAnchorIndex = undefined;
+		}
+		this.updateImageGridSelection();
+		this.updateImageGridSelectionStatus(state);
 	}
 
 	private moveImageGridPreview(delta: number): void {
@@ -7812,7 +7940,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!image || (src ? !this.isImagePreviewDecoded(image, src) : !image.previewError)) {
 			return false;
 		}
-		state.selectedIndex = index;
+		this.setSingleImageGridSelection(state, index);
 		state.previewZoom = 1;
 		state.previewPanX = 0;
 		state.previewPanY = 0;
@@ -7831,6 +7959,12 @@ export class TurboFileEditor extends EditorPane {
 		const state = this.imageGridState;
 		if (!state || index < 0 || index >= state.images.length) {
 			return;
+		}
+		if (!state.selectedIndexes.has(index)) {
+			this.setSingleImageGridSelection(state, index);
+		} else {
+			state.selectedIndex = index;
+			state.selectionAnchorIndex = index;
 		}
 		state.selectedIndex = index;
 		state.previewOrigin = 'grid';
@@ -8053,7 +8187,97 @@ export class TurboFileEditor extends EditorPane {
 		this.statusMessage = `已复制图片：${name}`;
 	}
 
+	private async deleteSelectedImageGridItems(): Promise<void> {
+		const state = this.imageGridState;
+		const device = state ? this.getPaneDevice(state.side) : undefined;
+		if (!state || !device) {
+			return;
+		}
+
+		const targets = this.getImageGridDeleteTargets(state).filter(({ image }) => !!image.item.path);
+		if (!targets.length) {
+			this.statusMessage = '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247\u3002';
+			this.render();
+			return;
+		}
+
+		const batch = targets.length > 1;
+		const confirmMessage = batch ? `\u786e\u5b9a\u5220\u9664\u9009\u4e2d\u7684 ${targets.length} \u5f20\u56fe\u7247\u5417\uff1f` : `\u5220\u9664 ${targets[0].image.item.name}\uff1f`;
+		if (!await this.showDialogConfirm('\u5220\u9664\u56fe\u7247', confirmMessage, undefined, true)) {
+			return;
+		}
+
+		const firstDeletedIndex = targets[0].index;
+		const items = targets.map(({ image }) => image.item);
+		for (const { index, image } of [...targets].sort((a, b) => b.index - a.index)) {
+			this.releaseImageGridImage(image);
+			state.images.splice(index, 1);
+		}
+		state.selectedIndexes.clear();
+		if (state.images.length) {
+			state.selectedIndex = Math.max(0, Math.min(firstDeletedIndex, state.images.length - 1));
+			state.selectedIndexes.add(state.selectedIndex);
+			state.selectionAnchorIndex = state.selectedIndex;
+		} else {
+			state.selectedIndex = 0;
+			state.selectionAnchorIndex = undefined;
+		}
+		state.previewZoom = 1;
+		state.previewPanX = 0;
+		state.previewPanY = 0;
+		state.previewFitPending = true;
+		state.previewSamplingMode = 'smooth';
+		state.previewVisible = state.images.length > 0;
+		this.imageGridPreviewRequestSeq++;
+		this.imageGridRenderedRange = undefined;
+		this.clearImageGridThumbnailQueue();
+		this.clearImageGridPreviewPrefetchTimer();
+		this.clearImageGridLoadedImageIndexes();
+		this.imagePreviewAnalysis = undefined;
+		this.clearImagePreviewRender();
+		this.removePaneItemsFromState(state.side, items);
+
+		const task = this.beginTask('delete', batch ? `\u5220\u9664 ${targets.length} \u5f20\u56fe\u7247` : `\u5220\u9664 ${items[0].name}`, device.name);
+		this.render();
+		if (state.previewVisible) {
+			void this.ensureImageGridPreviewLoaded(state, state.selectedIndex, this.imageGridPreviewRequestSeq);
+			this.scheduleImageGridPreviewNeighborsLoaded(state, state.selectedIndex);
+			this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(state.selectedIndex, state.images.length));
+		}
+
+		try {
+			let deleted = 0;
+			const failures: string[] = [];
+			for (const [index, item] of items.entries()) {
+				this.updateTask(task, batch ? `\u6b63\u5728\u5220\u9664 ${index + 1}/${items.length}\uff1a${item.name}` : `\u6b63\u5728\u5220\u9664\uff1a${item.name}`, Math.min(88, 15 + Math.round((index / items.length) * 70)));
+				const result = await this.sshService.deletePath(await this.toTransferEndpoint(device, item.path!), true);
+				if (result.ok) {
+					deleted++;
+				} else {
+					failures.push(`${item.name}: ${result.message}`);
+				}
+			}
+			this.updateTask(task, `\u6b63\u5728\u5237\u65b0\u76ee\u5f55\uff1a${device.name}`, 90);
+			await this.refreshPane(state.side, { force: true });
+			if (failures.length) {
+				this.finishTask(task, 'error', `\u5220\u9664\u5b8c\u6210 ${deleted} \u5f20\uff0c\u5931\u8d25 ${failures.length} \u5f20\u3002`, { error: failures[0] });
+				return;
+			}
+			this.finishTask(task, 'success', batch ? `\u5df2\u5220\u9664\uff1a${deleted} \u5f20\u56fe\u7247` : `\u5df2\u5220\u9664\uff1a${items[0].name}`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', `\u5220\u9664\u5931\u8d25\uff1a${message}`, { error: message });
+			await this.refreshPane(state.side, { force: true });
+		}
+	}
+
 	private async deleteImageGridPreview(): Promise<void> {
+		const imageGridState = this.imageGridState;
+		if (imageGridState) {
+			await this.deleteSelectedImageGridItems();
+			return;
+		}
+
 		const state = this.imageGridState;
 		const image = state?.images[state.selectedIndex];
 		const device = state ? this.getPaneDevice(state.side) : undefined;
@@ -8174,13 +8398,28 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridSortDescending = nextDescending;
 
 		const selectedPath = state.images[state.selectedIndex]?.item.path;
+		const selectedPaths = new Set(this.getImageGridSelectedImages(state)
+			.map(({ image }) => image.item.path)
+			.filter((path): path is string => !!path));
+		const anchorPath = state.selectionAnchorIndex !== undefined ? state.images[state.selectionAnchorIndex]?.item.path : undefined;
 		sortImageGridImages(state.images, key, nextDescending);
+		state.selectedIndexes.clear();
+		for (const [index, image] of state.images.entries()) {
+			if (image.item.path && selectedPaths.has(image.item.path)) {
+				state.selectedIndexes.add(index);
+			}
+		}
 		if (selectedPath) {
 			const nextIndex = state.images.findIndex(image => image.item.path === selectedPath);
 			if (nextIndex >= 0) {
 				state.selectedIndex = nextIndex;
 			}
 		}
+		if (!state.selectedIndexes.size && state.images[state.selectedIndex]) {
+			state.selectedIndexes.add(state.selectedIndex);
+		}
+		const nextAnchorIndex = anchorPath ? state.images.findIndex(image => image.item.path === anchorPath) : -1;
+		state.selectionAnchorIndex = nextAnchorIndex >= 0 ? nextAnchorIndex : state.selectedIndex;
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridLoadedImageIndexes();
@@ -8971,15 +9210,74 @@ export class TurboFileEditor extends EditorPane {
 		this.updateImageGridCard(index);
 	}
 
-	private updateImageGridSelection(index: number): void {
-		if (!this.container) {
+	private getImageGridSelectedIndexes(state: TurboFileImageGridState): number[] {
+		for (const index of Array.from(state.selectedIndexes)) {
+			if (index < 0 || index >= state.images.length) {
+				state.selectedIndexes.delete(index);
+			}
+		}
+		return Array.from(state.selectedIndexes).sort((a, b) => a - b);
+	}
+
+	private getImageGridSelectedImages(state: TurboFileImageGridState): { index: number; image: TurboFileImageGridImage }[] {
+		return this.getImageGridSelectedIndexes(state)
+			.map(index => ({ index, image: state.images[index] }))
+			.filter((entry): entry is { index: number; image: TurboFileImageGridImage } => !!entry.image);
+	}
+
+	private getImageGridDeleteTargets(state: TurboFileImageGridState): { index: number; image: TurboFileImageGridImage }[] {
+		const selected = this.getImageGridSelectedImages(state);
+		if (selected.length) {
+			return selected;
+		}
+		if (!state.previewVisible) {
+			return [];
+		}
+
+		const image = state.images[state.selectedIndex];
+		return image ? [{ index: state.selectedIndex, image }] : [];
+	}
+
+	private updateImageGridSelection(): void {
+		const state = this.imageGridState;
+		if (!this.container || !state) {
 			return;
 		}
-		for (const card of Array.from(this.container.querySelectorAll('.turbofile-image-page-card.is-selected'))) {
-			card.classList.remove('is-selected');
+
+		const selectedIndexes = new Set(this.getImageGridSelectedIndexes(state));
+		for (const card of Array.from(this.container.querySelectorAll<HTMLElement>('.turbofile-image-page-card[data-image-index]'))) {
+			const index = Number(card.dataset.imageIndex);
+			const selected = Number.isFinite(index) && selectedIndexes.has(index);
+			card.classList.toggle('is-selected', selected);
+			card.classList.toggle('is-focused', Number.isFinite(index) && state.selectedIndex === index);
+			card.setAttribute('aria-selected', selected ? 'true' : 'false');
 		}
-		const selected = this.container.querySelector(`.turbofile-image-page-card[data-image-index="${index}"]`);
-		selected?.classList.add('is-selected');
+
+		const deleteButton = this.container.querySelector<HTMLButtonElement>('.turbofile-image-page-action.is-delete');
+		if (deleteButton) {
+			deleteButton.disabled = selectedIndexes.size === 0;
+			deleteButton.title = selectedIndexes.size ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
+		}
+		const meta = this.container.querySelector<HTMLElement>('.turbofile-task-meta');
+		if (meta && !this.tasks[0]) {
+			meta.textContent = this.statusMessage;
+		}
+		this.refreshTaskbar();
+	}
+
+	private updateImageGridSelectionStatus(state: TurboFileImageGridState): void {
+		const selectedCount = this.getImageGridSelectedIndexes(state).length;
+		if (selectedCount > 1) {
+			this.statusMessage = `\u5df2\u9009\u62e9 ${selectedCount} \u5f20\u56fe\u7247\uff0c\u53ef\u6309 Delete \u5220\u9664\u3002`;
+			return;
+		}
+		if (selectedCount === 0) {
+			this.statusMessage = '\u672a\u9009\u62e9\u56fe\u7247\u3002';
+			return;
+		}
+
+		const image = state.images[state.selectedIndex];
+		this.statusMessage = image ? `\u5df2\u9009\u62e9\u56fe\u7247\uff1a${image.item.name}` : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247\u3002';
 	}
 
 	private releaseImageBlobUrl(url: string | undefined): void {
