@@ -5458,7 +5458,7 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 .hc-black .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-light .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card:hover .turbofile-image-page-card-preview img {
-	transform: none;
+	transform: scale(var(--turbofile-image-grid-scale, 1));
 }
 
 .turbofile-image-page-card-info {
