@@ -192,7 +192,6 @@ class TurboFileRouteView extends ViewPane {
 class TurboFileStartupContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.turbofile.startup';
 	private isOpeningTurboFilePage = false;
-	private shellMode: 'turbofile' | 'native' | undefined;
 	private readonly activePagesByInstanceId = new Map<string, TurboFileWorkbenchPage>();
 
 	constructor(
@@ -202,8 +201,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		@IInstantiationService private readonly instantiationService: IInstantiationService
 	) {
 		super();
-		document.body.classList.add('turbofile-shell');
-		this.configureShell();
+		this.activateTurboFileShell();
 		this.renderNavigation();
 		void this.openTurboFilePage('transfer', true);
 
@@ -229,23 +227,12 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		this._register(this.editorService.onDidActiveEditorChange(() => {
 			const activeInput = this.getActiveTurboFileEditorInput();
 			turboFileActivePage = activeInput ? this.activePagesByInstanceId.get(activeInput.instanceId) ?? 'transfer' : 'transfer';
-			this.updateShellForActiveEditor();
+			this.activateTurboFileShell();
 			this.renderNavigation();
 		}));
 	}
 
-	private configureShell(): void {
-		this.activateTurboFileShell();
-	}
-
-	private updateShellForActiveEditor(): void {
-		// Always keep the TurboFile shell (custom side nav, hidden activity/status bars) so the
-		// left nav and transfer tab chrome stay identical when a native document editor is active.
-		this.activateTurboFileShell();
-	}
-
 	private activateTurboFileShell(): void {
-		this.shellMode = 'turbofile';
 		document.body.classList.add('turbofile-shell');
 		if (this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
 			this.layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
@@ -321,9 +308,6 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		}
 
 		this.removeNavigation(sideBar);
-		if (this.shellMode !== 'turbofile') {
-			return;
-		}
 
 		const nav = $('nav.turbofile-page-nav.turbofile-app-nav');
 		nav.setAttribute('aria-label', '极速传 页面导航');
