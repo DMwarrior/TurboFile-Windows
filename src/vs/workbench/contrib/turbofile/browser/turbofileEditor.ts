@@ -3295,7 +3295,7 @@ export class TurboFileEditor extends EditorPane {
 			const isRsyncTransferRunning = runningTransfers.some(task => task.strategy?.startsWith('rsync'));
 			const transferSizeText = liveSummary.totalBytes > 0
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
-				: liveSummary.transferredBytes > 0 ? formatSize(liveSummary.transferredBytes) : isRsyncTransferRunning ? '扫描文件中…' : '准备传输';
+				: liveSummary.transferredBytes > 0 || isRsyncTransferRunning ? formatSize(liveSummary.transferredBytes) : '准备传输';
 			const showElapsedTime = isRsyncTransferRunning || liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
 			const timeText = showElapsedTime ? this.formatElapsed(liveSummary.startedAt) : this.formatRemaining(liveSummary.remainingMs);
 			const timeTitle = showElapsedTime ? '已耗时' : '剩余时间';
@@ -3394,7 +3394,7 @@ export class TurboFileEditor extends EditorPane {
 			startedAt = startedAt === undefined ? candidate : Math.min(startedAt, candidate);
 		};
 		for (const task of tasks) {
-			const taskDataStartedAt = task.transferStartedAt ?? task.startedAt;
+			const taskDataStartedAt = task.transferStartedAt;
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
 				totalBytes += task.totalBytes ?? 0;
@@ -3641,9 +3641,6 @@ export class TurboFileEditor extends EditorPane {
 			startedAt: Date.now(),
 			progress: 35
 		};
-		if (kind === 'transfer') {
-			task.transferStartedAt = task.startedAt;
-		}
 		this.tasks.unshift(task);
 		if (this.tasks.length > 16) {
 			this.tasks.splice(16);
@@ -3694,7 +3691,7 @@ export class TurboFileEditor extends EditorPane {
 			activeItem.totalBytes = totalBytes;
 			activeItem.progress = event.phase === 'complete' ? 100 : progress;
 			activeItem.speedBytesPerSecond = speed;
-			activeItem.remainingMs = speed > 0 && totalBytes > transferredBytes ? ((totalBytes - transferredBytes) / speed) * 1000 : undefined;
+			activeItem.remainingMs = speed > 0 && totalBytes > 0 && totalBytes > transferredBytes ? ((totalBytes - transferredBytes) / speed) * 1000 : undefined;
 			activeItem.strategy = strategy;
 			if (event.phase === 'complete') {
 				activeItem.endedAt = now;
@@ -11487,13 +11484,13 @@ function trimTrailingSlash(path: string): string {
 }
 
 function formatDuration(milliseconds: number): string {
-	const seconds = Math.max(0, milliseconds) / 1000;
+	const seconds = Math.max(0.1, Math.max(0, milliseconds) / 1000);
 	if (seconds < 60) {
-		return `${seconds.toFixed(1)} s`;
+		return `${seconds.toFixed(1)}s`;
 	}
 	const minutes = Math.floor(seconds / 60);
-	const remainingSeconds = Math.round(seconds % 60).toString().padStart(2, '0');
-	return `${minutes}:${remainingSeconds}`;
+	const remainingSeconds = seconds - minutes * 60;
+	return `${minutes}m ${remainingSeconds.toFixed(1)}s`;
 }
 
 function formatThroughput(bytes: number, milliseconds: number): string {

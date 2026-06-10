@@ -1416,7 +1416,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const mkdirTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
 		const sourcePath = toRsyncLocalPath(request.source.path, tool.pathFlavor);
 		await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
-			this.markTransferDataStarted(request.progressId);
 			return this.runCancelableLocalCommand(tool.executable, [
 				...buildLocalRsyncOptionArgs(true),
 				buildRsyncPathWithMkdirOption(mkdirTargetPath),
@@ -1458,7 +1457,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await ensureLocalParentDirectory(request.target.path);
 		}
 		await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
-			this.markTransferDataStarted(request.progressId);
 			return this.runCancelableLocalCommand(tool.executable, [
 				...buildLocalRsyncOptionArgs(true),
 				'-e',
@@ -1705,7 +1703,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (isUpload) {
 				const sourceArgs = items.map(item => toRsyncLocalPath(item.sourcePath, tool.pathFlavor));
 				await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
-					this.markTransferDataStarted(request.progressId);
 					return this.runCancelableLocalCommand(tool.executable, [
 						...buildLocalRsyncOptionArgs(true),
 						buildRsyncPathWithMkdirOption(request.targetDirectory.path),
@@ -1725,7 +1722,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await ensureLocalDirectory(request.targetDirectory.path);
 				const sourceArgs = items.map(item => formatRsyncRemoteSpec(connection, item.sourcePath));
 				await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
-					this.markTransferDataStarted(request.progressId);
 					return this.runCancelableLocalCommand(tool.executable, [
 						...buildLocalRsyncOptionArgs(true),
 						'-e',
@@ -1858,7 +1854,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}, markActivity);
 			this.throwIfTransferCanceled(request.progressId);
 			markActivity();
-			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
 				onStderr: progress.handleOutput,
@@ -1964,7 +1959,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				completedItems: 0,
 				totalItems: items.length
 			});
-			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
 				onStderr: progress.handleOutput,
@@ -3131,7 +3125,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			this.throwIfTransferCanceled(request.progressId);
 			markActivity();
-			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
 				onStderr: progress.handleOutput,
@@ -3684,7 +3677,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} ${buildRsyncPathWithMkdirShellOption(remoteTargetPath)} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
 			const progress = this.createRsyncProgressReporter(request, bytes, 'relay-upload', 'Rsync relay transfer in progress.', { strategy: 'rsync-relay' });
 
-			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, rsyncCommand, {
 				onStdout: progress.handleOutput,
 				onStderr: progress.handleOutput,
