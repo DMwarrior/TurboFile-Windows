@@ -3310,72 +3310,6 @@ body.hc-black .turbofile-live-transfer-panel {
 	gap: 8px;
 }
 
-.turbofile-preview-overlay {
-	position: absolute;
-	inset: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 24px;
-	background: color-mix(in srgb, var(--vscode-editor-background), transparent 15%);
-	z-index: 9;
-}
-
-.turbofile-preview-panel {
-	width: min(980px, 96%);
-	height: min(720px, 90%);
-	min-height: 320px;
-	display: grid;
-	grid-template-rows: 42px minmax(0, 1fr);
-	border: 1px solid var(--vscode-panel-border);
-	border-radius: 6px;
-	background: var(--vscode-editor-background);
-	box-shadow: 0 8px 24px var(--vscode-widget-shadow);
-	overflow: hidden;
-}
-
-.turbofile-preview-header {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	padding: 0 12px;
-	border-bottom: 1px solid var(--vscode-panel-border);
-	background: var(--vscode-sideBar-background);
-}
-
-.turbofile-preview-title {
-	min-width: 0;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-weight: 600;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.turbofile-preview-actions {
-	margin-left: auto;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-
-.turbofile-preview-body {
-	min-height: 0;
-	padding: 12px;
-	overflow: auto;
-	color: var(--vscode-foreground);
-}
-
-.turbofile-preview-image {
-	display: block;
-	max-width: 100%;
-	max-height: 100%;
-	margin: 0 auto;
-	object-fit: contain;
-}
-
 .turbofile-image-page {
 	height: 100%;
 	display: grid;
@@ -4121,21 +4055,6 @@ body.hc-black .turbofile-live-transfer-panel {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-}
-
-.turbofile-preview-textarea {
-	width: 100%;
-	height: 100%;
-	min-height: 0;
-	padding: 10px;
-	resize: none;
-	border: 1px solid var(--vscode-input-border);
-	border-radius: 4px;
-	background: var(--vscode-editor-background);
-	color: var(--vscode-editor-foreground);
-	font-family: var(--vscode-editor-font-family);
-	font-size: var(--vscode-editor-font-size);
-	line-height: 1.5;
 }
 
 .turbofile-sync-overlay {

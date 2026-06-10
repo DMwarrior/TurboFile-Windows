@@ -77,17 +77,6 @@ interface TurboFilePaneState {
 	viewportHeight: number;
 }
 
-interface TurboFilePreviewState {
-	readonly side: 'left' | 'right';
-	readonly item: TurboFileFileItem;
-	readonly mode: 'text' | 'image' | 'binary';
-	content: string;
-	mime: string;
-	loading: boolean;
-	dirty: boolean;
-	error?: string;
-}
-
 interface TurboFileRefreshPaneOptions {
 	readonly force?: boolean;
 	readonly silent?: boolean;
@@ -597,7 +586,6 @@ export class TurboFileEditor extends EditorPane {
 	private container: HTMLElement | undefined;
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
-	private previewState: TurboFilePreviewState | undefined;
 	private imageGridState: TurboFileImageGridState | undefined;
 	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
 	private imageGridSortDescending = false;
@@ -863,9 +851,6 @@ export class TurboFileEditor extends EditorPane {
 		this.registerWorkbenchKeyboardShortcuts();
 		this.ensureTitlebarThemeToggle();
 
-		if (this.previewState) {
-			this.container.appendChild(this.renderPreviewOverlay());
-		}
 		if (this.imageGridState?.previewVisible) {
 			this.container.appendChild(this.renderImagePreviewOverlay());
 		}
@@ -940,7 +925,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private handleImageGridKeyboardShortcut(event: KeyboardEvent): boolean {
 		const state = this.imageGridState;
-		if (this.activePage !== 'images' || !state || this.dialogState || this.previewState || this.isDeviceFormVisible || this.isTaskLogVisible) {
+		if (this.activePage !== 'images' || !state || this.dialogState || this.isDeviceFormVisible || this.isTaskLogVisible) {
 			return false;
 		}
 
@@ -970,7 +955,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getDeleteKeyboardTargetSide(event: KeyboardEvent): 'left' | 'right' | undefined {
-		if (this.activePage !== 'transfer' || this.dialogState || this.previewState || this.imageGridState?.previewVisible || this.isDeviceFormVisible || this.isTaskLogVisible) {
+		if (this.activePage !== 'transfer' || this.dialogState || this.imageGridState?.previewVisible || this.isDeviceFormVisible || this.isTaskLogVisible) {
 			return undefined;
 		}
 
@@ -4131,65 +4116,6 @@ export class TurboFileEditor extends EditorPane {
 			return Codicon.circleSlash;
 		}
 		return Codicon.check;
-	}
-
-	private renderPreviewOverlay(): HTMLElement {
-		const preview = this.previewState;
-		const overlay = $('.turbofile-preview-overlay');
-		const panel = $('.turbofile-preview-panel');
-		if (!preview) {
-			return overlay;
-		}
-
-		const header = $('.turbofile-preview-header');
-		const title = $('.turbofile-preview-title');
-		title.appendChild(renderIcon(preview.mode === 'image' ? Codicon.preview : preview.mode === 'text' ? Codicon.symbolFile : Codicon.fileBinary));
-		title.append(`${preview.item.name}${preview.dirty ? ' *' : ''}`);
-		header.appendChild(title);
-
-		const actions = $('.turbofile-preview-actions');
-		if (preview.mode === 'text' && !preview.loading && !preview.error) {
-			const save = this.createButton('保存', 'turbofile-primary-button');
-			save.element.addEventListener('click', () => this.savePreview());
-			actions.appendChild(save.element);
-		}
-		const close = this.createButton('关闭', 'turbofile-secondary-button');
-		close.element.addEventListener('click', () => {
-			this.previewState = undefined;
-			this.render();
-		});
-		actions.appendChild(close.element);
-		header.appendChild(actions);
-		panel.appendChild(header);
-
-		const body = $('.turbofile-preview-body');
-		if (preview.loading) {
-			body.textContent = '正在加载...';
-		} else if (preview.error) {
-			body.textContent = preview.error;
-		} else if (preview.mode === 'image') {
-			const image = document.createElement('img');
-			image.className = 'turbofile-preview-image';
-			image.src = `data:${preview.mime};base64,${preview.content}`;
-			image.alt = preview.item.name;
-			image.addEventListener('contextmenu', event => this.showPreviewImageContextMenu(event));
-			body.appendChild(image);
-		} else if (preview.mode === 'text') {
-			const textarea = document.createElement('textarea');
-			textarea.className = 'turbofile-preview-textarea';
-			textarea.spellcheck = false;
-			textarea.value = preview.content;
-			textarea.addEventListener('input', () => {
-				preview.content = textarea.value;
-				preview.dirty = true;
-			});
-			body.appendChild(textarea);
-		} else {
-			body.textContent = `该文件类型暂不支持内嵌预览。大小：${preview.item.size || '未知'}`;
-		}
-		panel.appendChild(body);
-		overlay.appendChild(panel);
-		return overlay;
 	}
 
 	private renderLegacyImageGridOverlay(): HTMLElement {
@@ -7703,38 +7629,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.openImageGrid(side, item.path, true, 'file-list');
-		/*
-
-		this.previewState = {
-			side,
-			item,
-			mode: 'image',
-			content: '',
-			mime: getMimeType(item.name),
-			loading: true,
-			dirty: false
-		};
-		this.render();
-
-		const result = await this.sshService.readFile(await this.toTransferEndpoint(device, item.path), {
-			encoding: 'base64',
-			maxBytes: 25 * 1024 * 1024
-		});
-
-		if (this.previewState?.item.path !== item.path) {
-			return;
-		}
-
-		this.previewState = {
-			...this.previewState,
-			content: result.content,
-			mime: result.mime,
-			loading: false,
-			error: result.ok ? undefined : result.message
-		};
-		this.statusMessage = result.ok ? `已打开预览：${item.name}` : `预览失败：${result.message}`;
-		this.render();
-		*/
 	}
 
 	private openImageGrid(side: 'left' | 'right', selectedPath?: string, previewVisible: boolean = false, previewOrigin: 'file-list' | 'grid' = 'grid'): void {
@@ -7778,7 +7672,6 @@ export class TurboFileEditor extends EditorPane {
 		if (!selectedIndexes.size) {
 			selectedIndexes.add(selectedIndex);
 		}
-		this.previewState = undefined;
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.imageGridState = {
@@ -8176,8 +8069,7 @@ export class TurboFileEditor extends EditorPane {
 			const image = gridState.images[gridState.selectedIndex];
 			return !!image && !!this.getImagePreviewSource(image);
 		}
-		const preview = this.previewState;
-		return !!preview && preview.mode === 'image' && !preview.loading && !preview.error && !!preview.content;
+		return false;
 	}
 
 	private async copyPreviewImageToClipboard(): Promise<void> {
@@ -8202,12 +8094,6 @@ export class TurboFileEditor extends EditorPane {
 				await this.writePreviewImageContentToClipboard(result.content, result.mime, image.item.name);
 				return;
 			}
-
-			const preview = this.previewState;
-			if (!preview || preview.mode !== 'image' || preview.loading || preview.error || !preview.content) {
-				return;
-			}
-			await this.writePreviewImageContentToClipboard(preview.content, preview.mime, preview.item.name);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = `复制图片失败：${message}`;
@@ -9361,7 +9247,6 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		this.previewState = undefined;
 		if (this.imageGridState) {
 			this.closeImageGridPage();
 		}
@@ -9390,35 +9275,6 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			reportOpenError(error);
 		}
-	}
-
-	private async savePreview(): Promise<void> {
-		const preview = this.previewState;
-		if (!preview || preview.mode !== 'text' || !preview.item.path) {
-			return;
-		}
-
-		const device = this.getPaneDevice(preview.side);
-		if (!device) {
-			return;
-		}
-
-		const task = this.beginTask('save', `保存 ${preview.item.name}`, device.name);
-		try {
-			const result = await this.sshService.writeFile(await this.toTransferEndpoint(device, preview.item.path), preview.content, 'utf8');
-			if (result.ok) {
-				preview.dirty = false;
-				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				await this.refreshPane(preview.side);
-				this.finishTask(task, 'success', `已保存：${preview.item.name}`, { bytes: preview.content.length });
-			} else {
-				this.finishTask(task, 'error', `保存失败：${result.message}`, { error: result.message });
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.finishTask(task, 'error', `保存失败：${message}`, { error: message });
-		}
-		this.render();
 	}
 
 	private async compressSelected(side: 'left' | 'right'): Promise<void> {
