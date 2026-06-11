@@ -1069,10 +1069,15 @@ export class TurboFileEditor extends EditorPane {
 		const labels = items.length ? items.map(i => i.name) : [item.name];
 		event.dataTransfer.setData('text/plain', labels.join('\n'));
 
+		// Keep the browser drag alive for pane-to-pane drops. If the pointer leaves the window,
+		// dragleave/drag will hand local Windows files to the native drag pipeline.
 		this.tryStartImmediateLocalWindowsDrag(side, event);
 	}
 
 	private tryStartImmediateLocalWindowsDrag(side: 'left' | 'right', event: DragEvent): void {
+		if (!event.altKey) {
+			return;
+		}
 		const device = this.getPaneDevice(side);
 		if (device?.id !== LOCAL_WINDOWS_DEVICE_ID) {
 			return;
@@ -1122,11 +1127,9 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		// Local files are handed to Windows as a real native OS drag during dragstart
-		// (tryStartImmediateLocalWindowsDrag). This dragleave/pointer path is therefore only
-		// reached for remote (SSH) sources, which require a native virtual-file helper that this
-		// build does not ship. We MUST NOT silently stage to a temp cache (the old behavior, which
-		// also surfaced as a tar transfer task); instead show a clear hint on how to transfer.
+		// SSH sources require a native virtual-file helper that this build does not ship. We MUST
+		// NOT silently stage to a temp cache (the old behavior, which also surfaced as a tar
+		// transfer task); instead show a clear hint on how to transfer.
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
 			this.statusMessage = 'SSH 文件暂不支持直接拖到 Windows。请用 Ctrl+C 复制，或把本地面板切到目标目录后传输。';
 			this.render();
@@ -3467,9 +3470,10 @@ export class TurboFileEditor extends EditorPane {
 		};
 		for (const task of tasks) {
 			const taskDataStartedAt = task.transferStartedAt;
+			const isRunningRsyncTask = task.status === 'running' && this.isRsyncStrategy(task.strategy);
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
-				totalBytes += task.totalBytes ?? 0;
+				totalBytes += isRunningRsyncTask ? 0 : task.totalBytes ?? 0;
 				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
 				addStartedAt(taskDataStartedAt);
 				continue;
@@ -3477,7 +3481,7 @@ export class TurboFileEditor extends EditorPane {
 			const items = this.getLiveTransferItems(task);
 			for (const item of items) {
 				transferredBytes += item.transferredBytes;
-				totalBytes += this.getLiveTransferItemTotal(item);
+				totalBytes += this.getLiveTransferItemTotal(item, task);
 				speedBytesPerSecond += item.status === 'running' ? item.speedBytesPerSecond : 0;
 				addStartedAt(item.transferStartedAt ?? taskDataStartedAt);
 			}
@@ -3495,11 +3499,16 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
-	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem): number {
-		if (item.status === 'running' && item.strategy?.startsWith('rsync') && item.totalBytes <= 0) {
+	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem, task?: TurboFileTask): number {
+		const strategy = item.strategy ?? task?.strategy;
+		if ((task?.status === 'running' || item.status === 'running') && this.isRsyncStrategy(strategy)) {
 			return 0;
 		}
 		return Math.max(item.totalBytes, item.rawSize, item.transferredBytes, 0);
+	}
+
+	private isRsyncStrategy(strategy: string | undefined): boolean {
+		return strategy?.startsWith('rsync') ?? false;
 	}
 
 	private formatSpeed(bytesPerSecond: number | undefined): string {
