@@ -630,6 +630,8 @@ export class TurboFileEditor extends EditorPane {
 	private hasAppliedInitialRightPaneDefault = false;
 	private editingDeviceId: string | undefined;
 	private deviceFormMessage = '';
+	private openDeviceSelectSide: 'left' | 'right' | undefined;
+	private pendingRenderAfterDeviceSelectClose = false;
 	private readonly deviceConnectionMessages = new Map<string, { status: 'testing' | 'success' | 'error'; message: string }>();
 	private readonly deviceRuntimeStatuses = new Map<string, TurboFileDeviceRuntimeStatus>();
 	private availableColorThemes: IWorkbenchColorTheme[] = [];
@@ -837,7 +839,12 @@ export class TurboFileEditor extends EditorPane {
 		if (!this.container) {
 			return;
 		}
+		if (this.shouldDeferRenderForOpenDeviceSelect()) {
+			this.pendingRenderAfterDeviceSelectClose = true;
+			return;
+		}
 
+		this.pendingRenderAfterDeviceSelectClose = false;
 		this.renderDisposables.clear();
 		clearNode(this.container);
 		this.ensurePaneDeviceSelection();
@@ -2063,6 +2070,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private showAddDeviceForm(): void {
+		this.closeDeviceSelect(undefined, false);
 		this.activePage = 'devices';
 		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
@@ -2075,6 +2083,7 @@ export class TurboFileEditor extends EditorPane {
 
 
 	private showEditDeviceForm(device: TurboFileDevice): void {
+		this.closeDeviceSelect(undefined, false);
 		this.activePage = 'devices';
 		this.updateTransferTabsVisibility();
 		this.notifyActivePageChanged();
@@ -2086,6 +2095,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private setActivePage(page: TurboFileWorkbenchPage): void {
+		if (page !== this.activePage) {
+			this.closeDeviceSelect(undefined, false);
+		}
 		if (page !== 'images' && this.activePage === 'images') {
 			this.releaseImageGridStateImages(this.imageGridState);
 			this.imageGridState = undefined;
@@ -2508,10 +2520,13 @@ export class TurboFileEditor extends EditorPane {
 		const button = $('button.turbofile-device-select-button') as HTMLButtonElement;
 		const menu = $('.turbofile-device-select-menu');
 		const devices = this.getAllDevices();
+		const isOpen = this.openDeviceSelectSide === side;
+		select.dataset.turbofileSide = side;
+		select.classList.toggle('is-open', isOpen);
 		button.type = 'button';
 		button.title = '选择设备';
 		button.setAttribute('aria-haspopup', 'listbox');
-		button.setAttribute('aria-expanded', 'false');
+		button.setAttribute('aria-expanded', String(isOpen));
 		button.setAttribute('aria-label', `${this.getSideLabel(side)}设备选择`);
 		button.appendChild(this.renderDeviceSelectIcon(currentDevice));
 		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows'));
@@ -2535,28 +2550,26 @@ export class TurboFileEditor extends EditorPane {
 			option.addEventListener('click', event => {
 				event.preventDefault();
 				event.stopPropagation();
+				this.closeDeviceSelect(side, false);
 				this.setPaneDevice(side, device);
 			});
 			menu.appendChild(option);
 		}
 
-		const closeMenu = () => {
-			select.classList.remove('is-open');
-			button.setAttribute('aria-expanded', 'false');
-		};
 		const toggleMenu = (event: MouseEvent | KeyboardEvent) => {
 			event.preventDefault();
 			event.stopPropagation();
-			const nextOpen = !select.classList.contains('is-open');
-			for (const opened of Array.from(this.container?.querySelectorAll('.turbofile-device-select.is-open') ?? [])) {
-				opened.classList.remove('is-open');
-				opened.querySelector('.turbofile-device-select-button')?.setAttribute('aria-expanded', 'false');
-			}
+			const nextOpen = this.openDeviceSelectSide !== side || !select.classList.contains('is-open');
+			this.closeDeviceSelect(undefined, false);
+			this.openDeviceSelectSide = nextOpen ? side : undefined;
 			select.classList.toggle('is-open', nextOpen);
 			button.setAttribute('aria-expanded', String(nextOpen));
 			if (nextOpen) {
+				this.pendingRenderAfterDeviceSelectClose = false;
 				const selected = menu.querySelector<HTMLElement>('.turbofile-device-select-option.is-selected') ?? menu.querySelector<HTMLElement>('.turbofile-device-select-option');
 				selected?.focus();
+			} else {
+				this.flushPendingRenderAfterDeviceSelectClose();
 			}
 		};
 
@@ -2569,20 +2582,20 @@ export class TurboFileEditor extends EditorPane {
 		select.addEventListener('keydown', event => {
 			if (event.key === 'Escape') {
 				event.preventDefault();
-				closeMenu();
+				this.closeDeviceSelect(side);
 				button.focus();
 			}
 		});
 		const window = getWindow(select);
 		const handleWindowClick = (event: MouseEvent) => {
 			if (!select.contains(event.target as Node | null)) {
-				closeMenu();
+				this.closeDeviceSelect(side);
 			}
 		};
 		const handleWindowKeydown = (event: KeyboardEvent) => {
 			if (event.key === 'Escape' && select.classList.contains('is-open')) {
 				event.preventDefault();
-				closeMenu();
+				this.closeDeviceSelect(side);
 				button.focus();
 			}
 		};
@@ -2596,6 +2609,34 @@ export class TurboFileEditor extends EditorPane {
 		return select;
 	}
 
+	private shouldDeferRenderForOpenDeviceSelect(): boolean {
+		if (this.activePage !== 'transfer' || !this.openDeviceSelectSide || !this.container) {
+			return false;
+		}
+		return !!this.container.querySelector(`.turbofile-device-select[data-turbofile-side="${this.openDeviceSelectSide}"].is-open`);
+	}
+
+	private closeDeviceSelect(side?: 'left' | 'right', flushPendingRender = true): void {
+		if (side && this.openDeviceSelectSide !== side) {
+			return;
+		}
+		this.openDeviceSelectSide = undefined;
+		for (const opened of Array.from(this.container?.querySelectorAll('.turbofile-device-select.is-open') ?? [])) {
+			opened.classList.remove('is-open');
+			opened.querySelector('.turbofile-device-select-button')?.setAttribute('aria-expanded', 'false');
+		}
+		if (flushPendingRender) {
+			this.flushPendingRenderAfterDeviceSelectClose();
+		}
+	}
+
+	private flushPendingRenderAfterDeviceSelectClose(): void {
+		if (!this.pendingRenderAfterDeviceSelectClose) {
+			return;
+		}
+		this.pendingRenderAfterDeviceSelectClose = false;
+		this.render();
+	}
 	private renderPanePathbar(side: 'left' | 'right', device: TurboFileDevice | undefined, state: TurboFilePaneState, toolbarAccent: TurboFileIconColor): HTMLElement {
 		const pathbar = $('.turbofile-pathbar');
 		pathbar.classList.add(`turbofile-pathbar-${toolbarAccent}`);
