@@ -80,6 +80,8 @@ export interface ITurboFileDirectoryListing {
 export type TurboFileEndpointKind = 'local' | 'ssh';
 export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync' | 'tar';
 export type TurboFileTransferDependency = 'rsync' | 'sshpass';
+export type TurboFileTransferAttemptProtocol = Exclude<TurboFileTransferProtocol, 'auto-fast'>;
+export type TurboFileTransferAttemptRoute = 'local' | 'direct' | 'relay';
 
 export interface ITurboFileRemoteCapabilities {
 	readonly ssh: boolean;
@@ -140,6 +142,16 @@ export interface ITurboFileBatchTransferRequest {
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
 	readonly clientStartedAt?: number;
+}
+
+export interface ITurboFileTransferAttempt {
+	readonly protocol: TurboFileTransferAttemptProtocol;
+	readonly route: TurboFileTransferAttemptRoute;
+	readonly reason: string;
+}
+
+export interface ITurboFileTransferPlan {
+	readonly attempts: readonly ITurboFileTransferAttempt[];
 }
 
 export interface ITurboFileWindowsDragItem {

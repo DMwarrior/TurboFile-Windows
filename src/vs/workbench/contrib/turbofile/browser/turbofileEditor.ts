@@ -22,7 +22,8 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -3951,68 +3952,90 @@ export class TurboFileEditor extends EditorPane {
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
 			return 'local-copy';
 		}
-		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (targetDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
-				return 'tar-upload';
-			}
-			if (sourceItem.directory && targetDevice.preferredTransferProtocol !== 'sftp') {
-				return 'rsync-upload';
-			}
-			if (targetDevice.preferredTransferProtocol !== 'sftp') {
-				return 'scp-upload';
-			}
-			return 'sftp-upload';
+		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
+			return 'remote-copy';
 		}
-		if (targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (sourceDevice.preferredTransferProtocol === 'tar' && sourceItem.directory) {
-				return 'tar-download';
-			}
-			if (sourceItem.directory && sourceDevice.preferredTransferProtocol !== 'sftp') {
-				return 'rsync-download';
-			}
-			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
-				return 'scp-download';
-			}
-			return 'sftp-download';
+		const sourceEndpoint = this.toPlanningEndpoint(sourceDevice, sourceItem.path ?? '');
+		const targetEndpoint = this.toPlanningEndpoint(targetDevice, '');
+		const plan = resolveTransferPlan({
+			source: sourceEndpoint,
+			target: targetEndpoint,
+			sourceType: sourceItem.type,
+			itemCount: 1
+		});
+		return this.transferAttemptToPlannedStrategy(plan.attempts[0], sourceEndpoint, targetEndpoint);
+	}
+
+	private getPlannedBatchTransferStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): TurboFileTransferStrategy {
+		if (!sourceItems.length) {
+			return 'scp-direct';
+		}
+		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return 'local-copy';
 		}
 		if (this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			return 'remote-copy';
 		}
-		if (!this.isWindowsDevice(sourceDevice) && !this.isWindowsDevice(targetDevice)) {
-			if (sourceDevice.preferredTransferProtocol === 'auto-fast') {
-				return sourceItem.directory && sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync ? 'rsync-direct' : 'scp-direct';
-			}
-			if (sourceDevice.preferredTransferProtocol === 'rsync') {
-				return sourceDevice.capabilities.rsync && targetDevice.capabilities.rsync
-					? sourceItem.directory ? 'rsync-direct-parallel' : 'rsync-direct'
-					: 'rsync-relay';
-			}
-			if (sourceDevice.preferredTransferProtocol === 'tar') {
-				return sourceItem.directory && sourceDevice.capabilities.tar && targetDevice.capabilities.tar ? 'tar-direct' : 'scp-direct';
-			}
-			return sourceDevice.preferredTransferProtocol === 'sftp' ? 'sftp-direct' : 'scp-direct';
-		}
-		return 'sftp-direct';
+		const sourceEndpoint = this.toPlanningEndpoint(sourceDevice, sourceItems[0].path ?? '');
+		const targetEndpoint = this.toPlanningEndpoint(targetDevice, '');
+		const plan = resolveTransferPlan({
+			source: sourceEndpoint,
+			target: targetEndpoint,
+			sourceType: sourceItems.some(item => item.directory) ? 'directory' : sourceItems[0].type,
+			itemCount: sourceItems.length
+		});
+		return this.transferAttemptToPlannedStrategy(plan.attempts[0], sourceEndpoint, targetEndpoint);
 	}
 
-	private getPlannedBatchTransferStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): TurboFileTransferStrategy {
-		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			if (targetDevice.preferredTransferProtocol === 'tar') {
-				return 'tar-upload';
-			}
-			if (targetDevice.preferredTransferProtocol !== 'sftp') {
-				return 'rsync-upload';
+	private toPlanningEndpoint(device: TurboFileDevice, path: string): ITurboFileTransferEndpoint {
+		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return { kind: 'local', path };
+		}
+		return {
+			kind: 'ssh',
+			path,
+			label: device.name,
+			supportsRsync: device.capabilities.rsync,
+			supportsTar: device.capabilities.tar,
+			preferredProtocol: device.preferredTransferProtocol
+		};
+	}
+
+	private transferAttemptToPlannedStrategy(attempt: ITurboFileTransferAttempt | undefined, source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): TurboFileTransferStrategy {
+		if (!attempt) {
+			return 'scp-direct';
+		}
+		if (attempt.route === 'direct') {
+			switch (attempt.protocol) {
+				case 'rsync':
+					return 'rsync-direct';
+				case 'tar':
+					return 'tar-direct';
+				case 'sftp':
+					return 'sftp-direct';
+				case 'scp':
+					return 'scp-direct';
 			}
 		}
-		if (sourceDevice.id !== LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			if (sourceDevice.preferredTransferProtocol === 'tar') {
-				return 'tar-download';
-			}
-			if (sourceDevice.preferredTransferProtocol !== 'sftp') {
-				return 'rsync-download';
+		if (attempt.route === 'relay') {
+			switch (attempt.protocol) {
+				case 'rsync':
+					return 'rsync-relay';
+				case 'tar':
+					return 'tar-relay';
+				case 'sftp':
+					return 'sftp-relay';
+				case 'scp':
+					return 'scp-relay';
 			}
 		}
-		return this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItems[0]);
+		if (source.kind === 'local' && target.kind === 'ssh') {
+			return `${attempt.protocol}-upload` as TurboFileTransferStrategy;
+		}
+		if (source.kind === 'ssh' && target.kind === 'local') {
+			return `${attempt.protocol}-download` as TurboFileTransferStrategy;
+		}
+		return 'local-copy';
 	}
 
 	private shouldDeferSshToSshStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice): boolean {
