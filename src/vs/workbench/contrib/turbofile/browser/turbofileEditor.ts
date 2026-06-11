@@ -3731,8 +3731,9 @@ export class TurboFileEditor extends EditorPane {
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
+		const isRsyncProgress = strategy?.startsWith('rsync') ?? false;
 		const knownTotalBytes = activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
-		const totalBytes = event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
+		const totalBytes = isRsyncProgress ? 0 : event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
@@ -3749,12 +3750,14 @@ export class TurboFileEditor extends EditorPane {
 			? event.speedBytesPerSecond
 			: sampledSpeed;
 		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete';
-		if (isDataPhase && task.transferStartedAt === undefined) {
+		const hasRsyncTransferProgress = transferredBytes > 0 || speed > 0;
+		const shouldStartTransferTiming = isDataPhase && (!isRsyncProgress || hasRsyncTransferProgress);
+		if (shouldStartTransferTiming && task.transferStartedAt === undefined) {
 			task.transferStartedAt = now;
 		}
 		if (activeItem) {
 			activeItem.startedAt ??= task.startedAt;
-			if (isDataPhase && activeItem.transferStartedAt === undefined) {
+			if (shouldStartTransferTiming && activeItem.transferStartedAt === undefined) {
 				activeItem.transferStartedAt = now;
 			}
 			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
