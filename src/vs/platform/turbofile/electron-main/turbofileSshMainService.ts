@@ -938,31 +938,36 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			const client = await this.connect(targetConfigResult.config);
 			const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
-			let stopGrowthTiming: (() => void) | undefined;
 			let lastActivityAt = Date.now();
 			try {
-				stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, transferredBytes => {
+				const progress = this.createParallelRsyncProgressReporter(request, bytes, 'rsync-direct', 'Parallel rsync target pull in progress.', {
+					strategy: 'rsync-direct-parallel',
+					route: 'target-pull',
+					completedItems: 0,
+					totalItems: items.length
+				}, () => {
 					lastActivityAt = Date.now();
-					this.fireTransferProgress(request, transferredBytes, bytes, 'rsync-direct', 'Parallel rsync target pull in progress.', false, {
-						strategy: 'rsync-direct-parallel',
-						route: 'target-pull',
-						completedItems: 0,
-						totalItems: items.length
-					});
-				}, 1000);
+					this.markTransferDataStarted(request.progressId);
+				});
+				const handleProgressOutput = (chunk: string): void => {
+					progress.handleOutput(chunk);
+					lastActivityAt = progress.getActivityTime() ?? lastActivityAt;
+				};
 
 				const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.target.connection);
 				const sshTransport = buildOptimizedRsyncSshCommand(sourceConnection.port || 22, !!sourceConnection.password, sshBinary);
-				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, items, sshTransport, remoteTargetDirectory);
+				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, items, sshTransport, [remoteTargetDirectory]);
 				this.throwIfTransferCanceled(request.progressId);
 				await this.execRemote(client, command, {
+					onStdout: handleProgressOutput,
+					onStderr: handleProgressOutput,
 					inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
 					inactivityMessage: `Parallel rsync target pull produced no transfer progress for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
-					getActivityTime: () => lastActivityAt
+					getActivityTime: () => progress.getActivityTime() ?? lastActivityAt
 				});
 				this.throwIfTransferCanceled(request.progressId);
 
-				const resultBytes = bytes > 0 ? bytes : await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
+				const resultBytes = bytes > 0 ? bytes : progress.getLastBytes() || await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
 				this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Parallel rsync target pull completed.', true, {
 					strategy: 'rsync-direct-parallel',
 					route: 'target-pull',
@@ -971,7 +976,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 				return this.createTransferResult(true, 'rsync-direct-parallel', resultBytes, 'Parallel rsync target pull completed.', startedAt, request.progressId);
 			} finally {
-				stopGrowthTiming?.();
 				unregisterCancel();
 				client.end();
 			}
@@ -1020,6 +1024,133 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			.filter(entry => entry.isDirectory() || entry.isFile())
 			.map(entry => ({ name: entry.name, directory: entry.isDirectory() }))
 			.sort((a, b) => FILE_ENTRY_NAME_COLLATOR.compare(a.name, b.name));
+	}
+
+	private async tryLocalToSshReverseParallelRsyncBatchUpload(request: ITurboFileBatchTransferRequest, batchItems: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', bytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+		if (platform() !== 'win32' || request.source.kind !== 'local' || request.targetDirectory.kind !== 'ssh' || !request.targetDirectory.connection) {
+			return undefined;
+		}
+		if (request.targetDirectory.supportsRsync !== true || looksLikeWindowsPath(request.targetDirectory.path)) {
+			return undefined;
+		}
+		if (request.targetDirectory.preferredProtocol === 'sftp' || request.targetDirectory.preferredProtocol === 'scp' || request.targetDirectory.preferredProtocol === 'tar') {
+			return undefined;
+		}
+		if (!canBatchRsyncPreserveTargetNames(batchItems)) {
+			return undefined;
+		}
+
+		try {
+			const sourceConnection = await this.resolveLocalWindowsRsyncSourceConnection();
+			if (!sourceConnection) {
+				return undefined;
+			}
+
+			const remoteTargetDirectory = trimTrailingRemoteSlash(request.targetDirectory.path);
+			if (!remoteTargetDirectory || remoteTargetDirectory === '/') {
+				return undefined;
+			}
+
+			const cleanupTargets = new Set<string>();
+			const rsyncItems: ILocalWindowsReverseRsyncItem[] = [];
+			let hasDirectory = false;
+			for (const item of batchItems) {
+				const stat = await fsp.stat(item.sourcePath).catch(() => undefined);
+				if (!stat) {
+					return undefined;
+				}
+				const targetPath = joinRemotePath(remoteTargetDirectory, item.targetName);
+				cleanupTargets.add(targetPath);
+				if (stat.isDirectory()) {
+					hasDirectory = true;
+					const splitItems = await this.createLocalWindowsReverseRsyncItems(item.sourcePath, targetPath);
+					if (splitItems.length) {
+						rsyncItems.push(...splitItems);
+					} else {
+						rsyncItems.push({
+							name: item.displayName ?? item.targetName,
+							directory: true,
+							sourcePath: trimTrailingRemoteSlash(toRsyncLocalPath(item.sourcePath)),
+							targetPath
+						});
+					}
+				} else if (stat.isFile()) {
+					rsyncItems.push({
+						name: item.displayName ?? item.targetName,
+						directory: false,
+						sourcePath: trimTrailingRemoteSlash(toRsyncLocalPath(item.sourcePath)),
+						targetPath
+					});
+				}
+			}
+			if (!rsyncItems.length || (!hasDirectory && batchItems.length <= 1)) {
+				return undefined;
+			}
+
+			this.fireTransferProgress(request, 0, bytes, 'transfer', 'Starting parallel rsync target pull.', true, {
+				strategy: 'rsync-direct-parallel',
+				route: 'target-pull',
+				completedItems: 0,
+				totalItems: batchItems.length,
+				currentName: batchItems[0].displayName ?? batchItems[0].targetName
+			});
+
+			const targetConfigResult = await this.createConnectConfig(request.targetDirectory.connection);
+			if (!targetConfigResult.ok) {
+				return undefined;
+			}
+
+			const client = await this.connect(targetConfigResult.config);
+			const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+			let lastActivityAt = Date.now();
+			try {
+				const progress = this.createParallelRsyncProgressReporter(request, bytes, 'rsync-direct', 'Parallel rsync target pull in progress.', {
+					strategy: 'rsync-direct-parallel',
+					route: 'target-pull',
+					completedItems: 0,
+					totalItems: batchItems.length
+				}, () => {
+					lastActivityAt = Date.now();
+					this.markTransferDataStarted(request.progressId);
+				});
+				const handleProgressOutput = (chunk: string): void => {
+					progress.handleOutput(chunk);
+					lastActivityAt = progress.getActivityTime() ?? lastActivityAt;
+				};
+
+				const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.targetDirectory.connection);
+				const sshTransport = buildOptimizedRsyncSshCommand(sourceConnection.port || 22, !!sourceConnection.password, sshBinary);
+				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, rsyncItems, sshTransport, [...cleanupTargets]);
+				this.throwIfTransferCanceled(request.progressId);
+				await this.execRemote(client, command, {
+					onStdout: handleProgressOutput,
+					onStderr: handleProgressOutput,
+					inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
+					inactivityMessage: `Parallel rsync target pull produced no transfer progress for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
+					getActivityTime: () => progress.getActivityTime() ?? lastActivityAt
+				});
+				this.throwIfTransferCanceled(request.progressId);
+
+				const cleanupFailures = operation === 'move' ? await this.deleteBatchSources(request.source, batchItems) : [];
+				const resultBytes = bytes > 0 ? bytes : progress.getLastBytes() || await this.getRemoteBatchTargetContentSize(request.targetDirectory, batchItems.map(item => item.targetName)).catch(() => bytes);
+				this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Parallel rsync target pull completed.', true, {
+					strategy: 'rsync-direct-parallel',
+					route: 'target-pull',
+					completedItems: batchItems.length,
+					totalItems: batchItems.length
+				});
+				this.clearRemoteDirectoryListingCache(request.targetDirectory);
+				return this.createBatchTransferResult(cleanupFailures.length === 0, 'rsync-direct-parallel', resultBytes, cleanupFailures.length ? `Parallel rsync completed, but source cleanup failed for ${cleanupFailures.length} item(s).` : 'Parallel rsync completed.', batchItems.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
+			} finally {
+				unregisterCancel();
+				client.end();
+			}
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			return undefined;
+		}
 	}
 
 	private async resolveLocalWindowsRsyncSourceConnection(): Promise<ITurboFileSshConnectionOptions | undefined> {
@@ -1697,6 +1828,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			if (sameRemote) {
 				return await this.runSameRemoteNativeBatchTransfer(request, items, operation, expectedBytes, startedAt);
+			}
+
+			const reverseRsyncBatch = await this.tryLocalToSshReverseParallelRsyncBatchUpload(request, items, operation, expectedBytes, startedAt);
+			this.throwIfTransferCanceled(request.progressId);
+			if (reverseRsyncBatch?.ok) {
+				return reverseRsyncBatch;
 			}
 
 			const localRsyncBatch = await this.tryLocalBatchRsyncTransfer(request, items, operation, expectedBytes, startedAt);
@@ -4975,6 +5112,71 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 	}
 
+	private createParallelRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
+		const transferredByIndex = new Map<number, number>();
+		const inferredTotalByIndex = new Map<number, number>();
+		let outputBuffer = '';
+		let lastBytes = 0;
+		let lastActivityAt: number | undefined;
+		let accepted = false;
+		let reportedTotalBytes = Math.max(0, totalBytes);
+		const report = (force = false): void => {
+			if (!accepted) {
+				accepted = true;
+				onAcceptedProgress?.();
+			}
+			const transferredBytes = Array.from(transferredByIndex.values()).reduce((sum, value) => sum + value, 0);
+			const inferredTotalBytes = Array.from(inferredTotalByIndex.values()).reduce((sum, value) => sum + value, 0);
+			reportedTotalBytes = Math.max(reportedTotalBytes, inferredTotalBytes, transferredBytes);
+			if (!force && transferredBytes <= lastBytes) {
+				return;
+			}
+			lastBytes = transferredBytes;
+			lastActivityAt = Date.now();
+			this.fireTransferProgress(request, transferredBytes, reportedTotalBytes, phase, detail, force, extra);
+		};
+		const parseLine = (line: string): void => {
+			const tagged = line.match(/^__TURBOFILE_RSYNC_(\d+)__\s*(.*)$/);
+			const index = tagged ? Number(tagged[1]) : 0;
+			const content = tagged ? tagged[2] : line;
+			if (!Number.isFinite(index)) {
+				return;
+			}
+			const snapshot = this.parseRsyncProgressSnapshot(`\n${content}`);
+			if (!snapshot) {
+				if (!accepted) {
+					accepted = true;
+					lastActivityAt = Date.now();
+					onAcceptedProgress?.();
+				}
+				return;
+			}
+			if (snapshot.bytes !== undefined) {
+				transferredByIndex.set(index, Math.max(transferredByIndex.get(index) ?? 0, snapshot.bytes));
+				if (snapshot.percent !== undefined && snapshot.percent > 0) {
+					inferredTotalByIndex.set(index, Math.max(inferredTotalByIndex.get(index) ?? 0, Math.ceil(snapshot.bytes / Math.min(snapshot.percent, 100) * 100)));
+				}
+			}
+			report(false);
+		};
+		return {
+			handleOutput: chunk => {
+				outputBuffer = `${outputBuffer}${chunk}`.slice(-8192);
+				const lines = outputBuffer.split(/\r?\n/);
+				outputBuffer = lines.pop() ?? '';
+				for (const line of lines) {
+					parseLine(line);
+				}
+			},
+			reportProgress: transferredBytes => {
+				transferredByIndex.set(0, Math.max(transferredByIndex.get(0) ?? 0, transferredBytes));
+				report(true);
+			},
+			getLastBytes: () => lastBytes,
+			getActivityTime: () => lastActivityAt
+		};
+	}
+
 	private beginTransferGrowthTiming(progressId: string | undefined, probeSize: () => Promise<number>, baselineSize = 0, expectedBytes = 0, onProgress?: (transferredBytes: number) => void, pollIntervalMs = TRANSFER_PROGRESS_EVENT_INTERVAL_MS, initialDelayMs = 0): () => void {
 		if (!progressId) {
 			return () => undefined;
@@ -7935,33 +8137,33 @@ function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string 
 	return buildPowerShellCommand(withPowerShellDefaults(`$srcs=@(${sources}); foreach ($src in $srcs) { if (Test-Path -LiteralPath $src) { Remove-Item -LiteralPath $src -Force -Recurse } }`));
 }
 
-function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFileSshConnectionOptions, items: readonly ILocalWindowsReverseRsyncItem[], sshTransport: string, targetDirectory: string): string {
+function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFileSshConnectionOptions, items: readonly ILocalWindowsReverseRsyncItem[], sshTransport: string, cleanupTargets: readonly string[]): string {
 	const rsyncOptions = [...buildLocalRsyncOptionArgs(true), '--iconv=UTF-8,UTF-8'].join(' ');
 	const sshpassPrefix = buildSshpassPrefix(sourceConnection.password);
 	const sourceUserHost = `${sourceConnection.username}@${sourceConnection.host}`;
-	const targetDirectoryArg = quotePosixShellArg(targetDirectory);
-	const logPaths = items.map(() => `/tmp/turbofile-rsync-${randomUUID()}.log`);
 	const commands = items.map((item, index) => {
 		const sourcePath = item.directory ? ensureTrailingRemoteSlash(item.sourcePath) : item.sourcePath;
 		const targetPath = item.directory ? ensureTrailingRemoteSlash(item.targetPath) : ensureTrailingRemoteSlash(getRemoteParentPath(item.targetPath));
 		const mkdirPath = item.directory ? item.targetPath : getRemoteParentPath(item.targetPath);
 		const sourceSpec = `${sourceUserHost}:${sourcePath}`;
 		const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(sourceSpec)} ${quotePosixShellArg(targetPath)}`;
-		return `(mkdir -p -- ${quotePosixShellArg(mkdirPath)} && ${rsyncCommand}) > ${quotePosixShellArg(logPaths[index])} 2>&1 & pids="$pids $!"`;
+		const progressTag = quotePosixShellArg(`__TURBOFILE_RSYNC_${index}__ `);
+		const progressFilter = `tr '\\r' '\\n' | awk -v tag=${progressTag} ${quotePosixShellArg('$0 ~ /%/ { now=systime(); if (now != last || $0 ~ /100%/) { print tag $0; fflush(); last=now } }')}`;
+		return `(mkdir -p -- ${quotePosixShellArg(mkdirPath)} && ${rsyncCommand} 2>&1 | ${progressFilter}) & pids="$pids $!"`;
 	});
-	const logArgs = logPaths.map(path => quotePosixShellArg(path)).join(' ');
-	return [
+	const cleanupTargetArgs = Array.from(new Set(cleanupTargets.map(target => trimTrailingRemoteSlash(target)).filter(target => target && target !== '/'))).map(target => quotePosixShellArg(target)).join(' ');
+	const script = [
+		'set -o pipefail',
 		'command -v rsync >/dev/null 2>&1',
 		'command -v sshpass >/dev/null 2>&1',
-		`if ! rm -rf -- ${targetDirectoryArg}; then exit 1; fi`,
-		`if ! mkdir -p -- ${targetDirectoryArg}; then exit 1; fi`,
+		cleanupTargetArgs ? `rm -rf -- ${cleanupTargetArgs}` : undefined,
 		'pids=""',
 		...commands,
 		'failed=0',
 		'for pid in $pids; do if ! wait "$pid"; then failed=1; fi; done',
-		`if [ "$failed" -ne 0 ]; then cat ${logArgs} >&2; rm -f -- ${logArgs}; exit 1; fi`,
-		`rm -f -- ${logArgs}`
-	].join('; ');
+		'if [ "$failed" -ne 0 ]; then exit 1; fi'
+	].filter((command): command is string => !!command);
+	return `bash -lc ${quotePosixShellArg(script.join('; '))}`;
 }
 
 function getLocalWindowsRsyncConfigPaths(): string[] {
