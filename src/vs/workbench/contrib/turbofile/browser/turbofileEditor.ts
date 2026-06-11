@@ -3744,7 +3744,10 @@ export class TurboFileEditor extends EditorPane {
 			detail = `${detail} · ${completedItems}/${event.totalItems}${currentName}`;
 		}
 		const now = Date.now();
-		const speed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
+		const sampledSpeed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
+		const speed = event.speedBytesPerSecond !== undefined && event.speedBytesPerSecond >= 0 && Number.isFinite(event.speedBytesPerSecond)
+			? event.speedBytesPerSecond
+			: sampledSpeed;
 		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete';
 		if (isDataPhase && task.transferStartedAt === undefined) {
 			task.transferStartedAt = now;
