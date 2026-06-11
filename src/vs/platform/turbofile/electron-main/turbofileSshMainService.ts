@@ -913,7 +913,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return undefined;
 			}
 
-			const items = await this.createLocalWindowsReverseRsyncItems(request.source.path, request.target.path);
+			const remoteTargetDirectory = trimTrailingRemoteSlash(request.target.path);
+			if (!remoteTargetDirectory || remoteTargetDirectory === '/') {
+				return undefined;
+			}
+
+			const items = await this.createLocalWindowsReverseRsyncItems(request.source.path, remoteTargetDirectory);
 			if (items.length < 2) {
 				return undefined;
 			}
@@ -936,8 +941,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			let stopGrowthTiming: (() => void) | undefined;
 			let lastActivityAt = Date.now();
 			try {
-				const baselineSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => 0);
-				stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, baselineSize, bytes, transferredBytes => {
+				stopGrowthTiming = this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, transferredBytes => {
 					lastActivityAt = Date.now();
 					this.fireTransferProgress(request, transferredBytes, bytes, 'rsync-direct', 'Parallel rsync target pull in progress.', false, {
 						strategy: 'rsync-direct-parallel',
@@ -949,7 +953,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 				const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.target.connection);
 				const sshTransport = buildOptimizedRsyncSshCommand(sourceConnection.port || 22, !!sourceConnection.password, sshBinary);
-				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, items, sshTransport);
+				const command = buildLocalWindowsReverseParallelRsyncCommand(sourceConnection, items, sshTransport, remoteTargetDirectory);
 				this.throwIfTransferCanceled(request.progressId);
 				await this.execRemote(client, command, {
 					inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
@@ -7931,10 +7935,11 @@ function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string 
 	return buildPowerShellCommand(withPowerShellDefaults(`$srcs=@(${sources}); foreach ($src in $srcs) { if (Test-Path -LiteralPath $src) { Remove-Item -LiteralPath $src -Force -Recurse } }`));
 }
 
-function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFileSshConnectionOptions, items: readonly ILocalWindowsReverseRsyncItem[], sshTransport: string): string {
+function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFileSshConnectionOptions, items: readonly ILocalWindowsReverseRsyncItem[], sshTransport: string, targetDirectory: string): string {
 	const rsyncOptions = [...buildLocalRsyncOptionArgs(true), '--iconv=UTF-8,UTF-8'].join(' ');
 	const sshpassPrefix = buildSshpassPrefix(sourceConnection.password);
 	const sourceUserHost = `${sourceConnection.username}@${sourceConnection.host}`;
+	const targetDirectoryArg = quotePosixShellArg(targetDirectory);
 	const logPaths = items.map(() => `/tmp/turbofile-rsync-${randomUUID()}.log`);
 	const commands = items.map((item, index) => {
 		const sourcePath = item.directory ? ensureTrailingRemoteSlash(item.sourcePath) : item.sourcePath;
@@ -7948,6 +7953,8 @@ function buildLocalWindowsReverseParallelRsyncCommand(sourceConnection: ITurboFi
 	return [
 		'command -v rsync >/dev/null 2>&1',
 		'command -v sshpass >/dev/null 2>&1',
+		`if ! rm -rf -- ${targetDirectoryArg}; then exit 1; fi`,
+		`if ! mkdir -p -- ${targetDirectoryArg}; then exit 1; fi`,
 		'pids=""',
 		...commands,
 		'failed=0',
