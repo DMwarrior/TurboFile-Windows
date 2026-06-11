@@ -40,6 +40,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext, IUntypedFileEditorInput } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { ITextEditorService } from '../../../services/textfile/common/textEditorService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { ICreateTerminalOptions, ITerminalGroupService, ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { BasePty } from '../../terminal/common/basePty.js';
@@ -671,6 +672,7 @@ export class TurboFileEditor extends EditorPane {
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IEditorService private readonly editorService: IEditorService,
+		@ITextEditorService private readonly textEditorService: ITextEditorService,
 		@ITerminalService private readonly terminalService: ITerminalService,
 		@ITerminalGroupService private readonly terminalGroupService: ITerminalGroupService,
 		@ITerminalProfileService private readonly terminalProfileService: ITerminalProfileService,
@@ -9251,16 +9253,15 @@ export class TurboFileEditor extends EditorPane {
 				: this.ensureRemoteFileSystemProvider().registerFile(device, this.getSshConnectionOptions(device), item);
 			const editorInput: IUntypedFileEditorInput = {
 				resource,
-				forceFile: true,
-				options: {
-					pinned: true,
-					revealIfOpened: true,
-					override: DEFAULT_EDITOR_ASSOCIATION.id,
-					index: this.getDocumentEditorTargetIndex()
-				}
+				forceFile: true
 			};
-
-			await this.editorService.openEditor(editorInput);
+			const fileEditor = await this.textEditorService.resolveTextEditor(editorInput);
+			await this.editorService.openEditor(fileEditor, {
+				pinned: true,
+				revealIfOpened: true,
+				override: DEFAULT_EDITOR_ASSOCIATION.id,
+				index: this.getDocumentEditorTargetIndex()
+			});
 		} catch (error) {
 			reportOpenError(error);
 		}
@@ -11363,7 +11364,7 @@ function toProviderFileType(type: TurboFileFileType): FileType {
 		return FileType.File;
 	}
 	if (type === 'symlink') {
-		return FileType.SymbolicLink;
+		return FileType.File | FileType.SymbolicLink;
 	}
 	return FileType.Unknown;
 }
