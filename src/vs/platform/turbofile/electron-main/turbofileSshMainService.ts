@@ -228,6 +228,15 @@ interface ITransferProgressSnapshot {
 	lastBytes: number;
 }
 
+interface IRsyncTimingState {
+	clientStartedAt?: number;
+	serviceStartedAt: number;
+	lastMarkAt: number;
+	firstProgressEventSeen: boolean;
+	visibleTransferEventSeen: boolean;
+	firstPositiveBytesSeen: boolean;
+}
+
 interface IRemoteExecOptions {
 	readonly onStdout?: (chunk: string) => void;
 	readonly onStderr?: (chunk: string) => void;
@@ -318,6 +327,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly transferDataStartTimes = new Map<string, number>();
 	private readonly transferFirstPositiveProgressTimes = new Map<string, number>();
 	private readonly transferGrowthMonitoredProgressIds = new Set<string>();
+	private readonly rsyncTimingStates = new Map<string, IRsyncTimingState>();
 	private readonly transferCancellationRequests = new Set<string>();
 	private readonly transferCancelHandlers = new Map<string, Set<() => void>>();
 	private readonly directorySftpSessions = new Map<string, Promise<IRemoteDirectorySftpSession>>();
@@ -5022,9 +5032,54 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.transferDataStartTimes.delete(progressId);
 		this.transferFirstPositiveProgressTimes.delete(progressId);
 		this.transferGrowthMonitoredProgressIds.delete(progressId);
+		this.rsyncTimingStates.delete(progressId);
 	}
 
-	private createRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
+	private getRsyncTimingState(request: { readonly progressId?: string; readonly clientStartedAt?: number }): IRsyncTimingState | undefined {
+		const progressId = request.progressId;
+		if (!progressId) {
+			return undefined;
+		}
+		const existing = this.rsyncTimingStates.get(progressId);
+		if (existing) {
+			return existing;
+		}
+		const now = Date.now();
+		const state: IRsyncTimingState = {
+			clientStartedAt: request.clientStartedAt,
+			serviceStartedAt: now,
+			lastMarkAt: request.clientStartedAt ?? now,
+			firstProgressEventSeen: false,
+			visibleTransferEventSeen: false,
+			firstPositiveBytesSeen: false
+		};
+		this.rsyncTimingStates.set(progressId, state);
+		return state;
+	}
+
+	private markRsyncTiming(request: { readonly progressId?: string; readonly clientStartedAt?: number }, state: IRsyncTimingState, stage: string, extra: Record<string, unknown> = {}): void {
+		const progressId = request.progressId;
+		if (!progressId) {
+			return;
+		}
+		const now = Date.now();
+		const payload = {
+			time: new Date(now).toISOString(),
+			progressId,
+			stage,
+			sinceClientMs: state.clientStartedAt !== undefined ? now - state.clientStartedAt : undefined,
+			sinceServiceMs: now - state.serviceStartedAt,
+			sincePreviousMs: now - state.lastMarkAt,
+			...extra
+		};
+		state.lastMarkAt = now;
+		const logPath = join(app.getPath('userData'), 'logs', 'turbofile-rsync-timing.log');
+		void fsp.mkdir(dirname(logPath), { recursive: true })
+			.then(() => fsp.appendFile(logPath, `${JSON.stringify(payload)}\n`, 'utf8'))
+			.catch(() => undefined);
+	}
+
+	private createRsyncProgressReporter(request: { readonly progressId?: string; readonly clientStartedAt?: number }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		void totalBytes;
 		let lastBytes = 0;
 		let rsyncProgressBuffer = '';
@@ -5089,7 +5144,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 	}
 
-	private createParallelRsyncProgressReporter(request: { readonly progressId?: string }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
+	private createParallelRsyncProgressReporter(request: { readonly progressId?: string; readonly clientStartedAt?: number }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
 		void totalBytes;
 		const transferredByIndex = new Map<number, number>();
 		const speedByIndex = new Map<number, number>();
@@ -5373,7 +5428,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private fireTransferProgress(request: { readonly progressId?: string }, transferredBytes: number, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, force = false, extra: Partial<Omit<ITurboFileTransferProgressEvent, 'progressId' | 'transferredBytes' | 'totalBytes' | 'phase' | 'detail'>> = {}): void {
+	private fireTransferProgress(request: { readonly progressId?: string; readonly clientStartedAt?: number }, transferredBytes: number, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, force = false, extra: Partial<Omit<ITurboFileTransferProgressEvent, 'progressId' | 'transferredBytes' | 'totalBytes' | 'phase' | 'detail'>> = {}): void {
 		const progressId = request.progressId;
 		if (!progressId) {
 			return;
@@ -5391,6 +5446,49 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			: 0;
 		const hasPositiveTransferProgress = normalizedTransferred > 0 || speedBytesPerSecond > 0;
 		const shouldStartDataTiming = isDataProgress && (!isRsyncProgress || hasPositiveTransferProgress);
+		const rsyncTimingState = isRsyncProgress ? this.getRsyncTimingState(request) : undefined;
+		if (rsyncTimingState && !rsyncTimingState.firstProgressEventSeen) {
+			rsyncTimingState.firstProgressEventSeen = true;
+			this.markRsyncTiming(request, rsyncTimingState, 'first-progress-event', {
+				strategy,
+				phase,
+				detail,
+				transferredBytes: normalizedTransferred,
+				totalBytes: normalizedTotal
+			});
+		}
+		if (rsyncTimingState && isDataProgress && !rsyncTimingState.visibleTransferEventSeen) {
+			rsyncTimingState.visibleTransferEventSeen = true;
+			this.markRsyncTiming(request, rsyncTimingState, 'visible-transfer-event', {
+				strategy,
+				phase,
+				detail,
+				transferredBytes: normalizedTransferred,
+				totalBytes: normalizedTotal
+			});
+		}
+		if (rsyncTimingState && hasPositiveTransferProgress && !rsyncTimingState.firstPositiveBytesSeen) {
+			rsyncTimingState.firstPositiveBytesSeen = true;
+			this.markRsyncTiming(request, rsyncTimingState, 'first-positive-bytes', {
+				strategy,
+				phase,
+				detail,
+				transferredBytes: normalizedTransferred,
+				totalBytes: normalizedTotal,
+				speedBytesPerSecond
+			});
+		}
+		if (rsyncTimingState && phase === 'complete') {
+			this.markRsyncTiming(request, rsyncTimingState, 'complete', {
+				strategy,
+				phase,
+				detail,
+				transferredBytes: normalizedTransferred,
+				totalBytes: normalizedTotal,
+				speedBytesPerSecond
+			});
+			this.rsyncTimingStates.delete(progressId);
+		}
 		const wasTransferStarted = this.transferDataStartTimes.has(progressId);
 		if (shouldStartDataTiming && !wasTransferStarted) {
 			this.transferDataStartTimes.set(progressId, now);
@@ -5443,6 +5541,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferDataStartTimes.delete(progressId);
 			this.transferFirstPositiveProgressTimes.delete(progressId);
 			this.transferGrowthMonitoredProgressIds.delete(progressId);
+			this.rsyncTimingStates.delete(progressId);
 			const emitter = this.transferProgressEmitters.get(progressId);
 			if (emitter) {
 				this.transferProgressEmitters.delete(progressId);

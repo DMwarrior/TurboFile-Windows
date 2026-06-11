@@ -1245,6 +1245,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const initiatedAt = Date.now();
 		const targetSide = this.getTransferDropTargetSide(event);
 		event.preventDefault();
 		event.stopPropagation();
@@ -1252,7 +1253,7 @@ export class TurboFileEditor extends EditorPane {
 		const sourceSide = this.getTurboFileDragSourceSide(event);
 		if (sourceSide) {
 			if (sourceSide !== targetSide) {
-				void this.transferSelected(sourceSide, targetSide);
+				void this.transferSelected(sourceSide, targetSide, initiatedAt);
 			}
 			this.clearCurrentFileDragState();
 			return;
@@ -1260,7 +1261,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const externalPaths = this.extractExternalDropPaths(event);
 		if (externalPaths.length) {
-			void this.transferExternalPaths(targetSide, externalPaths, 'copy');
+			void this.transferExternalPaths(targetSide, externalPaths, 'copy', initiatedAt);
 		}
 		this.clearCurrentFileDragState();
 	}
@@ -2491,17 +2492,18 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 		});
 		list.addEventListener('drop', event => {
+			const initiatedAt = Date.now();
 			event.preventDefault();
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== side) {
-				void this.transferSelected(sourceSide, side);
+				void this.transferSelected(sourceSide, side, initiatedAt);
 				return;
 			}
 
 			const externalPaths = this.extractExternalDropPaths(event);
 			if (externalPaths.length) {
-				void this.transferExternalPaths(side, externalPaths, 'copy');
+				void this.transferExternalPaths(side, externalPaths, 'copy', initiatedAt);
 			}
 		});
 		list.addEventListener('contextmenu', event => this.showPaneContextMenu(side, event));
@@ -6501,7 +6503,7 @@ export class TurboFileEditor extends EditorPane {
 		return paths;
 	}
 
-	private async transferExternalPaths(targetSide: 'left' | 'right', sourcePaths: readonly string[], operation: 'copy' | 'move' = 'copy'): Promise<boolean> {
+	private async transferExternalPaths(targetSide: 'left' | 'right', sourcePaths: readonly string[], operation: 'copy' | 'move' = 'copy', initiatedAt?: number): Promise<boolean> {
 		this.taskbarHiddenForTerminal = false;
 		const targetDevice = this.getPaneDevice(targetSide);
 		if (!targetDevice) {
@@ -6518,7 +6520,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (sourceItems.length > 1) {
-			const transferred = await this.transferItemsBatch(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceItems, operation);
+			const transferred = await this.transferItemsBatch(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceItems, operation, initiatedAt);
 			if (operation === 'move') {
 				await this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean));
 			}
@@ -6582,7 +6584,8 @@ export class TurboFileEditor extends EditorPane {
 				refreshTarget: false,
 				task,
 				sourceDeviceOverride: this.localWindowsDevice,
-				targetDeviceOverride: targetDevice
+				targetDeviceOverride: targetDevice,
+				initiatedAt
 			});
 			if (result.ok) {
 				completed++;
@@ -7097,7 +7100,7 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
-	private async transferSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): Promise<boolean> {
+	private async transferSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', initiatedAt?: number): Promise<boolean> {
 		this.taskbarHiddenForTerminal = false;
 		const sourceDevice = this.getPaneDevice(sourceSide);
 		const targetDevice = this.getPaneDevice(targetSide);
@@ -7110,7 +7113,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (sourceItems.length > 1) {
-			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, 'copy');
+			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, 'copy', initiatedAt);
 		}
 
 		const batch = sourceItems.length > 1;
@@ -7154,7 +7157,7 @@ export class TurboFileEditor extends EditorPane {
 				skipDirectorySize: !!sourceItem.directory
 			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
-			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task });
+			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task, initiatedAt });
 			if (result.ok) {
 				completed++;
 				totalBytes += result.bytes;
@@ -7203,7 +7206,7 @@ export class TurboFileEditor extends EditorPane {
 		return true;
 	}
 
-	private async transferItem(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItem: TurboFileFileItem, options: { refreshTarget: boolean; task?: TurboFileTask; targetPath?: string; sourceDeviceOverride?: TurboFileDevice; targetDeviceOverride?: TurboFileDevice }): Promise<TurboFileTransferExecutionResult> {
+	private async transferItem(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItem: TurboFileFileItem, options: { refreshTarget: boolean; task?: TurboFileTask; targetPath?: string; sourceDeviceOverride?: TurboFileDevice; targetDeviceOverride?: TurboFileDevice; initiatedAt?: number }): Promise<TurboFileTransferExecutionResult> {
 		const targetState = this.paneStates[targetSide];
 		const sourceDevice = options.sourceDeviceOverride ?? this.getPaneDevice(sourceSide);
 		const targetDevice = options.targetDeviceOverride ?? this.getPaneDevice(targetSide);
@@ -7247,7 +7250,8 @@ export class TurboFileEditor extends EditorPane {
 				sourceType: sourceItem.type,
 				overwrite: true,
 				progressId,
-				expectedBytes
+				expectedBytes,
+				clientStartedAt: options.initiatedAt ?? options.task?.startedAt
 			});
 
 			if (result.ok) {
@@ -7273,7 +7277,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move'): Promise<boolean> {
+	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move', initiatedAt?: number): Promise<boolean> {
 		const items = sourceItems.filter(item => !!item.path && !item.parent);
 		if (!items.length) {
 			return false;
@@ -7318,7 +7322,8 @@ export class TurboFileEditor extends EditorPane {
 				operation,
 				progressId,
 				expectedBytes,
-				strategyHint: 'auto'
+				strategyHint: 'auto',
+				clientStartedAt: initiatedAt ?? task.startedAt
 			});
 
 			const failedPaths = new Set(result.failures.map(failure => failure.path));

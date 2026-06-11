@@ -120,6 +120,7 @@ export interface ITurboFileTransferRequest {
 	readonly progressId?: string;
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+	readonly clientStartedAt?: number;
 }
 
 export interface ITurboFileBatchTransferItem {
@@ -138,6 +139,7 @@ export interface ITurboFileBatchTransferRequest {
 	readonly progressId?: string;
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+	readonly clientStartedAt?: number;
 }
 
 export interface ITurboFileWindowsDragItem {
