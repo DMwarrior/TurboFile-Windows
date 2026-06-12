@@ -64,13 +64,10 @@ function createLocalSshAttempts(protocol: TurboFileTransferProtocol, shape: Tran
 		default:
 			return shape === 'single-file'
 				? [
-					attempt('scp', 'local', `${reasonPrefix}: auto-fast single file uses the frozen SCP fast path.`),
-					attempt('sftp', 'local', `${reasonPrefix}: auto-fast single file falls back to SFTP.`)
+					attempt('scp', 'local', `${reasonPrefix}: auto-fast single file uses the frozen SCP fast path.`)
 				]
 				: [
-					attempt('rsync', 'local', `${reasonPrefix}: auto-fast multi item or directory starts with rsync.`),
-					attempt('scp', 'local', `${reasonPrefix}: auto-fast falls back to item SCP.`),
-					attempt('sftp', 'local', `${reasonPrefix}: auto-fast falls back to item SFTP.`)
+					attempt('tar', 'local', `${reasonPrefix}: auto-fast multi item or directory uses tar.`)
 				];
 	}
 }
@@ -83,14 +80,12 @@ function createSshSshAttempts(source: ITurboFileTransferEndpoint, target: ITurbo
 	if (shape === 'single-file') {
 		return [
 			attempt('scp', 'direct', 'SSH to SSH auto-fast single file starts with direct SCP.'),
-			attempt('rsync', 'direct', 'SSH to SSH auto-fast single file can try direct rsync after SCP.'),
 			attempt('scp', 'relay', 'SSH to SSH auto-fast single file falls back to SCP relay.')
 		];
 	}
 	return [
-		attempt('rsync', 'direct', 'SSH to SSH auto-fast multi item or directory starts with direct rsync.'),
-		attempt('tar', 'direct', 'SSH to SSH auto-fast can try direct tar after rsync.'),
-		attempt('rsync', 'relay', 'SSH to SSH auto-fast falls back to rsync relay.')
+		attempt('tar', 'direct', 'SSH to SSH auto-fast multi item or directory starts with direct tar.'),
+		attempt('tar', 'relay', 'SSH to SSH auto-fast falls back to tar relay.')
 	];
 }
 

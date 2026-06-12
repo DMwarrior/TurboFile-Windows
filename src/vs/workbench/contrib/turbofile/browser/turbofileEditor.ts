@@ -53,6 +53,7 @@ import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboF
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
+import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 
 interface TurboFileFileItem {
 	readonly name: string;
@@ -381,8 +382,8 @@ const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
-const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 300;
-const RSYNC_PROGRESS_RENDER_INTERVAL_MS = 800;
+const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
+const RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS;
 const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = 350;
 const TRANSFER_SPEED_SAMPLE_MAX_COUNT = 8;
 const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
@@ -1438,11 +1439,10 @@ export class TurboFileEditor extends EditorPane {
 	private getDeviceTransferProtocolLabel(device: TurboFileDevice): string {
 		switch (device.preferredTransferProtocol) {
 			case 'auto-fast':
-				return device.capabilities.tar || device.capabilities.rsync ? '智能极速（按场景自动）' : '智能极速（自动兜底）';
+			case 'tar':
+				return device.capabilities.tar ? '智能极速（固定策略）' : '智能极速（tar 未检测到）';
 			case 'rsync':
 				return device.capabilities.rsync ? 'rsync 增量（可用）' : 'rsync 增量（未通过检测）';
-			case 'tar':
-				return device.capabilities.tar ? 'tar 目录传输（可用）' : 'tar 目录传输（将自动兜底）';
 			case 'scp':
 				return device.capabilities.scp ? 'SCP 文件（可用）' : 'SCP 文件（未通过检测）';
 			case 'sftp':
@@ -2225,11 +2225,11 @@ export class TurboFileEditor extends EditorPane {
 
 	private getProtocolCheckResult(protocol: TurboFileTransferProtocol, capabilities: ITurboFileRemoteCapabilities): TurboFileProtocolCheckResult | undefined {
 		if (protocol === 'auto-fast') {
-			if ((capabilities.tar || capabilities.rsync) && capabilities.scp) {
-				return { status: 'success', message: '智能极速可用：文件夹/多文件优先 rsync，单文件优先 SCP；失败时自动兜底。', capabilities, missingDependencies: [] };
+			if (capabilities.tar && capabilities.scp) {
+				return { status: 'success', message: '智能极速可用：单文件固定使用 SCP，多文件和文件夹固定使用 tar。', capabilities, missingDependencies: [] };
 			}
-			if (capabilities.scp || capabilities.sftp) {
-				return { status: 'success', message: '未检测到完整 rsync/tar/scp 能力，将自动使用可用协议兜底。', capabilities, missingDependencies: [] };
+			if (capabilities.scp) {
+				return { status: 'error', message: '智能极速需要 tar 支持：单文件可用 SCP，多文件和文件夹需要 tar。', capabilities, missingDependencies: [] };
 			}
 			return { status: 'error', message: '未检测到可用传输能力，请检查 SSH/SFTP/SCP。', capabilities, missingDependencies: [] };
 		}
@@ -2244,10 +2244,7 @@ export class TurboFileEditor extends EditorPane {
 			return { status: 'error', message: `缺少 ${missingDependencies.join('、')}，rsync 增量不可用。`, capabilities, missingDependencies };
 		}
 		if (protocol === 'tar') {
-			if (capabilities.tar || capabilities.archive) {
-				return { status: 'success', message: 'tar 目录传输可用；tar 失败时会自动兜底。', capabilities, missingDependencies: [] };
-			}
-			return { status: 'success', message: 'tar 未检测到，将自动使用 rsync/SCP/SFTP 兜底。', capabilities, missingDependencies: [] };
+			return this.getProtocolCheckResult('auto-fast', capabilities);
 		}
 		if (protocol === 'scp') {
 			return capabilities.scp
@@ -3470,12 +3467,18 @@ export class TurboFileEditor extends EditorPane {
 		};
 		for (const task of tasks) {
 			const taskDataStartedAt = task.transferStartedAt;
+			const taskVisibleStartedAt = getVisibleTransferStartedAt({
+				status: task.status,
+				strategy: task.strategy,
+				startedAt: task.startedAt,
+				transferStartedAt: task.transferStartedAt
+			});
 			const isRunningRsyncTask = task.status === 'running' && this.isRsyncStrategy(task.strategy);
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
 				totalBytes += isRunningRsyncTask ? 0 : task.totalBytes ?? 0;
 				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
-				addStartedAt(taskDataStartedAt);
+				addStartedAt(taskVisibleStartedAt);
 				continue;
 			}
 			const items = this.getLiveTransferItems(task);
@@ -3483,7 +3486,12 @@ export class TurboFileEditor extends EditorPane {
 				transferredBytes += item.transferredBytes;
 				totalBytes += this.getLiveTransferItemTotal(item, task);
 				speedBytesPerSecond += item.status === 'running' ? item.speedBytesPerSecond : 0;
-				addStartedAt(item.transferStartedAt ?? taskDataStartedAt);
+				addStartedAt(getVisibleTransferStartedAt({
+					status: item.status,
+					strategy: item.strategy ?? task.strategy,
+					startedAt: item.startedAt ?? task.startedAt,
+					transferStartedAt: item.transferStartedAt ?? taskDataStartedAt
+				}));
 			}
 		}
 		const remainingBytes = Math.max(0, totalBytes - transferredBytes);
@@ -3508,7 +3516,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private isRsyncStrategy(strategy: string | undefined): boolean {
-		return strategy?.startsWith('rsync') ?? false;
+		return isTurboFileRsyncStrategy(strategy);
 	}
 
 	private formatSpeed(bytesPerSecond: number | undefined): string {
@@ -3688,21 +3696,33 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateLiveTransferTicker(): void {
-		// rsync can stay silent for a while during its file-list scan (no progress events). Keep the
-		// live elapsed time and status ticking with a 1s re-render so the UI never looks frozen in a
-		// "preparing" state while the transfer process is actually running.
-		const hasRunningTransfer = this.tasks.some(task => task.status === 'running' && task.kind === 'transfer');
-		if (hasRunningTransfer && this.liveTransferTicker === undefined && this.container) {
+		// During rsync startup the process can be quiet while ssh connects and rsync builds its
+		// file list. Tick only for that startup window; once data progress arrives, progress events
+		// drive rendering so the status bar does not jump on two different clocks.
+		const needsStartupTicker = this.tasks.some(task => this.needsLiveTransferStartupTicker(task));
+		if (needsStartupTicker && this.liveTransferTicker === undefined && this.container) {
 			this.liveTransferTicker = getWindow(this.container).setInterval(() => {
-				if (!this.tasks.some(task => task.status === 'running' && task.kind === 'transfer')) {
+				if (!this.tasks.some(task => this.needsLiveTransferStartupTicker(task))) {
 					this.clearLiveTransferTicker();
 					return;
 				}
 				this.render();
-			}, 1000);
-		} else if (!hasRunningTransfer) {
+			}, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS);
+		} else if (!needsStartupTicker) {
 			this.clearLiveTransferTicker();
 		}
+	}
+
+	private needsLiveTransferStartupTicker(task: TurboFileTask): boolean {
+		if (task.kind !== 'transfer' || task.status !== 'running') {
+			return false;
+		}
+		if (task.transferStartedAt !== undefined) {
+			return false;
+		}
+		return this.getLiveTransferItems(task).some(item => item.status === 'running'
+			&& item.transferStartedAt === undefined
+			&& this.isRsyncStrategy(item.strategy ?? task.strategy));
 	}
 
 	private clearLiveTransferTicker(): void {
@@ -3757,19 +3777,34 @@ export class TurboFileEditor extends EditorPane {
 			detail = `${detail} · ${completedItems}/${event.totalItems}${currentName}`;
 		}
 		const now = Date.now();
-		const sampledSpeed = this.calculateTransferSpeed(activeItem ?? task, transferredBytes, now);
-		const speed = event.speedBytesPerSecond !== undefined && event.speedBytesPerSecond >= 0 && Number.isFinite(event.speedBytesPerSecond)
+		const speedTarget = activeItem ?? task;
+		const resetRsyncSpeedSample = isRsyncProgress
+			&& transferredBytes > 0
+			&& task.transferStartedAt === undefined
+			&& (speedTarget.lastSampleBytes ?? 0) <= 0;
+		const sampledSpeed = resetRsyncSpeedSample
+			? this.resetTransferSpeedSample(speedTarget, transferredBytes, now)
+			: this.calculateTransferSpeed(speedTarget, transferredBytes, now);
+		const eventSpeed = event.speedBytesPerSecond !== undefined && event.speedBytesPerSecond >= 0 && Number.isFinite(event.speedBytesPerSecond)
 			? event.speedBytesPerSecond
-			: sampledSpeed;
-		const isDataPhase = event.phase !== 'prepare' && event.phase !== 'complete';
-		const hasRsyncTransferProgress = transferredBytes > 0 || speed > 0;
-		const shouldStartTransferTiming = isDataPhase && (!isRsyncProgress || hasRsyncTransferProgress);
-		if (shouldStartTransferTiming && task.transferStartedAt === undefined) {
+			: undefined;
+		const speed = chooseDisplayTransferSpeed({
+			strategy,
+			eventSpeedBytesPerSecond: eventSpeed,
+			sampledSpeedBytesPerSecond: sampledSpeed
+		});
+		const shouldStartTransferTimingValue = shouldStartTransferTiming({
+			phase: event.phase,
+			strategy,
+			transferredBytes,
+			speedBytesPerSecond: eventSpeed ?? speed
+		});
+		if (shouldStartTransferTimingValue && task.transferStartedAt === undefined) {
 			task.transferStartedAt = now;
 		}
 		if (activeItem) {
 			activeItem.startedAt ??= task.startedAt;
-			if (shouldStartTransferTiming && activeItem.transferStartedAt === undefined) {
+			if (shouldStartTransferTimingValue && activeItem.transferStartedAt === undefined) {
 				activeItem.transferStartedAt = now;
 			}
 			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
@@ -3794,6 +3829,7 @@ export class TurboFileEditor extends EditorPane {
 			: event.phase === 'complete' ? 100 : progress;
 		task.detail = detail;
 		this.statusMessage = detail;
+		this.updateLiveTransferTicker();
 
 		const renderIntervalMs = strategy?.startsWith('rsync') ? RSYNC_PROGRESS_RENDER_INTERVAL_MS : TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 		if (event.phase === 'complete' || (totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
@@ -3824,6 +3860,12 @@ export class TurboFileEditor extends EditorPane {
 		const rawSpeed = elapsed > 0 ? ((transferredBytes - previousBytes) / elapsed) * 1000 : 0;
 		this.appendTransferSpeedSample(target.speedSamples ??= [], rawSpeed);
 		return this.getSmoothedTransferSpeed(target.speedSamples, previousSpeed);
+	}
+
+	private resetTransferSpeedSample(target: Pick<TurboFileTask, 'lastSampleAt' | 'lastSampleBytes' | 'speedBytesPerSecond'> | TurboFileTaskTransferItem, transferredBytes: number, now: number): number {
+		target.lastSampleAt = now;
+		target.lastSampleBytes = transferredBytes;
+		return target.speedBytesPerSecond ?? 0;
 	}
 
 	private appendTransferSpeedSample(samples: number[], speed: number): void {
@@ -3994,6 +4036,23 @@ export class TurboFileEditor extends EditorPane {
 			itemCount: sourceItems.length
 		});
 		return this.transferAttemptToPlannedStrategy(plan.attempts[0], sourceEndpoint, targetEndpoint);
+	}
+
+	private primeTransferTaskStrategy(task: TurboFileTask, sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): void {
+		const plannedStrategy = sourceItems.length > 1
+			? this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, sourceItems)
+			: this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItems[0]);
+		const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
+		task.strategy = initialStrategy;
+		for (const transferItem of task.transferItems ?? []) {
+			transferItem.strategy = initialStrategy;
+		}
+		this.updateLiveTransferTicker();
+		if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
+			this.refreshTaskbar();
+		} else {
+			this.render();
+		}
 	}
 
 	private toPlanningEndpoint(device: TurboFileDevice, path: string): ITurboFileTransferEndpoint {
@@ -6567,6 +6626,7 @@ export class TurboFileEditor extends EditorPane {
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
+		this.primeTransferTaskStrategy(task, this.localWindowsDevice, targetDevice, sourceItems);
 		if (!batch) {
 			task.retryTransfer = {
 				sourceSide: targetSide,
@@ -7155,6 +7215,7 @@ export class TurboFileEditor extends EditorPane {
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
+		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, sourceItems);
 		if (!batch) {
 			task.retryTransfer = { sourceSide, targetSide, sourceItem: { ...sourceItems[0] } };
 		}
@@ -7321,6 +7382,7 @@ export class TurboFileEditor extends EditorPane {
 		task.cancelRequested = false;
 		task.transferItems = items.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
+		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, items);
 		const progressId = `turbofile-batch-${task.id}-${Date.now()}`;
 		task.progressId = progressId;
 		for (const transferItem of task.transferItems) {
@@ -10276,7 +10338,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getConfiguredLocalWindowsTransferProtocol(): TurboFileTransferProtocol {
 		const protocol = this.storageService.get(TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY, StorageScope.PROFILE);
-		return protocol === 'auto-fast' || protocol === 'rsync' || protocol === 'sftp' || protocol === 'scp' || protocol === 'tar' ? protocol : defaultTurboFileTransferProtocol;
+		return protocol === 'auto-fast' || protocol === 'rsync' || protocol === 'sftp' || protocol === 'scp' ? protocol : defaultTurboFileTransferProtocol;
 	}
 
 	private saveLocalWindowsDevice(draft: TurboFileDeviceDraft): TurboFileDevice {
@@ -10656,7 +10718,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private normalizeTransferProtocol(value: string): TurboFileTransferProtocol {
-		return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' || value === 'tar' ? value : defaultTurboFileTransferProtocol;
+		return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
 	}
 
 	private renderDeviceForm(): HTMLElement {
@@ -10832,7 +10894,6 @@ export class TurboFileEditor extends EditorPane {
 		select.name = 'preferredTransferProtocol';
 		const protocolOptions: [string, string][] = [
 			['auto-fast', '智能极速（推荐）'],
-			['tar', 'tar 目录传输'],
 			['scp', 'SCP 文件'],
 			['sftp', 'SFTP 稳定模式'],
 			['rsync', 'rsync 增量']

@@ -579,17 +579,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const stat = await fsp.stat(request.source.path);
 				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
 				if (stat.isDirectory()) {
-					if (request.target.preferredProtocol === 'tar') {
+					if (shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
 						const tarResult = await this.tryLocalToSshTarTransfer(request, bytes, startedAt);
 						if (tarResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return tarResult;
 						}
+						throw new Error('Tar upload unavailable for directory transfer.');
 					}
 					if (request.target.preferredProtocol !== 'sftp') {
-						const commandOrder = request.target.preferredProtocol === 'tar'
-							? ['scp'] as Array<'scp' | 'rsync'>
-							: ['rsync', 'scp'] as Array<'scp' | 'rsync'>;
+						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.target.preferredProtocol);
 						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt, commandOrder, false);
 						if (commandResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
@@ -640,16 +639,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					? Math.max(0, request.expectedBytes ?? 0)
 					: Math.max(0, request.expectedBytes ?? 0);
 				if (sourceType === 'directory') {
-					if (request.source.preferredProtocol === 'tar') {
+					if (shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
 						const tarResult = await this.trySshToLocalTarTransfer(request, bytes, startedAt);
 						if (tarResult?.ok) {
 							return tarResult;
 						}
+						throw new Error('Tar download unavailable for directory transfer.');
 					}
 					if (request.source.preferredProtocol !== 'sftp') {
-						const commandOrder = request.source.preferredProtocol === 'tar'
-							? ['scp'] as Array<'scp' | 'rsync'>
-							: ['rsync', 'scp'] as Array<'scp' | 'rsync'>;
+						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.source.preferredProtocol);
 						const commandResult = await this.trySshToLocalCommandTransfer(request, bytes, startedAt, commandOrder);
 						if (commandResult?.ok) {
 							return commandResult;
@@ -974,7 +972,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.targetDirectory.supportsRsync !== true || looksLikeWindowsPath(request.targetDirectory.path)) {
 			return undefined;
 		}
-		if (request.targetDirectory.preferredProtocol === 'sftp' || request.targetDirectory.preferredProtocol === 'scp' || request.targetDirectory.preferredProtocol === 'tar') {
+		if (request.targetDirectory.preferredProtocol !== 'rsync') {
 			return undefined;
 		}
 		if (!canBatchRsyncPreserveTargetNames(batchItems)) {
@@ -1229,7 +1227,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
 			return undefined;
 		}
-		if (request.target.preferredProtocol !== 'tar') {
+		if (!shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
 			return undefined;
 		}
 		if (request.target.supportsTar === false || looksLikeWindowsPath(request.target.path)) {
@@ -1276,7 +1274,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'local' || !request.source.connection) {
 			return undefined;
 		}
-		if (request.source.preferredProtocol !== 'tar') {
+		if (!shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
 			return undefined;
 		}
 		if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
@@ -1774,12 +1772,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return await this.runSameRemoteNativeBatchTransfer(request, items, operation, expectedBytes, startedAt);
 			}
 
-			const localRsyncBatch = await this.tryLocalBatchRsyncTransfer(request, items, operation, expectedBytes, startedAt);
-			this.throwIfTransferCanceled(request.progressId);
-			if (localRsyncBatch?.ok) {
-				return localRsyncBatch;
-			}
-
 			if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh') {
 				return await this.runSshToSshBatchTransferPlan(request, items, operation, expectedBytes, startedAt);
 			}
@@ -1788,6 +1780,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			if (tarBatch?.ok) {
 				return tarBatch;
+			}
+			if (shouldUseTarOnlyForBatchTransfer(request)) {
+				throw new Error('Tar transfer unavailable for batch transfer.');
+			}
+
+			const localRsyncBatch = await this.tryLocalBatchRsyncTransfer(request, items, operation, expectedBytes, startedAt);
+			this.throwIfTransferCanceled(request.progressId);
+			if (localRsyncBatch?.ok) {
+				return localRsyncBatch;
 			}
 
 			const fallback = await this.runConcurrentBatchTransfer(request, items, operation, expectedBytes, startedAt, false);
@@ -2003,7 +2004,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 		const protocol = isUpload ? request.targetDirectory.preferredProtocol : request.source.preferredProtocol;
-		if (protocol === 'sftp' || protocol === 'scp' || protocol === 'tar') {
+		if (protocol !== 'rsync') {
 			return undefined;
 		}
 		if (isUpload && looksLikeWindowsPath(request.targetDirectory.path)) {
@@ -2317,7 +2318,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async tryBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number, forceProtocol = false): Promise<ITurboFileBatchTransferResult | undefined> {
 		if (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh') {
-			if (!forceProtocol && request.targetDirectory.preferredProtocol !== 'tar') {
+			if (!forceProtocol && !shouldPreferTarForMultiItemTransfer(request.targetDirectory.preferredProtocol)) {
 				return undefined;
 			}
 			if (request.targetDirectory.supportsTar === false || looksLikeWindowsPath(request.targetDirectory.path)) {
@@ -2344,7 +2345,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'local') {
-			if (!forceProtocol && request.source.preferredProtocol !== 'tar') {
+			if (!forceProtocol && !shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
 				return undefined;
 			}
 			if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
@@ -2372,7 +2373,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh') {
-			if (!forceProtocol && getSshToSshTransferProtocol(request.source) !== 'tar') {
+			if (!forceProtocol && !shouldPreferTarForMultiItemTransfer(getSshToSshTransferProtocol(request.source))) {
 				return undefined;
 			}
 			if (request.source.supportsTar === false || request.targetDirectory.supportsTar === false || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.targetDirectory.path)) {
@@ -7202,6 +7203,36 @@ function getLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransf
 		return ['scp'];
 	}
 	return preferredProtocol === 'sftp' ? [] : ['scp'];
+}
+
+function getDirectoryLocalCommandTransferProtocolOrder(preferredProtocol: TurboFileTransferProtocol | undefined): Array<'scp' | 'rsync'> {
+	if (preferredProtocol === 'rsync') {
+		return ['rsync', 'scp'];
+	}
+	if (preferredProtocol === 'scp') {
+		return ['scp'];
+	}
+	if (preferredProtocol === 'sftp') {
+		return [];
+	}
+	return [];
+}
+
+function shouldPreferTarForMultiItemTransfer(preferredProtocol: TurboFileTransferProtocol | undefined): boolean {
+	return preferredProtocol === undefined || preferredProtocol === 'auto-fast' || preferredProtocol === 'tar';
+}
+
+function shouldUseTarOnlyForBatchTransfer(request: ITurboFileBatchTransferRequest): boolean {
+	if (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh') {
+		return shouldPreferTarForMultiItemTransfer(request.targetDirectory.preferredProtocol);
+	}
+	if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'local') {
+		return shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol);
+	}
+	if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh') {
+		return shouldPreferTarForMultiItemTransfer(getSshToSshTransferProtocol(request.source));
+	}
+	return false;
 }
 
 function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {

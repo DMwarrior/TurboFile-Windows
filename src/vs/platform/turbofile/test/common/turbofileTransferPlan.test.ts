@@ -34,12 +34,11 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'scp', route: 'local' },
-			{ protocol: 'sftp', route: 'local' }
+			{ protocol: 'scp', route: 'local' }
 		]);
 	});
 
-	test('starts local to ssh directory auto-fast with rsync and no pre-scan fallback decision in UI', () => {
+	test('starts local to ssh directory auto-fast with tar and no pre-scan fallback decision in UI', () => {
 		const plan = resolveTransferPlan({
 			source: { ...local, path: 'D:\\Work\\test\\1024x40' },
 			target: ssh(),
@@ -48,9 +47,7 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'rsync', route: 'local' },
-			{ protocol: 'scp', route: 'local' },
-			{ protocol: 'sftp', route: 'local' }
+			{ protocol: 'tar', route: 'local' }
 		]);
 	});
 
@@ -81,7 +78,7 @@ suite('TurboFileTransferPlan', function () {
 		]);
 	});
 
-	test('uses rsync first for local to ssh multi-file auto-fast', () => {
+	test('uses tar first for local to ssh multi-file auto-fast', () => {
 		const plan = resolveTransferPlan({
 			source: { ...local, path: 'D:\\Work\\test' },
 			target: ssh(),
@@ -90,9 +87,7 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'rsync', route: 'local' },
-			{ protocol: 'scp', route: 'local' },
-			{ protocol: 'sftp', route: 'local' }
+			{ protocol: 'tar', route: 'local' }
 		]);
 	});
 
@@ -110,7 +105,7 @@ suite('TurboFileTransferPlan', function () {
 		]);
 	});
 
-	test('uses rsync first for ssh to ssh directory auto-fast and keeps relay as same protocol fallback', () => {
+	test('uses tar first for ssh to ssh directory auto-fast and keeps rsync as an explicit option only', () => {
 		const plan = resolveTransferPlan({
 			source: ssh(),
 			target: ssh(),
@@ -119,9 +114,8 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'rsync', route: 'direct' },
 			{ protocol: 'tar', route: 'direct' },
-			{ protocol: 'rsync', route: 'relay' }
+			{ protocol: 'tar', route: 'relay' }
 		]);
 	});
 
