@@ -63,6 +63,10 @@ const DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS = 1000;
 const LOCAL_RSYNC_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const TRANSFER_PROGRESS_EVENT_INTERVAL_MS = 500;
 const LOCAL_WINDOWS_REVERSE_RSYNC_MIN_SPLIT_ENTRIES = 6;
+const LOCAL_PARALLEL_TAR_CHUNK_COUNT = 12;
+const LOCAL_PARALLEL_TAR_MIN_ENTRIES = 8;
+const LOCAL_PARALLEL_TAR_CHUNK_RETRIES = 2;
+const LOCAL_TAR_ZSTD_LEVEL = 3;
 const FILE_ENTRY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 class TurboFileTransferCanceledError extends Error {
@@ -308,11 +312,21 @@ interface ILocalSshTool {
 	readonly env: NodeJS.ProcessEnv;
 }
 
+interface ILocalZstdTool {
+	readonly executable: string;
+	readonly env: NodeJS.ProcessEnv;
+}
+
 interface ILocalWindowsReverseRsyncItem {
 	readonly sourcePath: string;
 	readonly targetPath: string;
 	readonly directory: boolean;
 	readonly name: string;
+}
+
+interface ILocalTarChunk {
+	readonly listPath: string;
+	readonly entryCount: number;
 }
 
 export class TurboFileSshMainService implements ITurboFileSshService {
@@ -1324,40 +1338,31 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Missing SSH target.');
 		}
 		try {
+			await this.runParallelLocalDirectoryTarUpload(localDirectory, target.connection, buildPrepareTarExtractToExactDirectoryCommand(target.path), buildTarExtractStreamToDirectoryCommand(target.path), progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Parallel raw tar|ssh has no remote zstd dependency and is the stable default fast path.
+		}
+		try {
+			await this.runParallelLocalDirectoryTarZstdUpload(localDirectory, target.connection, buildPrepareTarZstdExtractToExactDirectoryCommand(target.path), buildTarZstdExtractToDirectoryCommand(target.path), progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
+		}
+		try {
 			await this.runNativeLocalTarUpload(['-cf', '-', '-C', localDirectory, '.'], target.connection, buildTarExtractToExactDirectoryCommand(target.path), progressId, onArchiveDelta);
 			return;
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			// Native tar|ssh is the fast path. If it is unavailable, fall back to the ssh2 stream path.
-		}
-		const configResult = await this.createConnectConfig(target.connection);
-		if (!configResult.ok) {
-			throw new Error(configResult.message);
-		}
-
-		let client: ISSHClient | undefined;
-		let tarProcess: ReturnType<typeof spawn> | undefined;
-		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
-			tarProcess?.kill();
-			client?.end();
-		});
-		try {
-			client = await this.connect(configResult.config);
-			const targetCommand = buildTarExtractToExactDirectoryCommand(target.path);
-			const targetStream = await this.openRemoteCommandStream(client, targetCommand, 'tar upload extract', true);
-			tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localDirectory, '.'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-			if (!tarProcess.stdout) {
-				throw new Error('Local tar upload did not provide stdout.');
-			}
-			const tarClose = waitForLocalProcessClose(tarProcess, 'local tar upload');
-			await pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
-			await tarClose;
-			await targetStream.close;
-		} finally {
-			unregisterCancel();
-			client?.end();
+			throw new Error(`Native tar upload failed: ${formatTransferError(error)}`);
 		}
 	}
 
@@ -1459,6 +1464,226 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await pipeline(sshProcess.stdout, createProgressPassThrough(onArchiveDelta), tarProcess.stdin);
 				await sshClose;
 				await tarClose;
+			} finally {
+				unregisterCancel();
+			}
+		});
+	}
+
+	private async runParallelLocalDirectoryTarUpload(localDirectory: string, connection: ITurboFileSshConnectionOptions, prepareRemoteCommand: string, extractRemoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const entries = await this.collectLocalTarRelativeEntries(localDirectory);
+		if (entries.length < LOCAL_PARALLEL_TAR_MIN_ENTRIES) {
+			throw new Error('Not enough entries for parallel tar upload.');
+		}
+		await this.runParallelLocalTarUpload(localDirectory, entries, connection, prepareRemoteCommand, extractRemoteCommand, progressId, onArchiveDelta);
+	}
+
+	private async runParallelLocalDirectoryTarZstdUpload(localDirectory: string, connection: ITurboFileSshConnectionOptions, prepareRemoteCommand: string, extractRemoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const entries = await this.collectLocalTarRelativeEntries(localDirectory);
+		if (entries.length < LOCAL_PARALLEL_TAR_MIN_ENTRIES) {
+			throw new Error('Not enough entries for parallel tar+zstd upload.');
+		}
+		await this.runParallelLocalTarZstdUpload(localDirectory, entries, connection, prepareRemoteCommand, extractRemoteCommand, progressId, onArchiveDelta);
+	}
+
+	private async runParallelLocalBatchTarUpload(plan: ITarBatchPlan, connection: ITurboFileSshConnectionOptions, targetDirectory: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const entries = await this.collectLocalTarRelativeEntries(plan.parentPath, plan.names);
+		if (entries.length < LOCAL_PARALLEL_TAR_MIN_ENTRIES) {
+			throw new Error('Not enough entries for parallel batch tar upload.');
+		}
+		await this.runParallelLocalTarUpload(
+			plan.parentPath,
+			entries,
+			connection,
+			buildPrepareTarExtractToDirectoryCommand(targetDirectory, plan.targetNames),
+			buildTarExtractStreamToDirectoryCommand(targetDirectory),
+			progressId,
+			onArchiveDelta
+		);
+	}
+
+	private async runParallelLocalBatchTarZstdUpload(plan: ITarBatchPlan, connection: ITurboFileSshConnectionOptions, targetDirectory: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const entries = await this.collectLocalTarRelativeEntries(plan.parentPath, plan.names);
+		if (entries.length < LOCAL_PARALLEL_TAR_MIN_ENTRIES) {
+			throw new Error('Not enough entries for parallel batch tar+zstd upload.');
+		}
+		await this.runParallelLocalTarZstdUpload(
+			plan.parentPath,
+			entries,
+			connection,
+			buildPrepareTarZstdExtractToDirectoryCommand(targetDirectory, plan.targetNames),
+			buildTarZstdExtractToDirectoryCommand(targetDirectory),
+			progressId,
+			onArchiveDelta
+		);
+	}
+
+	private async runParallelLocalTarUpload(localRoot: string, entries: readonly string[], connection: ITurboFileSshConnectionOptions, prepareRemoteCommand: string, extractRemoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const sshTool = await resolveLocalSshTool();
+		const tempRoot = join(tmpdir(), `turbofile-tar-${randomUUID()}`);
+		await fsp.mkdir(tempRoot, { recursive: true });
+		try {
+			const chunks = await this.writeLocalTarChunkLists(tempRoot, entries);
+			if (chunks.length < 2) {
+				throw new Error('Parallel tar upload needs at least two chunks.');
+			}
+			await this.runNativeSshCommand(connection, sshTool, prepareRemoteCommand, progressId);
+			await mapLimit(chunks, chunks.length, chunk => this.runNativeLocalTarUploadChunkWithRetry(localRoot, chunk, connection, sshTool, extractRemoteCommand, progressId, onArchiveDelta));
+		} finally {
+			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}
+
+	private async runParallelLocalTarZstdUpload(localRoot: string, entries: readonly string[], connection: ITurboFileSshConnectionOptions, prepareRemoteCommand: string, extractRemoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		const sshTool = await resolveLocalSshTool();
+		const zstdTool = await resolveLocalZstdTool();
+		const tempRoot = join(tmpdir(), `turbofile-tar-zstd-${randomUUID()}`);
+		await fsp.mkdir(tempRoot, { recursive: true });
+		try {
+			const chunks = await this.writeLocalTarChunkLists(tempRoot, entries);
+			if (chunks.length < 2) {
+				throw new Error('Parallel tar upload needs at least two chunks.');
+			}
+			await this.runNativeSshCommand(connection, sshTool, prepareRemoteCommand, progressId);
+			await mapLimit(chunks, chunks.length, chunk => this.runNativeLocalTarZstdUploadChunk(localRoot, chunk, connection, sshTool, zstdTool, extractRemoteCommand, progressId, onArchiveDelta));
+		} finally {
+			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}
+
+	private async collectLocalTarRelativeEntries(localRoot: string, names?: readonly string[]): Promise<string[]> {
+		const stack = names?.length ? names.map(name => normalizeTarListPath(name)) : [''];
+		const entries: string[] = [];
+		while (stack.length) {
+			const relativePath = stack.pop() ?? '';
+			const fullPath = relativePath ? join(localRoot, ...relativePath.split('/')) : localRoot;
+			const stat = await fsp.lstat(fullPath);
+			if (stat.isDirectory()) {
+				const children = await fsp.readdir(fullPath, { withFileTypes: true });
+				if (!children.length && relativePath) {
+					entries.push(relativePath);
+					continue;
+				}
+				for (const child of children) {
+					if (!child.isDirectory() && !child.isFile() && !child.isSymbolicLink()) {
+						continue;
+					}
+					const childRelativePath = relativePath ? `${relativePath}/${child.name}` : child.name;
+					stack.push(normalizeTarListPath(childRelativePath));
+				}
+			} else if (stat.isFile() || stat.isSymbolicLink()) {
+				entries.push(relativePath);
+			}
+		}
+		return entries.sort((a, b) => FILE_ENTRY_NAME_COLLATOR.compare(a, b));
+	}
+
+	private async writeLocalTarChunkLists(tempRoot: string, entries: readonly string[]): Promise<ILocalTarChunk[]> {
+		const chunkCount = Math.min(LOCAL_PARALLEL_TAR_CHUNK_COUNT, entries.length);
+		const chunks = Array.from({ length: chunkCount }, () => [] as string[]);
+		for (const [index, entry] of entries.entries()) {
+			chunks[index % chunkCount].push(entry);
+		}
+		return Promise.all(chunks
+			.filter(chunk => chunk.length > 0)
+			.map(async (chunk, index) => {
+				const listPath = join(tempRoot, `chunk-${String(index).padStart(2, '0')}.lst`);
+				await fsp.writeFile(listPath, Buffer.from(`${chunk.join('\0')}\0`, 'utf8'));
+				return { listPath, entryCount: chunk.length };
+			}));
+	}
+
+	private async runNativeSshCommand(connection: ITurboFileSshConnectionOptions, tool: ILocalSshTool, remoteCommand: string, progressId: string | undefined): Promise<void> {
+		await withNativeOpenSshArgs(connection, tool, remoteCommand, async (sshArgs, env) => {
+			await this.runCancelableLocalCommand(tool.executable, sshArgs, { env }, progressId);
+		});
+	}
+
+	private async runNativeLocalTarUploadChunk(localRoot: string, chunk: ILocalTarChunk, connection: ITurboFileSshConnectionOptions, sshTool: ILocalSshTool, remoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		await withNativeOpenSshArgs(connection, sshTool, remoteCommand, async (sshArgs, sshEnv) => {
+			let tarProcess: ReturnType<typeof spawn> | undefined;
+			let sshProcess: ReturnType<typeof spawn> | undefined;
+			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (tarProcess) {
+					killLocalProcessTree(tarProcess);
+				}
+				if (sshProcess) {
+					killLocalProcessTree(sshProcess);
+				}
+			});
+			try {
+				tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				sshProcess = spawn(sshTool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: sshEnv });
+				sshProcess.stdout?.resume();
+				if (!tarProcess.stdout || !sshProcess.stdin) {
+					throw new Error('Parallel tar upload did not provide required pipes.');
+				}
+				const tarClose = waitForLocalProcessClose(tarProcess, 'parallel tar upload create');
+				const sshClose = waitForLocalProcessClose(sshProcess, 'parallel tar upload extract');
+				await Promise.all([
+					pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), sshProcess.stdin),
+					tarClose,
+					sshClose
+				]);
+			} finally {
+				unregisterCancel();
+			}
+		});
+	}
+
+	private async runNativeLocalTarUploadChunkWithRetry(localRoot: string, chunk: ILocalTarChunk, connection: ITurboFileSshConnectionOptions, sshTool: ILocalSshTool, remoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		let lastError: unknown;
+		for (let attempt = 0; attempt <= LOCAL_PARALLEL_TAR_CHUNK_RETRIES; attempt++) {
+			if (attempt > 0) {
+				await delay(150 * attempt);
+			}
+			try {
+				await this.runNativeLocalTarUploadChunk(localRoot, chunk, connection, sshTool, remoteCommand, progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				lastError = error;
+			}
+		}
+		throw new Error(`Parallel tar chunk failed after retries: ${formatTransferError(lastError)}`);
+	}
+
+	private async runNativeLocalTarZstdUploadChunk(localRoot: string, chunk: ILocalTarChunk, connection: ITurboFileSshConnectionOptions, sshTool: ILocalSshTool, zstdTool: ILocalZstdTool, remoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
+		await withNativeOpenSshArgs(connection, sshTool, remoteCommand, async (sshArgs, sshEnv) => {
+			let tarProcess: ReturnType<typeof spawn> | undefined;
+			let zstdProcess: ReturnType<typeof spawn> | undefined;
+			let sshProcess: ReturnType<typeof spawn> | undefined;
+			const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
+				if (tarProcess) {
+					killLocalProcessTree(tarProcess);
+				}
+				if (zstdProcess) {
+					killLocalProcessTree(zstdProcess);
+				}
+				if (sshProcess) {
+					killLocalProcessTree(sshProcess);
+				}
+			});
+			try {
+				tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				zstdProcess = spawn(zstdTool.executable, [`-${LOCAL_TAR_ZSTD_LEVEL}`, '-T1', '-c'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: zstdTool.env });
+				sshProcess = spawn(sshTool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: sshEnv });
+				sshProcess.stdout?.resume();
+				if (!tarProcess.stdout || !zstdProcess.stdin || !zstdProcess.stdout || !sshProcess.stdin) {
+					throw new Error('Parallel tar upload did not provide required pipes.');
+				}
+				const tarClose = waitForLocalProcessClose(tarProcess, 'parallel tar upload create');
+				const zstdClose = waitForLocalProcessClose(zstdProcess, 'parallel tar upload compress');
+				const sshClose = waitForLocalProcessClose(sshProcess, 'parallel tar upload extract');
+				await Promise.all([
+					pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), zstdProcess.stdin),
+					pipeline(zstdProcess.stdout, sshProcess.stdin),
+					tarClose,
+					zstdClose,
+					sshClose
+				]);
 			} finally {
 				unregisterCancel();
 			}
@@ -2494,38 +2719,31 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Missing SSH target.');
 		}
 		try {
+			await this.runParallelLocalBatchTarUpload(plan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Parallel raw tar|ssh is the stable default for local multi-file/folder uploads.
+		}
+		try {
+			await this.runParallelLocalBatchTarZstdUpload(plan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
+			return;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+				throw new TurboFileTransferCanceledError();
+			}
+			// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
+		}
+		try {
 			await this.runNativeLocalTarUpload(['-cf', '-', '-C', plan.parentPath, '--', ...plan.names], targetDirectory.connection, buildTarExtractToDirectoryCommand(targetDirectory.path, plan.targetNames), progressId, onArchiveDelta);
 			return;
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 				throw new TurboFileTransferCanceledError();
 			}
-			// Native tar|ssh is preferred for speed; ssh2 remains the compatibility fallback.
-		}
-		const configResult = await this.createConnectConfig(targetDirectory.connection);
-		if (!configResult.ok) {
-			throw new Error(configResult.message);
-		}
-		let client: ISSHClient | undefined;
-		let tarProcess: ReturnType<typeof spawn> | undefined;
-		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => {
-			tarProcess?.kill();
-			client?.end();
-		});
-		try {
-			client = await this.connect(configResult.config);
-			const targetStream = await this.openRemoteCommandStream(client, buildTarExtractToDirectoryCommand(targetDirectory.path, plan.targetNames), 'batch tar upload extract', true);
-			tarProcess = spawn('tar.exe', ['-cf', '-', '-C', plan.parentPath, '--', ...plan.names], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-			if (!tarProcess.stdout) {
-				throw new Error('Local batch tar upload did not provide stdout.');
-			}
-			const tarClose = waitForLocalProcessClose(tarProcess, 'local batch tar upload');
-			await pipeline(tarProcess.stdout, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
-			await tarClose;
-			await targetStream.close;
-		} finally {
-			unregisterCancel();
-			client?.end();
+			throw new Error(`Native batch tar upload failed: ${formatTransferError(error)}`);
 		}
 	}
 
@@ -7375,6 +7593,7 @@ function isRecoverableLocalCommandTransferError(error: unknown): boolean {
 }
 
 let localSshToolPromise: Promise<ILocalSshTool> | undefined;
+let localZstdToolPromise: Promise<ILocalZstdTool> | undefined;
 let localRsyncToolPromise: Promise<ILocalRsyncTool> | undefined;
 
 function resolveLocalSshTool(): Promise<ILocalSshTool> {
@@ -7395,6 +7614,26 @@ async function doResolveLocalSshTool(): Promise<ILocalSshTool> {
 }
 
 function createLocalSshTool(executable: string): ILocalSshTool {
+	const executableDirectory = /[\\/]/.test(executable) ? dirname(executable) : undefined;
+	const env = createLocalToolEnvironment(executableDirectory);
+	return { executable, env };
+}
+
+function resolveLocalZstdTool(): Promise<ILocalZstdTool> {
+	localZstdToolPromise ??= doResolveLocalZstdTool();
+	return localZstdToolPromise;
+}
+
+async function doResolveLocalZstdTool(): Promise<ILocalZstdTool> {
+	if (platform() !== 'win32') {
+		return createLocalZstdTool('zstd');
+	}
+	const whereOutput = await runLocalCommandBuffer('where.exe', ['zstd.exe'], 1024 * 1024);
+	const executable = whereOutput.toString().split(/\r?\n/).map(line => line.trim()).find(line => !!line) ?? 'zstd.exe';
+	return createLocalZstdTool(executable);
+}
+
+function createLocalZstdTool(executable: string): ILocalZstdTool {
 	const executableDirectory = /[\\/]/.test(executable) ? dirname(executable) : undefined;
 	const env = createLocalToolEnvironment(executableDirectory);
 	return { executable, env };
@@ -7581,6 +7820,10 @@ function toOpenSshLocalPath(path: string): string {
 	return path.replace(/\\/g, '/');
 }
 
+function normalizeTarListPath(path: string): string {
+	return path.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
 function quoteLocalShellArg(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
 }
@@ -7749,11 +7992,45 @@ function buildTarExtractToExactDirectoryCommand(path: string): string {
 	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target} && tar -xf - -C ${target}`;
 }
 
+function buildPrepareTarExtractToExactDirectoryCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target}`;
+}
+
+function buildTarExtractStreamToDirectoryCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `command -v tar >/dev/null 2>&1 && tar -xf - -C ${target}`;
+}
+
+function buildPrepareTarZstdExtractToExactDirectoryCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target}`;
+}
+
+function buildTarZstdExtractToDirectoryCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1 && zstd -d -c | tar -xf - -C ${target}`;
+}
+
 function buildTarExtractToDirectoryCommand(targetDirectory: string, targetNames: readonly string[]): string {
 	const target = quotePosixShellArg(targetDirectory);
 	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
 	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
 	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}tar -xf - -C ${target}`;
+}
+
+function buildPrepareTarExtractToDirectoryCommand(targetDirectory: string, targetNames: readonly string[]): string {
+	const target = quotePosixShellArg(targetDirectory);
+	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
+	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}true`;
+}
+
+function buildPrepareTarZstdExtractToDirectoryCommand(targetDirectory: string, targetNames: readonly string[]): string {
+	const target = quotePosixShellArg(targetDirectory);
+	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
+	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	return `command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}true`;
 }
 
 function buildTarSourcePushCommand(sourcePath: string, targetPath: string, targetUserHost: string, sshCommand: string, sshpassPrefix: string): string {
