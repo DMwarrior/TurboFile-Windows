@@ -1417,13 +1417,8 @@ export class TurboFileEditor extends EditorPane {
 		switch (status) {
 			case 'online':
 				return '在线';
-			case 'testing':
-				return '检测中';
-			case 'offline':
-				return '离线';
-			case 'unknown':
 			default:
-				return '未检测';
+				return '离线';
 		}
 	}
 

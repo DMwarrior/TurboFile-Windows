@@ -1166,15 +1166,15 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 }
 
 .turbofile-device-card-status.is-testing {
-	color: var(--vscode-textLink-foreground);
+	color: var(--vscode-descriptionForeground);
+}
+
+.turbofile-device-card-status.is-offline {
+	color: var(--vscode-descriptionForeground);
 }
 
 .turbofile-device-card-status.is-online {
 	color: var(--vscode-testing-iconPassed);
-}
-
-.turbofile-device-card-status.is-offline {
-	color: var(--vscode-testing-iconFailed);
 }
 
 .turbofile-device-page-card .turbofile-page-button {
@@ -4772,15 +4772,15 @@ body.turbofile-main-editor-visible .turbofile-theme-toggle {
 }
 
 .vs .turbofile-device-card-status.is-testing {
-	color: var(--vscode-textLink-foreground);
+	color: var(--vscode-descriptionForeground);
+}
+
+.vs .turbofile-device-card-status.is-offline {
+	color: var(--vscode-descriptionForeground);
 }
 
 .vs .turbofile-device-card-status.is-online {
 	color: var(--tf-success);
-}
-
-.vs .turbofile-device-card-status.is-offline {
-	color: var(--vscode-testing-iconFailed);
 }
 
 .vs .turbofile-page-button,
