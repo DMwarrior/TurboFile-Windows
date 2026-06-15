@@ -10655,9 +10655,9 @@ export class TurboFileEditor extends EditorPane {
 
 	private formatPanePathForDisplay(path: string, windowsPath: boolean): string {
 		if (!windowsPath) {
-			return path || '/';
+			return this.normalizePanePath(path || '/', false);
 		}
-		return (path || LOCAL_WINDOWS_FALLBACK_PATH).replace(/\//g, '\\');
+		return this.normalizePanePath(path || LOCAL_WINDOWS_FALLBACK_PATH, true);
 	}
 
 	private normalizePaneInputPath(path: string, windowsPath: boolean): string {
@@ -10665,15 +10665,35 @@ export class TurboFileEditor extends EditorPane {
 		if (!trimmed) {
 			return '';
 		}
-		if (!windowsPath) {
-			const normalized = trimmed.replace(/\\/g, '/');
-			return normalized.startsWith('/') ? normalized : `/${normalized}`;
+		return this.normalizePanePath(trimmed, windowsPath);
+	}
+
+	private normalizePanePath(path: string, windowsPath: boolean): string {
+		if (windowsPath) {
+			return path.replace(/\//g, '\\');
 		}
-		return trimmed.replace(/\//g, '\\');
+
+		let normalized = path.replace(/\\/g, '/').trim();
+		if (!normalized || normalized === '.' || normalized === './' || normalized === '/.' || normalized === '/./') {
+			return '/';
+		}
+		if (normalized.startsWith('./')) {
+			normalized = normalized.substring(1);
+		}
+		if (!normalized.startsWith('/')) {
+			normalized = `/${normalized}`;
+		}
+		normalized = normalized.replace(/\/+/g, '/').replace(/\/\.(?=\/|$)/g, '');
+		if (normalized.length > 1) {
+			normalized = normalized.replace(/\/+$/, '');
+		}
+		return normalized || '/';
 	}
 
 	private getDefaultPaneDevicePath(device: TurboFileDevice): string {
-		return device.id === LOCAL_WINDOWS_DEVICE_ID ? this.getLocalWindowsDeviceDefaultPath() : device.defaultPath || '/';
+		return device.id === LOCAL_WINDOWS_DEVICE_ID
+			? this.getLocalWindowsDeviceDefaultPath()
+			: this.normalizePanePath(device.defaultPath || '/', false);
 	}
 
 	private getPaneDeviceMemoryKey(side: 'left' | 'right', device: TurboFileDevice): string {
@@ -10688,12 +10708,13 @@ export class TurboFileEditor extends EditorPane {
 		if (!path) {
 			return;
 		}
-		this.storageService.store(this.getPaneDevicePathStorageKey(side, device), path, StorageScope.PROFILE, StorageTarget.USER);
+		const normalizedPath = this.normalizePanePath(path, this.isWindowsDevice(device));
+		this.storageService.store(this.getPaneDevicePathStorageKey(side, device), normalizedPath, StorageScope.PROFILE, StorageTarget.USER);
 	}
 
 	private getRememberedPaneDevicePath(side: 'left' | 'right', device: TurboFileDevice): string | undefined {
 		const path = this.storageService.get(this.getPaneDevicePathStorageKey(side, device), StorageScope.PROFILE);
-		return path || undefined;
+		return path ? this.normalizePanePath(path, this.isWindowsDevice(device)) : undefined;
 	}
 
 	private getInitialPaneDevicePath(side: 'left' | 'right', device: TurboFileDevice): string {

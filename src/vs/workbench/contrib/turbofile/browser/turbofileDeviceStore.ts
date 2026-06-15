@@ -48,6 +48,32 @@ function normalizeTransferProtocol(value: unknown): TurboFileTransferProtocol {
 	return value === 'auto-fast' || value === 'rsync' || value === 'scp' || value === 'sftp' ? value : defaultTurboFileTransferProtocol;
 }
 
+function normalizeDefaultPath(path: string | undefined, platform: TurboFileDevicePlatform | undefined): string | undefined {
+	const trimmed = path?.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (platform === 'windows') {
+		return trimmed.replace(/\//g, '\\');
+	}
+
+	let normalized = trimmed.replace(/\\/g, '/');
+	if (normalized === '.' || normalized === './' || normalized === '/.' || normalized === '/./') {
+		return '/';
+	}
+	if (normalized.startsWith('./')) {
+		normalized = normalized.substring(1);
+	}
+	if (!normalized.startsWith('/')) {
+		normalized = `/${normalized}`;
+	}
+	normalized = normalized.replace(/\/+/g, '/').replace(/\/\.(?=\/|$)/g, '');
+	if (normalized.length > 1) {
+		normalized = normalized.replace(/\/+$/, '');
+	}
+	return normalized || '/';
+}
+
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 ];
 
@@ -82,7 +108,7 @@ export class TurboFileDeviceStore {
 			port: draft.port || 22,
 			username: draft.username.trim(),
 			authType: draft.authType,
-			defaultPath: draft.defaultPath?.trim() || undefined,
+			defaultPath: normalizeDefaultPath(draft.defaultPath, draft.platform),
 			platform: draft.platform,
 			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
 			capabilities: getDefaultCapabilitiesForPlatform(draft.platform),
@@ -142,7 +168,7 @@ export class TurboFileDeviceStore {
 				port: defaultDevice.port || 22,
 				username: defaultDevice.username,
 				authType: defaultDevice.authType,
-				defaultPath: defaultDevice.defaultPath,
+				defaultPath: normalizeDefaultPath(defaultDevice.defaultPath, defaultDevice.platform),
 				platform: defaultDevice.platform,
 				privateKeyPath: defaultDevice.privateKeyPath,
 				capabilities: defaultDevice.capabilities ?? defaultTurboFileDeviceCapabilities,
@@ -185,7 +211,7 @@ export class TurboFileDeviceStore {
 			port: draft.port || 22,
 			username: draft.username.trim(),
 			authType: draft.authType,
-			defaultPath: draft.defaultPath?.trim() || undefined,
+			defaultPath: normalizeDefaultPath(draft.defaultPath, draft.platform),
 			platform: draft.platform,
 			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
 			preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
@@ -309,7 +335,7 @@ export class TurboFileDeviceStore {
 			port: Number(device.port) || 22,
 			username: String(device.username),
 			authType: device.authType === 'privateKey' ? 'privateKey' : 'password',
-			defaultPath: device.defaultPath,
+			defaultPath: normalizeDefaultPath(device.defaultPath, platform),
 			platform,
 			privateKeyPath: device.privateKeyPath,
 			capabilities: {
