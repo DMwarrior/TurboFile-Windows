@@ -1478,6 +1478,9 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderSettingsPage(): HTMLElement {
 		const page = $('.turbofile-full-page');
+		return this.renderTransferPage();
+
+		/*
 		page.appendChild(this.renderPageHeader(Codicon.settingsGear, '系统设置', '管理 极速传 的本地行为、字体和快捷操作。'));
 
 		const actionsSection = $('.turbofile-settings-section');
@@ -1494,6 +1497,7 @@ export class TurboFileEditor extends EditorPane {
 		page.appendChild(actionsSection);
 		return page;
 	}
+		*/
 
 	private renderAppearanceFontSettingsCard(): HTMLElement {
 		const card = $('.turbofile-appearance-card.turbofile-appearance-font-card');
@@ -2356,7 +2360,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (command.type === 'showSettings') {
-			this.setActivePage('settings');
+			this.setActivePage('transfer');
 			return;
 		}
 

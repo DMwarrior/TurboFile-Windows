@@ -94,6 +94,8 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 	}
 ];
 
+const TURBOFILE_VISIBLE_ACTIVITY_ENTRIES = TURBOFILE_ACTIVITY_ENTRIES.filter(entry => entry.page !== 'settings');
+
 // Use the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54): requesting a narrower
 // size is clamped to 54, which would leave the nav/taskbar (pinned to the requested width) 6px
 // off from the file-browser boundary. Matching it keeps everything aligned when collapsed.
@@ -209,7 +211,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			if (!event.visible) {
 				return;
 			}
-			const entry = TURBOFILE_ACTIVITY_ENTRIES.find(candidate => candidate.containerId === event.id);
+			const entry = TURBOFILE_VISIBLE_ACTIVITY_ENTRIES.find(candidate => candidate.containerId === event.id);
 			if (entry) {
 				if (!this.isOpeningTurboFilePage) {
 					void this.openTurboFilePage(entry.page, false);
@@ -320,7 +322,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		turboFileActivePage = activePage;
 
 		const list = $('.turbofile-page-nav-list');
-		for (const entry of TURBOFILE_ACTIVITY_ENTRIES) {
+		for (const entry of TURBOFILE_VISIBLE_ACTIVITY_ENTRIES) {
 			const button = $('button.turbofile-page-nav-item') as HTMLButtonElement;
 			button.type = 'button';
 			button.title = `打开${entry.title.value}`;
@@ -459,7 +461,7 @@ function registerTurboFileViewContainer(entry: TurboFileActivityEntry): ViewCont
 	}, ViewContainerLocation.Sidebar);
 }
 
-for (const entry of TURBOFILE_ACTIVITY_ENTRIES) {
+for (const entry of TURBOFILE_VISIBLE_ACTIVITY_ENTRIES) {
 	const container = registerTurboFileViewContainer(entry);
 	Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([
 		{
