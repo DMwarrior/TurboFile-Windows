@@ -1785,14 +1785,19 @@ export class TurboFileEditor extends EditorPane {
 		const label = mode === 'dark' ? TURBOFILE_APPEARANCE_DARK_THEME_LABEL : TURBOFILE_APPEARANCE_LIGHT_THEME_LABEL;
 		const settingsId = mode === 'dark' ? ThemeSettingDefaults.COLOR_THEME_DARK : ThemeSettingDefaults.COLOR_THEME_LIGHT;
 		const themeId = mode === 'light' ? TURBOFILE_LIGHT_THEME_CLASS_ID : 'vs-dark turbofile-2017-dark-cpp';
-		const themes = [...this.getBuiltinColorThemes(), ...this.availableColorThemes];
-		return themes.find(theme => theme.label === label || theme.id === themeId)
-			?? themes.find(theme => theme.settingsId === settingsId)
+		const realTheme = this.availableColorThemes.find(theme => theme.settingsId === settingsId)
+			?? this.availableColorThemes.find(theme => theme.label === label || theme.id === themeId);
+		if (realTheme) {
+			return realTheme;
+		}
+		const builtinTheme = this.getBuiltinColorThemes().find(theme => theme.label === label || theme.id === themeId || theme.settingsId === settingsId);
+		return builtinTheme
 			?? this.createBuiltinColorTheme(mode === 'dark' ? 'vs-dark turbofile-2017-dark-cpp' : TURBOFILE_LIGHT_THEME_CLASS_ID, label, settingsId, mode === 'dark' ? COLOR_THEME_DARK_INITIAL_COLORS : TURBOFILE_LIGHT_THEME_COLORS);
 	}
 
 
 	private async applyAppearanceMode(mode: 'light' | 'dark' | 'system'): Promise<void> {
+		await this.loadColorThemes(true);
 		const darkTheme = this.getAppearanceTheme('dark');
 		const lightTheme = this.getAppearanceTheme('light');
 		const preferred = this.workbenchThemeService.getPreferredColorScheme();
@@ -1805,7 +1810,7 @@ export class TurboFileEditor extends EditorPane {
 				await this.configurationService.updateValue(ThemeSettings.PREFERRED_DARK_THEME, darkTheme.settingsId, ConfigurationTarget.USER);
 				await this.configurationService.updateValue(ThemeSettings.PREFERRED_LIGHT_THEME, lightTheme.settingsId, ConfigurationTarget.USER);
 				await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, true, ConfigurationTarget.USER);
-				await this.workbenchThemeService.setColorTheme(preferred === ColorScheme.LIGHT ? lightTheme : darkTheme, 'auto');
+				await this.setColorThemeBySettingsId(preferred === ColorScheme.LIGHT ? lightTheme : darkTheme);
 				this.statusMessage = '已设置为跟随系统主题。';
 			} else {
 				await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, false, ConfigurationTarget.USER);
@@ -1827,7 +1832,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private async applyColorTheme(theme: IWorkbenchColorTheme): Promise<void> {
 		try {
-			await this.workbenchThemeService.setColorTheme(theme, 'auto');
+			await this.setColorThemeBySettingsId(theme);
 			this.statusMessage = `已切换主题：${this.getThemeLabel(theme)}`;
 			this.render();
 		} catch (error) {
@@ -1835,6 +1840,22 @@ export class TurboFileEditor extends EditorPane {
 			this.statusMessage = `切换主题失败：${message}`;
 			this.render();
 		}
+	}
+
+	/**
+	 * Applies a theme by its settingsId string so the workbench theme service resolves the *real*
+	 * registered theme (which lazily loads its TextMate tokenColors). Passing the in-memory
+	 * placeholder object instead would apply a theme without tokenColors and flatten document syntax
+	 * highlighting to a single color. Falls back to the object only if the id cannot be resolved.
+	 */
+	private async setColorThemeBySettingsId(theme: IWorkbenchColorTheme): Promise<void> {
+		if (theme.settingsId) {
+			const applied = await this.workbenchThemeService.setColorTheme(theme.settingsId, 'auto');
+			if (applied) {
+				return;
+			}
+		}
+		await this.workbenchThemeService.setColorTheme(theme, 'auto');
 	}
 
 	private async loadColorThemes(force = false): Promise<void> {
