@@ -1119,8 +1119,8 @@ export class TurboFileEditor extends EditorPane {
 
 	/**
 	 * Called when the user drags a TurboFile file-row out of the window. Local files are handed to
-	 * Windows directly; remote files are staged through the normal transfer pipeline first so
-	 * Explorer/Desktop still receives real Windows paths.
+	 * Windows directly; remote files first capture Explorer/Desktop's real drop directory through
+	 * the native CopyHook helper, then use the normal transfer pipeline to download there.
 	 */
 	private async startWindowsFileDragFromPane(side: 'left' | 'right'): Promise<void> {
 		const device = this.getPaneDevice(side);
@@ -1128,12 +1128,42 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		// SSH sources require a native virtual-file helper that this build does not ship. We MUST
-		// NOT silently stage to a temp cache (the old behavior, which also surfaced as a tar
-		// transfer task); instead show a clear hint on how to transfer.
 		if (device.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			this.statusMessage = 'SSH 文件暂不支持直接拖到 Windows。请用 Ctrl+C 复制，或把本地面板切到目标目录后传输。';
-			this.render();
+			try {
+				const sourceItems = this.getSelectedTransferItems(side)
+					.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent);
+				const dragItems: ITurboFileWindowsDragItem[] = sourceItems
+					.map(candidate => ({
+						sourcePath: candidate.path,
+						name: candidate.name,
+						type: candidate.type,
+						size: candidate.directory ? undefined : candidate.rawSize
+					}));
+				if (!dragItems.length) {
+					return;
+				}
+				this.statusMessage = '拖到 Windows 后将开始下载...';
+				this.render();
+				const result = await this.sshService.startWindowsFileDrag({
+					source: await this.toTransferEndpoint(device, this.paneStates[side].path),
+					items: dragItems
+				});
+				if (!result.ok) {
+					this.statusMessage = result.canceled ? '已取消拖到 Windows。' : `拖到 Windows 失败：${result.message}`;
+					this.render();
+					return;
+				}
+				if (!result.targetDirectory) {
+					this.statusMessage = '拖到 Windows 失败：没有捕获到目标目录。';
+					this.render();
+					return;
+				}
+				await this.transferItemsToWindowsDirectory(side, device, sourceItems, result.targetDirectory, Date.now());
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.statusMessage = `拖到 Windows 失败：${message}`;
+				this.render();
+			}
 			return;
 		}
 
@@ -7271,6 +7301,140 @@ export class TurboFileEditor extends EditorPane {
 			type: getWindowsDriveRoot(path) ? 'directory' : 'unknown',
 			directory: !!getWindowsDriveRoot(path)
 		};
+	}
+
+	private async transferItemsToWindowsDirectory(sourceSide: 'left' | 'right', sourceDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], targetDirectory: string, initiatedAt?: number): Promise<boolean> {
+		this.taskbarHiddenForTerminal = false;
+		const items = sourceItems.filter((item): item is TurboFileFileItem & { path: string } => !!item.path && !item.parent);
+		if (!items.length) {
+			this.statusMessage = '没有可拖到 Windows 的文件。';
+			this.render();
+			return false;
+		}
+
+		const targetDevice = this.localWindowsDevice;
+		if (items.length === 1) {
+			const sourceItem = items[0];
+			const task = this.beginTask('transfer', `拖出 ${sourceItem.name}`, `${sourceDevice.name} -> Windows`);
+			task.progress = 0;
+			task.cancelRequested = false;
+			task.transferItems = [this.createTransferTaskItem(sourceItem)];
+			task.speedSamples = [];
+			this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, items);
+			task.activeTransferItemIndex = 0;
+			const transferItem = task.transferItems[0];
+			transferItem.status = 'running';
+			transferItem.startedAt = Date.now();
+			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
+				skipDirectorySize: !!sourceItem.directory
+			});
+			const result = await this.transferItem(sourceSide, sourceSide, sourceItem, {
+				refreshTarget: false,
+				task,
+				targetPath: joinPanePath(targetDirectory, sourceItem.name, true),
+				targetDeviceOverride: targetDevice,
+				initiatedAt
+			});
+			if (result.ok) {
+				transferItem.status = 'success';
+				transferItem.progress = 100;
+				transferItem.transferredBytes = result.bytes;
+				transferItem.totalBytes = Math.max(result.bytes, transferItem.totalBytes);
+				transferItem.strategy = result.strategy ?? transferItem.strategy;
+				transferItem.endedAt = Date.now();
+				this.finishTask(task, 'success', `拖出完成：${sourceItem.name}，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				return true;
+			}
+			transferItem.status = result.canceled ? 'canceled' : 'error';
+			transferItem.error = result.canceled ? undefined : result.message;
+			transferItem.endedAt = Date.now();
+			this.finishTask(task, result.canceled ? 'canceled' : 'error', result.canceled ? `已取消拖出：${sourceItem.name}` : `拖出失败：${result.message}`, { bytes: result.bytes, strategy: result.strategy, error: result.canceled ? undefined : result.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+			return false;
+		}
+
+		const task = this.beginTask('transfer', `拖出 ${items.length} 项`, `${sourceDevice.name} -> Windows`);
+		task.progress = 0;
+		task.cancelRequested = false;
+		task.transferItems = items.map(item => this.createTransferTaskItem(item));
+		task.speedSamples = [];
+		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, items);
+		const progressId = `turbofile-windows-drag-${task.id}-${Date.now()}`;
+		task.progressId = progressId;
+		for (const transferItem of task.transferItems) {
+			transferItem.progressId = progressId;
+			transferItem.status = 'running';
+			transferItem.startedAt = Date.now();
+		}
+
+		const progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
+		try {
+			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path);
+			const targetDirectoryEndpoint: ITurboFileTransferEndpoint = {
+				kind: 'local',
+				path: targetDirectory,
+				label: 'Windows'
+			};
+			const expectedBytes = items.reduce((sum, item) => sum + (item.directory ? 0 : Math.max(0, item.rawSize)), 0);
+			const plannedStrategy = this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, items);
+			task.strategy = plannedStrategy;
+			for (const transferItem of task.transferItems) {
+				transferItem.strategy = plannedStrategy;
+			}
+			this.updateTask(task, `正在拖出到 Windows 0/${items.length}`, 8);
+			const result = await this.sshService.transferBatch({
+				source: sourceEndpoint,
+				targetDirectory: targetDirectoryEndpoint,
+				items: items.map(item => ({
+					sourcePath: item.path,
+					targetName: item.name,
+					displayName: item.name,
+					sourceType: item.type,
+					expectedBytes: item.directory ? 0 : Math.max(0, item.rawSize)
+				})),
+				operation: 'copy',
+				progressId,
+				expectedBytes,
+				strategyHint: 'auto',
+				clientStartedAt: initiatedAt ?? task.startedAt
+			});
+
+			const failedPaths = new Set(result.failures.map(failure => failure.path));
+			for (const [index, item] of items.entries()) {
+				const transferItem = task.transferItems[index];
+				if (!transferItem) {
+					continue;
+				}
+				transferItem.strategy = result.strategy ?? transferItem.strategy;
+				transferItem.endedAt = Date.now();
+				if (result.canceled) {
+					transferItem.status = 'canceled';
+				} else if (failedPaths.has(item.path)) {
+					transferItem.status = 'error';
+					transferItem.error = result.failures.find(failure => failure.path === item.path)?.message;
+				} else {
+					transferItem.status = 'success';
+					transferItem.progress = 100;
+					transferItem.transferredBytes = Math.max(transferItem.transferredBytes, transferItem.totalBytes, item.rawSize, 0);
+				}
+			}
+
+			if (result.canceled) {
+				this.finishTask(task, 'canceled', `已取消拖出到 Windows：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				return false;
+			}
+			if (!result.ok) {
+				this.finishTask(task, 'error', `拖出到 Windows 完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				return false;
+			}
+			this.finishTask(task, 'success', `拖出到 Windows 完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', `拖出到 Windows 失败：${message}`, { error: message });
+			return false;
+		} finally {
+			progressDisposable.dispose();
+		}
 	}
 
 	private async transferSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', initiatedAt?: number): Promise<boolean> {
