@@ -6125,6 +6125,9 @@ export class TurboFileEditor extends EditorPane {
 			this.rememberPaneDeviceSnapshot(side);
 		} catch (error) {
 			if (this.paneRequestSeq[side] === requestId) {
+				if (await this.recoverMissingPanePath(side, device, targetPath, error, options)) {
+					return;
+				}
 				const message = error instanceof Error ? error.message : String(error);
 				state.error = message;
 				this.setDeviceRuntimeStatus(device, 'offline');
@@ -6177,6 +6180,26 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			this.paneDirectoryInflight.delete(cacheKey);
 		}
+	}
+
+	private async recoverMissingPanePath(side: 'left' | 'right', device: TurboFileDevice, missingPath: string, error: unknown, options: TurboFileRefreshPaneOptions): Promise<boolean> {
+		if (!this.isMissingPanePathError(error)) {
+			return false;
+		}
+
+		const fallbackPaths = this.getMissingPanePathFallbacks(device, missingPath);
+		this.forgetMissingPanePath(device, missingPath);
+		if (!fallbackPaths.length) {
+			return false;
+		}
+
+		const state = this.paneStates[side];
+		state.error = undefined;
+		state.items = [];
+		this.clearPaneSelection(side);
+		this.statusMessage = `${device.name} 鍘熺洰褰曞凡涓嶅瓨鍦紝宸茶嚜鍔ㄥ洖閫€鍒?${fallbackPaths[0]}`;
+		await this.refreshPane(side, { ...options, path: fallbackPaths[0], force: true });
+		return true;
 	}
 
 	private async prefetchDefaultDeviceDirectories(): Promise<void> {
@@ -6261,6 +6284,69 @@ export class TurboFileEditor extends EditorPane {
 
 	private getPaneDirectoryCacheKey(device: TurboFileDevice, path: string): string {
 		return `${device.id}|${device.host}|${device.port || 0}|${device.username}|${device.authType ?? ''}|${path}`;
+	}
+
+	private isMissingPanePathError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error);
+		return /no such file|no such file or directory|file not found|path not found|enoent/i.test(message);
+	}
+
+	private getMissingPanePathFallbacks(device: TurboFileDevice, missingPath: string): string[] {
+		const windowsPath = this.isWindowsDevice(device);
+		const fallbackPaths: string[] = [];
+		const addFallback = (path: string | undefined) => {
+			if (!path) {
+				return;
+			}
+			const exists = windowsPath
+				? fallbackPaths.some(candidate => isSameWindowsPath(candidate, path))
+				: fallbackPaths.includes(path);
+			if (!exists) {
+				fallbackPaths.push(path);
+			}
+		};
+
+		let currentPath = missingPath;
+		for (let depth = 0; depth < 16; depth++) {
+			const parentPath = getPaneParentPath(currentPath, windowsPath);
+			if (!parentPath) {
+				break;
+			}
+			addFallback(parentPath);
+			currentPath = parentPath;
+		}
+
+		addFallback(this.getDefaultPaneDevicePath(device));
+		if (!windowsPath) {
+			addFallback('/');
+		}
+		return fallbackPaths;
+	}
+
+	private forgetMissingPanePath(device: TurboFileDevice, missingPath: string): void {
+		for (const side of ['left', 'right'] as const) {
+			const rememberedPath = this.getRememberedPaneDevicePath(side, device);
+			if (this.isPanePathMatch(device, rememberedPath, missingPath)) {
+				this.storageService.remove(this.getPaneDevicePathStorageKey(side, device), StorageScope.PROFILE);
+			}
+
+			const snapshotKey = this.getPaneDeviceMemoryKey(side, device);
+			const snapshot = this.paneDeviceSnapshots.get(snapshotKey);
+			if (snapshot && this.isPanePathMatch(device, snapshot.path, missingPath)) {
+				this.paneDeviceSnapshots.delete(snapshotKey);
+			}
+		}
+
+		const cacheKey = this.getPaneDirectoryCacheKey(device, missingPath);
+		this.paneDirectoryCache.delete(cacheKey);
+		this.paneDirectoryInflight.delete(cacheKey);
+	}
+
+	private isPanePathMatch(device: TurboFileDevice, left: string | undefined, right: string | undefined): boolean {
+		if (!left || !right) {
+			return false;
+		}
+		return this.isWindowsDevice(device) ? isSameWindowsPath(left, right) : left === right;
 	}
 
 	private clearPaneDirectoryCachesForDevice(deviceId: string): void {
