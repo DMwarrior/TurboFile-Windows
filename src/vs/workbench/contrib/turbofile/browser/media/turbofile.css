@@ -4535,6 +4535,30 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: var(--turbofile-unified-background);
 }
 
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card-status,
+.vs-dark .turbofile-workbench .turbofile-device-card-status,
+.hc-black .turbofile-workbench .turbofile-device-card-status {
+	color: var(--tf-success);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card-status.is-unknown,
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card-status.is-testing,
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card-status.is-offline,
+.vs-dark .turbofile-workbench .turbofile-device-card-status.is-unknown,
+.vs-dark .turbofile-workbench .turbofile-device-card-status.is-testing,
+.vs-dark .turbofile-workbench .turbofile-device-card-status.is-offline,
+.hc-black .turbofile-workbench .turbofile-device-card-status.is-unknown,
+.hc-black .turbofile-workbench .turbofile-device-card-status.is-testing,
+.hc-black .turbofile-workbench .turbofile-device-card-status.is-offline {
+	color: var(--vscode-descriptionForeground);
+}
+
+.turbofile-workbench.is-turbofile-dark .turbofile-device-card-status.is-online,
+.vs-dark .turbofile-workbench .turbofile-device-card-status.is-online,
+.hc-black .turbofile-workbench .turbofile-device-card-status.is-online {
+	color: var(--tf-success);
+}
+
 .turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:hover,
 .turbofile-workbench.is-turbofile-dark .turbofile-location-menu-button:focus,
 .vs-dark .turbofile-workbench .turbofile-location-menu-button:hover,
