@@ -15,21 +15,24 @@ export interface ITurboFileImageGridCardSize {
 	readonly rowHeight: number;
 }
 
-export function getTurboFileImageGridCardSize(source: ITurboFileImageGridSourceSize, scale: number, minPreviewSize: number, cardVerticalChrome: number, cardInlineChrome: number): ITurboFileImageGridCardSize {
+export function getTurboFileImageGridCardSize(source: ITurboFileImageGridSourceSize, scale: number, baseCardWidth: number, basePreviewHeight: number, cardVerticalChrome: number, cardInlineChrome: number): ITurboFileImageGridCardSize {
 	const normalizedScale = normalizePositiveNumber(scale, 1);
-	const minSize = Math.max(1, Math.round(minPreviewSize));
+	const baseWidth = Math.max(1, Math.round(baseCardWidth));
+	const previewWidth = Math.max(1, baseWidth - Math.max(0, Math.round(cardInlineChrome)));
+	const previewHeight = Math.max(1, Math.round(basePreviewHeight));
 	const sourceWidth = normalizePositiveNumber(source.width, 0);
 	const sourceHeight = normalizePositiveNumber(source.height, 0);
 	const hasSourceSize = sourceWidth > 0 && sourceHeight > 0;
-	const imageWidth = hasSourceSize ? Math.max(1, Math.round(sourceWidth * normalizedScale)) : minSize;
-	const imageHeight = hasSourceSize ? Math.max(1, Math.round(sourceHeight * normalizedScale)) : minSize;
-	const previewWidth = Math.max(minSize, imageWidth);
-	const previewHeight = Math.max(minSize, imageHeight);
+	const baseImageScale = hasSourceSize ? Math.min(previewWidth / sourceWidth, previewHeight / sourceHeight, 1) : 1;
+	const baseImageWidth = hasSourceSize ? Math.max(1, Math.round(sourceWidth * baseImageScale)) : previewWidth;
+	const baseImageHeight = hasSourceSize ? Math.max(1, Math.round(sourceHeight * baseImageScale)) : previewHeight;
+	const imageWidth = Math.max(1, Math.round(baseImageWidth * normalizedScale));
+	const imageHeight = Math.max(1, Math.round(baseImageHeight * normalizedScale));
 	return {
 		imageWidth,
 		imageHeight,
-		cardWidth: Math.max(1, Math.round(previewWidth + Math.max(0, cardInlineChrome))),
-		rowHeight: Math.max(1, Math.round(previewHeight + Math.max(0, cardVerticalChrome) + Math.max(0, cardInlineChrome)))
+		cardWidth: Math.max(baseWidth, Math.round(imageWidth + Math.max(0, cardInlineChrome))),
+		rowHeight: Math.max(1, Math.round(Math.max(previewHeight, imageHeight) + Math.max(0, cardVerticalChrome)))
 	};
 }
 

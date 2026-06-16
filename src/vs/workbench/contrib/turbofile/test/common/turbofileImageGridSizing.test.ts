@@ -7,22 +7,48 @@ import * as assert from 'assert';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns } from '../../common/turbofileImageGridSizing.js';
 
 suite('TurboFileImageGridSizing', () => {
-	test('scales the image from its original dimensions before sizing the card', () => {
+	test('keeps the old 1x grid size for large images', () => {
 		assert.deepStrictEqual(
-			getTurboFileImageGridCardSize({ width: 52, height: 33 }, 4, 96, 58, 16),
+			getTurboFileImageGridCardSize({ width: 2048, height: 1344 }, 1, 220, 150, 58, 16),
 			{
-				imageWidth: 208,
-				imageHeight: 132,
-				cardWidth: 224,
-				rowHeight: 206
+				imageWidth: 204,
+				imageHeight: 134,
+				cardWidth: 220,
+				rowHeight: 208
 			}
 		);
 	});
 
-	test('reduces columns from the requested maximum when scaled cards no longer fit', () => {
-		assert.strictEqual(
-			getTurboFileImageGridEffectiveColumns(12, 1000, 224, 16),
-			4
+	test('scales from the old 1x displayed image size', () => {
+		assert.deepStrictEqual(
+			[
+				getTurboFileImageGridCardSize({ width: 52, height: 33 }, 2, 220, 150, 58, 16),
+				getTurboFileImageGridCardSize({ width: 52, height: 33 }, 4, 220, 150, 58, 16)
+			],
+			[
+				{
+					imageWidth: 104,
+					imageHeight: 66,
+					cardWidth: 220,
+					rowHeight: 208
+				},
+				{
+					imageWidth: 208,
+					imageHeight: 132,
+					cardWidth: 224,
+					rowHeight: 208
+				}
+			]
+		);
+	});
+
+	test('keeps 12 columns at 1x and reduces columns when scaled cards no longer fit', () => {
+		assert.deepStrictEqual(
+			[
+				getTurboFileImageGridEffectiveColumns(12, 2816, 220, 16),
+				getTurboFileImageGridEffectiveColumns(12, 2816, 424, 16)
+			],
+			[12, 6]
 		);
 	});
 });

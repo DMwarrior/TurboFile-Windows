@@ -3670,7 +3670,7 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-image-page-grid {
 	display: grid;
-	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(var(--turbofile-image-grid-card-width, 112px), 1fr));
+	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(0, 1fr));
 	gap: 10px;
 	justify-items: center;
 	align-items: start;

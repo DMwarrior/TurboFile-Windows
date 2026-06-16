@@ -202,6 +202,7 @@ interface TurboFileImageGridRange {
 interface TurboFileImageGridLayoutMetrics {
 	readonly state: TurboFileImageGridState;
 	readonly scale: number;
+	readonly baseCardWidth: number;
 	readonly maxCardWidth: number;
 	readonly maxImageWidth: number;
 	readonly rowHeight: number;
@@ -4887,7 +4888,6 @@ export class TurboFileEditor extends EditorPane {
 		clearNode(grid);
 		grid.style.setProperty('--turbofile-image-grid-columns', String(this.getImageGridEffectiveColumns(state)));
 		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
-		grid.style.setProperty('--turbofile-image-grid-card-width', `${this.getImageGridMaxCardWidth(state)}px`);
 		this.releaseImageGridImagesOutsideRange(state, range);
 
 		if (range.topSpacerHeight > 0) {
@@ -4978,12 +4978,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridCardSize(state: TurboFileImageGridState, image: TurboFileImageGridImage): ITurboFileImageGridCardSize {
-		return getTurboFileImageGridCardSize({ width: image.width, height: image.height }, state.thumbnailScale, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_CARD_VERTICAL_CHROME, IMAGE_GRID_CARD_INLINE_CHROME);
+		return getTurboFileImageGridCardSize({ width: image.width, height: image.height }, state.thumbnailScale, this.getImageGridBaseCardWidth(state), this.getImageGridBasePreviewHeight(state), IMAGE_GRID_CARD_VERTICAL_CHROME, IMAGE_GRID_CARD_INLINE_CHROME);
 	}
 
 	private applyImageGridCardPreviewSize(preview: HTMLElement, size: ITurboFileImageGridCardSize): void {
 		preview.style.width = `${Math.max(1, size.cardWidth - IMAGE_GRID_CARD_INLINE_CHROME)}px`;
-		preview.style.height = `${Math.max(1, size.rowHeight - IMAGE_GRID_CARD_VERTICAL_CHROME - IMAGE_GRID_CARD_INLINE_CHROME)}px`;
+		preview.style.height = `${Math.max(1, size.rowHeight - IMAGE_GRID_CARD_VERTICAL_CHROME)}px`;
 	}
 
 	private applyImageGridCardImageSize(image: HTMLImageElement, size: ITurboFileImageGridCardSize): void {
@@ -9668,13 +9668,25 @@ export class TurboFileEditor extends EditorPane {
 		return this.getImageGridLayoutMetrics(state).maxImageWidth;
 	}
 
+	private getImageGridBaseCardWidth(state: TurboFileImageGridState): number {
+		const columns = Math.max(1, state.columns);
+		const width = this.getImageGridBodyWidth();
+		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
+		return Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
+	}
+
+	private getImageGridBasePreviewHeight(state: TurboFileImageGridState): number {
+		return this.getImageGridBaseCardWidth(state) * 150 / 220;
+	}
+
 	private getImageGridLayoutMetrics(state: TurboFileImageGridState): TurboFileImageGridLayoutMetrics {
-		if (this.imageGridLayoutMetrics?.state === state && this.imageGridLayoutMetrics.scale === state.thumbnailScale) {
+		const baseCardWidth = this.getImageGridBaseCardWidth(state);
+		if (this.imageGridLayoutMetrics?.state === state && this.imageGridLayoutMetrics.scale === state.thumbnailScale && this.imageGridLayoutMetrics.baseCardWidth === baseCardWidth) {
 			return this.imageGridLayoutMetrics;
 		}
-		let cardWidth = IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_INLINE_CHROME;
+		let cardWidth = baseCardWidth;
 		let imageWidth = IMAGE_GRID_THUMB_MIN;
-		let rowHeight = IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_VERTICAL_CHROME + IMAGE_GRID_CARD_INLINE_CHROME;
+		let rowHeight = this.getImageGridBasePreviewHeight(state) + IMAGE_GRID_CARD_VERTICAL_CHROME;
 		for (const image of state.images) {
 			const size = this.getImageGridCardSize(state, image);
 			cardWidth = Math.max(cardWidth, size.cardWidth);
@@ -9684,6 +9696,7 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridLayoutMetrics = {
 			state,
 			scale: state.thumbnailScale,
+			baseCardWidth,
 			maxCardWidth: Math.max(1, Math.round(cardWidth)),
 			maxImageWidth: Math.max(1, Math.round(imageWidth)),
 			rowHeight: Math.max(150, Math.round(rowHeight))
