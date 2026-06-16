@@ -33,6 +33,7 @@ import { IProductService } from '../../product/common/productService.js';
 import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
+import { ITurboFileGitHubRelease, resolveTurboFileUpdateFromGitHubRelease } from '../common/turbofileUpdate.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
 
@@ -176,7 +177,33 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		}
 	}
 
+	private isTurboFileGitHubUpdatesEnabled(): boolean {
+		const config = this.productService.turbofileUpdates;
+		return !!config?.owner && !!config.repo;
+	}
+
+	private buildTurboFileGitHubReleaseUrl(): string | undefined {
+		const config = this.productService.turbofileUpdates;
+		if (!config?.owner || !config.repo) {
+			return undefined;
+		}
+
+		return config.latestReleaseUrl ?? `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/releases/latest`;
+	}
+
+	private getTurboFileGitHubRequestHeaders(): Record<string, string> {
+		return {
+			...(getUpdateRequestHeaders(this.productService.version) ?? {}),
+			Accept: 'application/vnd.github+json',
+		};
+	}
+
 	protected buildUpdateFeedUrl(quality: string, commit: string, options?: IUpdateURLOptions): string | undefined {
+		const turboFileReleaseUrl = this.buildTurboFileGitHubReleaseUrl();
+		if (turboFileReleaseUrl) {
+			return turboFileReleaseUrl;
+		}
+
 		let platform = `win32-${process.arch}`;
 
 		if (getUpdateType() === UpdateType.Archive) {
@@ -190,6 +217,11 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 	protected doCheckForUpdates(explicit: boolean, pendingCommit?: string): void {
 		if (!this.quality) {
+			return;
+		}
+
+		if (this.isTurboFileGitHubUpdatesEnabled()) {
+			this.doCheckForTurboFileGitHubUpdates(explicit, pendingCommit);
 			return;
 		}
 
@@ -308,11 +340,130 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 			});
 	}
 
+	private doCheckForTurboFileGitHubUpdates(explicit: boolean, pendingVersion?: string): void {
+		const url = this.buildTurboFileGitHubReleaseUrl();
+		if (!url) {
+			this.setState(State.Idle(getUpdateType(), undefined, explicit || undefined));
+			return;
+		}
+
+		if (this.state.type !== StateType.Overwriting) {
+			this.setState(State.CheckingForUpdates(explicit));
+		}
+
+		const headers = this.getTurboFileGitHubRequestHeaders();
+		this.requestService.request({ url, headers, callSite: 'updateService.win32.checkTurboFileGitHubUpdates' }, CancellationToken.None)
+			.then<ITurboFileGitHubRelease | null>(context => context.res.statusCode === 404 ? Promise.resolve(null) : asJson<ITurboFileGitHubRelease>(context))
+			.then(release => {
+				const config = this.productService.turbofileUpdates;
+				const update = release && config ? resolveTurboFileUpdateFromGitHubRelease(release, pendingVersion ?? this.productService.version, {
+					allowPrerelease: config.allowPrerelease,
+					assetNamePattern: config.assetNamePattern,
+					arch: process.arch,
+				}) : undefined;
+
+				if (!update) {
+					if (this.state.type === StateType.Overwriting) {
+						this._overwrite = false;
+						this.setState(State.Ready(this.state.update, this.state.explicit, false));
+					} else {
+						this.setState(State.Idle(getUpdateType(), undefined, explicit || undefined));
+					}
+					return;
+				}
+
+				this.setState(State.AvailableForDownload(update, true));
+			})
+			.then(undefined, err => {
+				this.telemetryService.publicLog2<{ messageHash: string }, UpdateErrorClassification>('update:error', { messageHash: String(hash(String(err))) });
+				this.logService.error(err);
+
+				const message: string | undefined = explicit ? (err.message || err) : undefined;
+
+				if (this.state.type === StateType.Overwriting) {
+					this._overwrite = false;
+					this.setState(State.Ready(this.state.update, this.state.explicit, false));
+				} else {
+					this.setState(State.Idle(getUpdateType(), message));
+				}
+			});
+	}
+
 	protected override async doDownloadUpdate(state: AvailableForDownload): Promise<void> {
+		if (this.isTurboFileGitHubUpdatesEnabled() && state.update.url) {
+			await this.downloadAndPrepareUpdate(state.update, true);
+			return;
+		}
+
 		if (state.update.url) {
 			this.nativeHostMainService.openExternal(undefined, state.update.url);
 		}
 		this.setState(State.Idle(getUpdateType()));
+	}
+
+	private async downloadAndPrepareUpdate(update: IUpdate, explicit: boolean): Promise<void> {
+		if (!update.url) {
+			throw new Error('Missing update download URL');
+		}
+
+		const startTime = Date.now();
+		this.setState(State.Downloading(update, explicit, this._overwrite, 0, undefined, startTime));
+
+		await this.cleanup(update.version);
+		const updatePackagePath = await this.getUpdatePackagePath(update.version);
+		const packagePath = await pfs.Promises.exists(updatePackagePath)
+			? updatePackagePath
+			: await this.downloadUpdatePackage(update, updatePackagePath, explicit, startTime);
+
+		this.availableUpdate = { packagePath };
+		this.saveUpdateMetadata(update);
+		this.setState(State.Downloaded(update, explicit, this._overwrite));
+
+		const fastUpdatesEnabled = this.configurationService.getValue('update.enableWindowsBackgroundUpdates');
+		if (fastUpdatesEnabled && this.productService.target === 'user') {
+			this.doApplyUpdate();
+		} else {
+			this.setState(State.Ready(update, explicit, this._overwrite));
+		}
+	}
+
+	private async downloadUpdatePackage(update: IUpdate, updatePackagePath: string, explicit: boolean, startTime: number): Promise<string> {
+		if (!update.url) {
+			throw new Error('Missing update download URL');
+		}
+
+		const downloadPath = `${updatePackagePath}.tmp`;
+		const context = await this.requestService.request({ url: update.url, callSite: 'updateService.win32.downloadTurboFileGitHubUpdate' }, CancellationToken.None);
+
+		const contentLengthHeader = context.res.headers['content-length'];
+		const contentLength = typeof contentLengthHeader === 'string' ? contentLengthHeader : undefined;
+		const totalBytes = contentLength ? parseInt(contentLength, 10) : undefined;
+
+		let downloadedBytes = 0;
+		const progressDelayer = new Delayer<void>(500);
+		const progressStream = transform<VSBuffer, VSBuffer>(
+			context.stream,
+			{
+				data: data => {
+					downloadedBytes += data.byteLength;
+					progressDelayer.trigger(() => {
+						this.setState(State.Downloading(update, explicit, this._overwrite, downloadedBytes, totalBytes, startTime));
+					});
+					return data;
+				}
+			},
+			chunks => VSBuffer.concat(chunks)
+		);
+
+		await this.fileService.writeFile(URI.file(downloadPath), progressStream)
+			.finally(() => progressDelayer.dispose());
+
+		if (update.sha256hash) {
+			await checksum(downloadPath, update.sha256hash);
+		}
+
+		await pfs.Promises.rename(downloadPath, updatePackagePath, false /* no retry */);
+		return updatePackagePath;
 	}
 
 	private async getUpdatePackagePath(version: string): Promise<string> {
@@ -530,6 +681,34 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 	protected override getUpdateType(): UpdateType {
 		return getUpdateType();
+	}
+
+	override async isLatestVersion(commit?: string, token: CancellationToken = CancellationToken.None): Promise<boolean | undefined> {
+		if (!this.isTurboFileGitHubUpdatesEnabled()) {
+			return super.isLatestVersion(commit, token);
+		}
+
+		const url = this.buildTurboFileGitHubReleaseUrl();
+		const config = this.productService.turbofileUpdates;
+		if (!url || !config) {
+			return undefined;
+		}
+
+		try {
+			const context = await this.requestService.request({ url, headers: this.getTurboFileGitHubRequestHeaders(), callSite: 'updateService.win32.isLatestTurboFileGitHubVersion' }, token);
+			const release = context.res.statusCode === 404 ? null : await asJson<ITurboFileGitHubRelease>(context);
+			const update = release ? resolveTurboFileUpdateFromGitHubRelease(release, commit ?? this.productService.version, {
+				allowPrerelease: config.allowPrerelease,
+				assetNamePattern: config.assetNamePattern,
+				arch: process.arch,
+			}) : undefined;
+
+			return !update;
+		} catch (error) {
+			this.logService.error('update#isLatestVersion(): failed to check TurboFile GitHub release');
+			this.logService.error(error);
+			return undefined;
+		}
 	}
 
 	override async _applySpecificUpdate(packagePath: string, commit?: string): Promise<void> {

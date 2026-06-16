@@ -131,7 +131,8 @@ function buildWin32Setup(arch: string, target: string): task.CallbackTask {
 			definitions['ProxyMutex'] = embedded.win32MutexName;
 		}
 
-		if (quality === 'stable' || quality === 'insider') {
+		const win32ContextMenu = (product as typeof product & { win32ContextMenu?: Record<string, { clsid: string }> }).win32ContextMenu;
+		if ((quality === 'stable' || quality === 'insider') && win32ContextMenu?.[arch]) {
 			definitions['AppxPackage'] = `${quality === 'stable' ? 'code' : 'code_insider'}_${arch}.appx`;
 			definitions['AppxPackageDll'] = `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`;
 			definitions['AppxPackageName'] = `${product.win32AppUserModelId}`;

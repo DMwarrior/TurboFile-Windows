@@ -1,12 +1,19 @@
 {
 	"nameShort": "极速传",
 	"nameLong": "极速传",
+	"quality": "stable",
 	"applicationName": "turbofile",
 	"dataFolderName": ".turbofile",
 	"sharedDataFolderName": ".turbofile-shared",
 	"win32MutexName": "turbofile",
 	"licenseName": "MIT",
 	"licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+	"downloadUrl": "https://github.com/DMwarrior/TurboFile-Windows/releases/latest",
+	"updateUrl": "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/latest",
+	"turbofileUpdates": {
+		"owner": "DMwarrior",
+		"repo": "TurboFile-Windows"
+	},
 	"serverLicenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
 	"serverGreeting": [],
 	"serverLicense": [],

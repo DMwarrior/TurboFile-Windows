@@ -17,6 +17,7 @@ import { app, BrowserWindow, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
+import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 
@@ -24,6 +25,7 @@ const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
 const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
+const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
@@ -6783,7 +6785,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
 		try {
-			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), { timeoutMs: 8000 }));
+			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), { timeoutMs: REMOTE_DIRECTORY_READ_TIMEOUT_MS }));
 		} catch {
 			return this.readRemoteDirectory(sftp, remotePath);
 		}
@@ -6816,7 +6818,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private readRemoteDirectory(sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
-		return new Promise((resolve, reject) => {
+		return withTurboFileTimeout(new Promise((resolve, reject) => {
 			sftp.readdir(remotePath, (error, list) => {
 				if (error) {
 					reject(error);
@@ -6824,7 +6826,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				resolve(list);
 			});
-		});
+		}), REMOTE_DIRECTORY_READ_TIMEOUT_MS, `Remote directory read timed out after ${REMOTE_DIRECTORY_READ_TIMEOUT_MS} ms: ${remotePath}`);
 	}
 
 	private async getRemotePathSize(sftp: ISFTPWrapper, remotePath: string): Promise<number> {
