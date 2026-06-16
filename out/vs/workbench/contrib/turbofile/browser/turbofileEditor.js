@@ -59,6 +59,7 @@ import { TurboFileEditorInput } from "../common/turbofileEditorInput.js";
 import { TurboFileDeviceStore } from "./turbofileDeviceStore.js";
 import { turboFileWorkbenchBridge } from "./turbofileWorkbenchBridge.js";
 import { TurboFileDirectoryInflightTracker } from "../common/turbofileDirectoryInflight.js";
+import { createTurboFileImagePreviewReadOptions } from "../common/turbofileImagePreview.js";
 import { getTurboFileTitlebarUpdateActionKind } from "../common/turbofileTitlebar.js";
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from "../common/turbofileTransferDisplay.js";
 const turboFileTerminalPageByTerminalId = /* @__PURE__ */ new Map();
@@ -133,10 +134,6 @@ const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
-const IMAGE_PREVIEW_MIN_DIM = 320;
-const IMAGE_PREVIEW_MAX_DIM = 2200;
-const IMAGE_PREVIEW_QUALITY = 82;
-const IMAGE_PREVIEW_DIM_STEP = 128;
 const IMAGE_READ_CACHE_MAX_ENTRIES = 512;
 const IMAGE_READ_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const TURBOFILE_APPEARANCE_DARK_THEME_LABEL = "2017 Dark (Visual Studio - C/C++)";
@@ -8021,23 +8018,12 @@ HSV (${this.toHsvColor(r, g, b)})`;
     if (!this.shouldKeepImageGridPreview(state, index)) {
       return;
     }
-    const request = this.getImagePreviewRequestSize();
     image.previewLoading = true;
     if (!silent && state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
       this.updateImagePreviewOverlay();
     }
     try {
-      const result = await this.readImageGridImage(device, image.item.path, {
-        encoding: "base64",
-        width: request.width,
-        height: request.height,
-        quality: request.quality,
-        format: "jpeg",
-        interpolation: "lanczos",
-        maxBytes: 128 * 1024 * 1024,
-        sourceSize: image.item.rawSize,
-        sourceModified: image.item.rawModified
-      });
+      const result = await this.readImageGridImage(device, image.item.path, createTurboFileImagePreviewReadOptions(image.item.rawSize, image.item.rawModified));
       if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
         return;
       }
@@ -8222,19 +8208,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
   }
   shouldUseOriginalImageGridCardSource(width, height) {
     return !!width && !!height && width <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD && height <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD;
-  }
-  getImagePreviewRequestSize() {
-    const ownerWindow = this.container?.ownerDocument.defaultView;
-    const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-    const viewportWidth = ownerWindow?.innerWidth || this.container?.clientWidth || 1440;
-    const viewportHeight = ownerWindow?.innerHeight || this.container?.clientHeight || 900;
-    const widthRaw = clampNumber(Math.round(viewportWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
-    const heightRaw = clampNumber(Math.round(viewportHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
-    return {
-      width: clampNumber(quantizeNumber(widthRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
-      height: clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
-      quality: IMAGE_PREVIEW_QUALITY
-    };
   }
   getImageGridThumbnailParallelLimit(state) {
     const device = this.getPaneDevice(state.side);
