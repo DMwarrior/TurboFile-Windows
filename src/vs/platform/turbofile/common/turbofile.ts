@@ -260,4 +260,6 @@ export interface ITurboFileReadFileResult {
 	readonly size: number;
 	readonly width?: number;
 	readonly height?: number;
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 }

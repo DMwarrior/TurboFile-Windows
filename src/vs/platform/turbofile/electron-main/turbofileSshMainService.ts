@@ -32,7 +32,7 @@ const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const WINDOWS_DRAG_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
-const IMAGE_THUMBNAIL_CACHE_VERSION = 1;
+const IMAGE_THUMBNAIL_CACHE_VERSION = 2;
 const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
@@ -266,6 +266,8 @@ interface IImageBufferResult {
 	readonly mime: string;
 	readonly width?: number;
 	readonly height?: number;
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 }
 
 interface IImageSourceFingerprint {
@@ -279,6 +281,8 @@ interface IImageThumbnailCacheMetadata {
 	readonly size: number;
 	readonly width?: number;
 	readonly height?: number;
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 	readonly createdAt: number;
 }
 
@@ -3559,7 +3563,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				mime,
 				size: buffer.byteLength,
 				width: imageSize?.width,
-				height: imageSize?.height
+				height: imageSize?.height,
+				originalWidth: imageSize?.width,
+				originalHeight: imageSize?.height
 			};
 		} catch (error) {
 			return {
@@ -3585,7 +3591,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				mime: result.mime,
 				size: result.buffer.byteLength,
 				width: result.width,
-				height: result.height
+				height: result.height,
+				originalWidth: result.originalWidth,
+				originalHeight: result.originalHeight
 			};
 		} catch (error) {
 			return {
@@ -6170,7 +6178,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			buffer,
 			mime: getMimeType(endpoint.path),
 			width: size?.width,
-			height: size?.height
+			height: size?.height,
+			originalWidth: size?.width,
+			originalHeight: size?.height
 		};
 	}
 
@@ -6179,9 +6189,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			&& !looksLikeWindowsPath(endpoint.path)
 			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
 		if (shouldTryRemoteTransform) {
-			const thumbnail = await this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation);
+			const [thumbnail, sourceSize] = await Promise.all([
+				this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation),
+				this.tryReadRemoteImageSizeViaImageMagick(endpoint)
+			]);
 			if (thumbnail) {
-				return thumbnail;
+				return {
+					...thumbnail,
+					originalWidth: sourceSize?.width ?? thumbnail.originalWidth ?? thumbnail.width,
+					originalHeight: sourceSize?.height ?? thumbnail.originalHeight ?? thumbnail.height
+				};
 			}
 		}
 
@@ -6201,7 +6218,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				buffer: sourceBuffer,
 				mime: sourceMime,
 				width: sourceSize?.width,
-				height: sourceSize?.height
+				height: sourceSize?.height,
+				originalWidth: sourceSize?.width,
+				originalHeight: sourceSize?.height
 			};
 		}
 		if (sourceSize && sourceSize.width > 0 && sourceSize.height > 0 && sourceSize.width < SMALL_IMAGE_DIM_LIMIT && sourceSize.height < SMALL_IMAGE_DIM_LIMIT) {
@@ -6209,7 +6228,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				buffer: sourceBuffer,
 				mime: sourceMime,
 				width: sourceSize.width,
-				height: sourceSize.height
+				height: sourceSize.height,
+				originalWidth: sourceSize.width,
+				originalHeight: sourceSize.height
 			};
 		}
 		try {
@@ -6220,7 +6241,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					buffer: sourceBuffer,
 					mime: sourceMime,
 					width: sourceSize?.width,
-					height: sourceSize?.height
+					height: sourceSize?.height,
+					originalWidth: sourceSize?.width,
+					originalHeight: sourceSize?.height
 				};
 			}
 			throw error;
@@ -6299,7 +6322,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				buffer,
 				mime: metadata.mime,
 				width: typeof metadata.width === 'number' ? metadata.width : undefined,
-				height: typeof metadata.height === 'number' ? metadata.height : undefined
+				height: typeof metadata.height === 'number' ? metadata.height : undefined,
+				originalWidth: typeof metadata.originalWidth === 'number' ? metadata.originalWidth : undefined,
+				originalHeight: typeof metadata.originalHeight === 'number' ? metadata.originalHeight : undefined
 			};
 		} catch {
 			return undefined;
@@ -6318,6 +6343,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			size: result.buffer.byteLength,
 			width: result.width,
 			height: result.height,
+			originalWidth: result.originalWidth,
+			originalHeight: result.originalHeight,
 			createdAt: Date.now()
 		};
 		try {
@@ -6466,6 +6493,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async tryReadRemoteImageSizeViaImageMagick(endpoint: ITurboFileTransferEndpoint): Promise<IImageSize | undefined> {
+		if (!endpoint.connection) {
+			return undefined;
+		}
+
+		const tool = await this.getRemoteImageTool(endpoint);
+		if (!tool) {
+			return undefined;
+		}
+
+		const source = quotePosixShellArg(endpoint.path);
+		const format = quotePosixShellArg('%w %h');
+		const command = tool === 'magick'
+			? `${tool} identify -format ${format} ${source}`
+			: `identify -format ${format} ${source} 2>/dev/null || ${tool} ${source} -format ${format} info:`;
+		let output = '';
+		try {
+			await this.withDirectorySshClient(endpoint, client => this.execRemote(client, command, {
+				timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS,
+				onStdout: chunk => {
+					output += chunk;
+				}
+			}));
+		} catch {
+			return undefined;
+		}
+
+		const match = /(?<width>\d+)\s+(?<height>\d+)/.exec(output.trim());
+		if (!match?.groups) {
+			return undefined;
+		}
+		const width = Number(match.groups.width);
+		const height = Number(match.groups.height);
+		return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? { width, height } : undefined;
+	}
+
 	private async getRemoteImageTool(endpoint: ITurboFileTransferEndpoint): Promise<'magick' | 'convert' | undefined> {
 		if (!endpoint.connection) {
 			return undefined;
@@ -6578,7 +6641,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			buffer: output,
 			mime: outputFormat === 'png' ? 'image/png' : 'image/jpeg',
 			width: outputSize.width,
-			height: outputSize.height
+			height: outputSize.height,
+			originalWidth: sourceSize.width,
+			originalHeight: sourceSize.height
 		};
 	}
 
@@ -9110,7 +9175,9 @@ function tryCreateBmpPngVariant(buffer: Buffer, targetWidth: number, targetHeigh
 		buffer: png,
 		mime: 'image/png',
 		width: outputSize.width,
-		height: outputSize.height
+		height: outputSize.height,
+		originalWidth: decoded.width,
+		originalHeight: decoded.height
 	};
 }
 

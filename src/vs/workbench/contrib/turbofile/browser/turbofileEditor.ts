@@ -57,6 +57,7 @@ import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceSto
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
+import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
 import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
@@ -176,6 +177,8 @@ interface TurboFileImageReadResult {
 	readonly size: number;
 	readonly width?: number;
 	readonly height?: number;
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 	readonly buffer?: VSBuffer;
 }
 
@@ -185,6 +188,8 @@ interface TurboFileCachedImageReadResult {
 	readonly size: number;
 	readonly width?: number;
 	readonly height?: number;
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 }
 
 interface TurboFileImageGridRange {
@@ -192,6 +197,14 @@ interface TurboFileImageGridRange {
 	readonly endIndex: number;
 	readonly topSpacerHeight: number;
 	readonly bottomSpacerHeight: number;
+}
+
+interface TurboFileImageGridLayoutMetrics {
+	readonly state: TurboFileImageGridState;
+	readonly scale: number;
+	readonly maxCardWidth: number;
+	readonly maxImageWidth: number;
+	readonly rowHeight: number;
 }
 
 interface TurboFileImagePreviewAnalysis {
@@ -433,6 +446,7 @@ const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 16;
 const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
+const IMAGE_GRID_CARD_INLINE_CHROME = 16;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
@@ -604,6 +618,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly imageGridThumbnailQueued = new Set<string>();
 	private imageGridThumbnailLoadingCount = 0;
 	private imageGridRenderedRange: { startIndex: number; endIndex: number; columns: number; total: number } | undefined;
+	private imageGridLayoutMetrics: TurboFileImageGridLayoutMetrics | undefined;
 	private imageGridPreviewRequestSeq = 0;
 	private imageGridPreviewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly imageGridLoadedThumbnailIndexes = new Set<number>();
@@ -4872,6 +4887,7 @@ export class TurboFileEditor extends EditorPane {
 		clearNode(grid);
 		grid.style.setProperty('--turbofile-image-grid-columns', String(this.getImageGridEffectiveColumns(state)));
 		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
+		grid.style.setProperty('--turbofile-image-grid-card-width', `${this.getImageGridMaxCardWidth(state)}px`);
 		this.releaseImageGridImagesOutsideRange(state, range);
 
 		if (range.topSpacerHeight > 0) {
@@ -4904,6 +4920,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
 		const card = $('div.turbofile-image-page-card') as HTMLElement;
+		const cardSize = this.getImageGridCardSize(state, image);
 		card.tabIndex = 0;
 		card.setAttribute('role', 'option');
 		card.title = image.item.name;
@@ -4918,11 +4935,13 @@ export class TurboFileEditor extends EditorPane {
 		card.setAttribute('aria-selected', isSelected ? 'true' : 'false');
 
 		const preview = $('.turbofile-image-page-card-preview');
+		this.applyImageGridCardPreviewSize(preview, cardSize);
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 		if (thumbnailSrc) {
 			const thumb = document.createElement('img');
 			thumb.loading = 'eager';
 			thumb.decoding = 'async';
+			this.applyImageGridCardImageSize(thumb, cardSize);
 			thumb.addEventListener('error', () => this.handleImageGridThumbnailError(state, index));
 			thumb.src = thumbnailSrc;
 			thumb.alt = image.item.name;
@@ -4956,6 +4975,20 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		return card;
+	}
+
+	private getImageGridCardSize(state: TurboFileImageGridState, image: TurboFileImageGridImage): ITurboFileImageGridCardSize {
+		return getTurboFileImageGridCardSize({ width: image.width, height: image.height }, state.thumbnailScale, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_CARD_VERTICAL_CHROME, IMAGE_GRID_CARD_INLINE_CHROME);
+	}
+
+	private applyImageGridCardPreviewSize(preview: HTMLElement, size: ITurboFileImageGridCardSize): void {
+		preview.style.width = `${Math.max(1, size.cardWidth - IMAGE_GRID_CARD_INLINE_CHROME)}px`;
+		preview.style.height = `${Math.max(1, size.rowHeight - IMAGE_GRID_CARD_VERTICAL_CHROME - IMAGE_GRID_CARD_INLINE_CHROME)}px`;
+	}
+
+	private applyImageGridCardImageSize(image: HTMLImageElement, size: ITurboFileImageGridCardSize): void {
+		image.style.width = `${size.imageWidth}px`;
+		image.style.height = `${size.imageHeight}px`;
 	}
 
 	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number): void {
@@ -8406,6 +8439,7 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
 		this.clearImageGridLoadedImageIndexes();
+		this.clearImageGridLayoutMetrics();
 		this.imageGridRenderedRange = undefined;
 		const images = state.items
 			.filter(item => !item.parent && !item.directory && !!item.path && isImageFile(item.name))
@@ -8491,6 +8525,7 @@ export class TurboFileEditor extends EditorPane {
 		this.clearImageGridScrollRaf();
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
+		this.clearImageGridLayoutMetrics(state);
 		this.releaseImageGridStateImages(state);
 		this.clearImageGridLoadedImageIndexes();
 		this.imagePreviewAnalysis = undefined;
@@ -8984,6 +9019,7 @@ export class TurboFileEditor extends EditorPane {
 		const deleteIndex = state.selectedIndex;
 		this.releaseImageGridImage(image);
 		state.images.splice(deleteIndex, 1);
+		this.clearImageGridLayoutMetrics(state);
 		state.selectedIndex = Math.max(0, Math.min(deleteIndex, state.images.length - 1));
 		state.previewZoom = 1;
 		state.previewPanX = 0;
@@ -9046,6 +9082,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.imageGridState.thumbnailScale = nextScale;
+		this.clearImageGridLayoutMetrics(this.imageGridState);
 		this.imageGridRenderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridLoadedImageIndexes();
@@ -9277,7 +9314,9 @@ export class TurboFileEditor extends EditorPane {
 				mime: cached.mime,
 				size: cached.size,
 				width: cached.width,
-				height: cached.height
+				height: cached.height,
+				originalWidth: cached.originalWidth,
+				originalHeight: cached.originalHeight
 			};
 		}
 
@@ -9288,7 +9327,9 @@ export class TurboFileEditor extends EditorPane {
 				mime: result.mime,
 				size: result.size,
 				width: result.width,
-				height: result.height
+				height: result.height,
+				originalWidth: result.originalWidth,
+				originalHeight: result.originalHeight
 			});
 			this.trimImageReadCache();
 		}
@@ -9353,6 +9394,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		try {
+			const previousColumns = this.getImageGridEffectiveColumns(state);
+			const previousRowHeight = this.getImageGridRowHeight(state);
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
 			const shouldReadOriginalFirst = this.shouldUseOriginalImageGridCardSource(image.width, image.height);
 			let result = shouldReadOriginalFirst
@@ -9392,16 +9435,26 @@ export class TurboFileEditor extends EditorPane {
 			}
 			this.releaseImageBlobUrl(image.thumbnailUrl);
 			const thumbnailUrl = result.ok ? this.createImageObjectUrl(result) : undefined;
+			const sourceWidth = result.originalWidth ?? result.width ?? resolvedWidth;
+			const sourceHeight = result.originalHeight ?? result.height ?? resolvedHeight;
 			image.thumbnailContent = thumbnailUrl ? '' : result.ok ? result.content : '';
 			image.thumbnailUrl = thumbnailUrl;
 			image.thumbnailMime = result.mime || getMimeType(image.item.name);
 			image.thumbnailError = result.ok ? undefined : result.message;
-			image.width = result.width ?? resolvedWidth;
-			image.height = result.height ?? resolvedHeight;
+			image.width = sourceWidth;
+			image.height = sourceHeight;
+			this.clearImageGridLayoutMetrics(state);
 			if (result.ok) {
 				this.imageGridLoadedThumbnailIndexes.add(index);
 			}
-			this.updateImageGridCard(index);
+			const nextColumns = this.getImageGridEffectiveColumns(state);
+			const nextRowHeight = this.getImageGridRowHeight(state);
+			if (previousColumns !== nextColumns || previousRowHeight !== nextRowHeight) {
+				this.imageGridRenderedRange = undefined;
+				this.updateImageGridVirtualSlice(state, this.getImageGridVirtualRange(state));
+			} else {
+				this.updateImageGridCard(index);
+			}
 		} catch (error) {
 			if (this.imageGridState === state) {
 				image.thumbnailError = error instanceof Error ? error.message : String(error);
@@ -9553,11 +9606,14 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		clearNode(preview);
+		const cardSize = this.getImageGridCardSize(state, image);
+		this.applyImageGridCardPreviewSize(preview, cardSize);
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 		if (thumbnailSrc) {
 			const thumb = document.createElement('img');
 			thumb.loading = 'eager';
 			thumb.decoding = 'async';
+			this.applyImageGridCardImageSize(thumb, cardSize);
 			thumb.addEventListener('error', () => this.handleImageGridThumbnailError(state, index));
 			thumb.src = thumbnailSrc;
 			thumb.alt = image.item.name;
@@ -9575,15 +9631,9 @@ export class TurboFileEditor extends EditorPane {
 		return Math.max(480, height - 44);
 	}
 
-	/**
-	 * The number of columns actually laid out. The user picks a base column count, and the zoom
-	 * factor divides it so that larger thumbnails get proportionally wider cells and stay fully
-	 * visible (object-fit: contain) instead of being scaled past the cell bounds and clipped.
-	 */
 	private getImageGridEffectiveColumns(state: TurboFileImageGridState): number {
 		const base = Math.max(1, state.columns);
-		const scale = this.normalizeImageGridThumbnailScale(state.thumbnailScale);
-		return clampNumber(Math.round(base / scale), 1, base);
+		return getTurboFileImageGridEffectiveColumns(base, this.getImageGridBodyWidth(), this.getImageGridMaxCardWidth(state), IMAGE_GRID_CARD_GAP);
 	}
 
 	private getImageGridVirtualRange(state: TurboFileImageGridState): TurboFileImageGridRange {
@@ -9607,12 +9657,44 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridRowHeight(state: TurboFileImageGridState): number {
-		const width = this.getImageGridBodyWidth();
-		const columns = this.getImageGridEffectiveColumns(state);
-		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
-		const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
-		const previewHeight = columnWidth * 150 / 220;
-		return Math.max(150, Math.round(previewHeight + IMAGE_GRID_CARD_VERTICAL_CHROME));
+		return this.getImageGridLayoutMetrics(state).rowHeight;
+	}
+
+	private getImageGridMaxCardWidth(state: TurboFileImageGridState): number {
+		return this.getImageGridLayoutMetrics(state).maxCardWidth;
+	}
+
+	private getImageGridMaxImageWidth(state: TurboFileImageGridState): number {
+		return this.getImageGridLayoutMetrics(state).maxImageWidth;
+	}
+
+	private getImageGridLayoutMetrics(state: TurboFileImageGridState): TurboFileImageGridLayoutMetrics {
+		if (this.imageGridLayoutMetrics?.state === state && this.imageGridLayoutMetrics.scale === state.thumbnailScale) {
+			return this.imageGridLayoutMetrics;
+		}
+		let cardWidth = IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_INLINE_CHROME;
+		let imageWidth = IMAGE_GRID_THUMB_MIN;
+		let rowHeight = IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_VERTICAL_CHROME + IMAGE_GRID_CARD_INLINE_CHROME;
+		for (const image of state.images) {
+			const size = this.getImageGridCardSize(state, image);
+			cardWidth = Math.max(cardWidth, size.cardWidth);
+			imageWidth = Math.max(imageWidth, size.imageWidth);
+			rowHeight = Math.max(rowHeight, size.rowHeight);
+		}
+		this.imageGridLayoutMetrics = {
+			state,
+			scale: state.thumbnailScale,
+			maxCardWidth: Math.max(1, Math.round(cardWidth)),
+			maxImageWidth: Math.max(1, Math.round(imageWidth)),
+			rowHeight: Math.max(150, Math.round(rowHeight))
+		};
+		return this.imageGridLayoutMetrics;
+	}
+
+	private clearImageGridLayoutMetrics(state?: TurboFileImageGridState): void {
+		if (!state || this.imageGridLayoutMetrics?.state === state) {
+			this.imageGridLayoutMetrics = undefined;
+		}
 	}
 
 	private getImageGridBodyWidth(): number {
@@ -9626,13 +9708,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridThumbnailRequestWidth(state: TurboFileImageGridState): number {
-		const width = this.getImageGridBodyWidth();
-		const columns = this.getImageGridEffectiveColumns(state);
-		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
-		const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
 		const ownerWindow = this.container?.ownerDocument.defaultView;
 		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-		const scaled = Math.round(columnWidth * dpr);
+		const scaled = Math.round(this.getImageGridMaxImageWidth(state) * dpr);
 		return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 	}
 

@@ -3663,14 +3663,17 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-image-page-body {
 	min-height: 0;
-	overflow: auto;
+	overflow-x: auto;
+	overflow-y: auto;
 	padding: 10px;
 }
 
 .turbofile-image-page-grid {
 	display: grid;
-	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(0, 1fr));
+	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(var(--turbofile-image-grid-card-width, 112px), 1fr));
 	gap: 10px;
+	justify-items: center;
+	align-items: start;
 }
 
 .turbofile-image-page-spacer {
@@ -3692,6 +3695,8 @@ body.hc-black .turbofile-live-transfer-panel {
 	cursor: pointer;
 	text-align: left;
 	user-select: none;
+	width: fit-content;
+	max-width: none;
 	transition: border-color 120ms ease, box-shadow 120ms ease, transform 90ms ease;
 	content-visibility: auto;
 	contain: layout paint style;
@@ -3742,13 +3747,14 @@ body.hc-black .turbofile-live-transfer-panel {
 	align-items: center;
 	justify-content: center;
 	overflow: hidden;
+	flex: 0 0 auto;
 }
 
 .turbofile-image-page-card-preview img {
 	width: auto;
 	height: auto;
-	max-width: 100%;
-	max-height: 100%;
+	max-width: none;
+	max-height: none;
 	object-fit: contain;
 	display: block;
 }
@@ -5557,8 +5563,8 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview img {
 	width: auto;
 	height: auto;
-	max-width: 100%;
-	max-height: 100%;
+	max-width: none;
+	max-height: none;
 	object-fit: contain;
 	border-radius: 0;
 	background: transparent;
