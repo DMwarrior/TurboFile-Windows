@@ -3418,26 +3418,9 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: var(--tf-image-control-hover);
 }
 
-.turbofile-image-page-action:disabled {
-	opacity: 0.45;
-	cursor: default;
-}
-
-.turbofile-image-page-action:disabled:hover {
-	background: var(--tf-image-control-bg);
-}
-
 .turbofile-image-page-action.is-active {
 	color: var(--tf-image-control-text);
 	background: var(--tf-image-control-bg);
-}
-
-.turbofile-image-page-action.is-danger {
-	color: var(--vscode-errorForeground, #f87171);
-}
-
-.turbofile-image-page-action.is-danger:not(:disabled):hover {
-	background: color-mix(in srgb, var(--vscode-errorForeground, #f87171) 12%, var(--tf-image-control-hover));
 }
 
 .turbofile-image-page-action .codicon {
@@ -3657,14 +3640,13 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-image-page-body {
 	min-height: 0;
-	overflow-x: hidden;
-	overflow-y: auto;
+	overflow: auto;
 	padding: 10px;
 }
 
 .turbofile-image-page-grid {
 	display: grid;
-	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(var(--turbofile-image-grid-min-column-width, 0px), 1fr));
+	grid-template-columns: repeat(var(--turbofile-image-grid-columns, 8), minmax(0, 1fr));
 	gap: 10px;
 }
 
@@ -3707,11 +3689,6 @@ body.hc-black .turbofile-live-transfer-panel {
 	box-shadow: 0 0 0 2px color-mix(in srgb, #22c55e 25%, transparent);
 }
 
-.turbofile-image-page-card.is-focused {
-	outline: 1px solid color-mix(in srgb, #22c55e 45%, transparent);
-	outline-offset: 2px;
-}
-
 .turbofile-image-page-card:focus-visible {
 	outline: 2px solid color-mix(in srgb, #22c55e 62%, transparent);
 	outline-offset: 2px;
@@ -3742,11 +3719,12 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-image-page-card-preview img {
 	width: auto;
 	height: auto;
-	max-width: none;
-	max-height: none;
-	flex-shrink: 0;
+	max-width: 100%;
+	max-height: 100%;
 	object-fit: contain;
 	display: block;
+	transform: scale(var(--turbofile-image-grid-scale, 1));
+	transform-origin: center center;
 }
 
 .turbofile-image-page-card-placeholder {
@@ -5516,15 +5494,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 	box-shadow: 0 0 0 1px var(--tf-image-selected-ring, color-mix(in srgb, var(--tf-image-brand) 24%, transparent));
 }
 
-.vs .turbofile-workbench .turbofile-image-page-card.is-focused,
-.vs-dark .turbofile-workbench .turbofile-image-page-card.is-focused,
-.hc-black .turbofile-workbench .turbofile-image-page-card.is-focused,
-.turbofile-workbench.is-turbofile-light .turbofile-image-page-card.is-focused,
-.turbofile-workbench.is-turbofile-dark .turbofile-image-page-card.is-focused {
-	outline: 1px solid color-mix(in srgb, var(--tf-image-brand) 52%, transparent);
-	outline-offset: 2px;
-}
-
 .vs .turbofile-workbench .turbofile-image-page-card::after,
 .vs-dark .turbofile-workbench .turbofile-image-page-card::after,
 .hc-black .turbofile-workbench .turbofile-image-page-card::after,
@@ -5553,13 +5522,22 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-card-preview img {
 	width: auto;
 	height: auto;
-	max-width: none;
-	max-height: none;
-	flex-shrink: 0;
+	max-width: 100%;
+	max-height: 100%;
 	object-fit: contain;
 	border-radius: 0;
 	background: transparent;
-	transition: opacity 200ms ease;
+	transform: scale(var(--turbofile-image-grid-scale, 1));
+	transform-origin: center center;
+	transition: opacity 200ms ease, transform 160ms ease;
+}
+
+.vs .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
+.vs-dark .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
+.hc-black .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
+.turbofile-workbench.is-turbofile-light .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
+.turbofile-workbench.is-turbofile-dark .turbofile-image-page-card:hover .turbofile-image-page-card-preview img {
+	transform: none;
 }
 
 .turbofile-image-page-card-info {

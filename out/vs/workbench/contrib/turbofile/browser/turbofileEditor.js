@@ -115,7 +115,6 @@ const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 16;
 const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
-const IMAGE_GRID_CARD_HORIZONTAL_CHROME = 16;
 const IMAGE_GRID_THUMB_MIN = 96;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
@@ -299,9 +298,6 @@ let TurboFileEditor = class extends EditorPane {
     this.imageGridSortKey = "name";
     this.imageGridSortDescending = false;
     this.imageGridScrollRaf = 0;
-    this.imageGridLayoutRefreshRaf = 0;
-    this.imageGridRestoringScroll = 0;
-    this.imageGridScrollEventSeq = 0;
     this.imageGridThumbnailQueue = [];
     this.imageGridThumbnailQueued = /* @__PURE__ */ new Set();
     this.imageGridThumbnailLoadingCount = 0;
@@ -477,8 +473,6 @@ let TurboFileEditor = class extends EditorPane {
     this.disposeImageGridObserver();
     this.clearImageGridScrollTimer();
     this.clearImageGridScrollRaf();
-    this.clearImageGridScrollRestoreState();
-    this.clearImageGridLayoutRefreshRaf();
     this.clearImageGridThumbnailQueue();
     this.clearImageGridPreviewPrefetchTimer();
     this.clearImageGridLoadedImageIndexes();
@@ -1776,8 +1770,6 @@ let TurboFileEditor = class extends EditorPane {
       this.disposeImageGridObserver();
       this.clearImageGridScrollTimer();
       this.clearImageGridScrollRaf();
-      this.clearImageGridScrollRestoreState();
-      this.clearImageGridLayoutRefreshRaf();
       this.clearImageGridThumbnailQueue();
       this.clearImageGridPreviewPrefetchTimer();
       this.clearImageGridLoadedImageIndexes();
@@ -3862,7 +3854,8 @@ let TurboFileEditor = class extends EditorPane {
     const grid = $(".turbofile-image-page-grid");
     grid.setAttribute("role", "listbox");
     grid.setAttribute("aria-multiselectable", "true");
-    this.applyImageGridLayoutStyles(grid, state);
+    grid.style.setProperty("--turbofile-image-grid-columns", String(state.columns));
+    grid.style.setProperty("--turbofile-image-grid-scale", String(state.thumbnailScale));
     this.renderImageGridSlice(grid, state, range);
     body.appendChild(grid);
     page.appendChild(body);
@@ -4043,9 +4036,8 @@ let TurboFileEditor = class extends EditorPane {
   }
   renderImageGridSlice(grid, state, range) {
     clearNode(grid);
-    const columns = this.getImageGridColumnCount(state);
-    const rowHeight = this.getImageGridRowHeight(state);
-    this.applyImageGridLayoutStyles(grid, state);
+    grid.style.setProperty("--turbofile-image-grid-columns", String(state.columns));
+    grid.style.setProperty("--turbofile-image-grid-scale", String(state.thumbnailScale));
     this.releaseImageGridImagesOutsideRange(state, range);
     if (range.topSpacerHeight > 0) {
       const topSpacer = $(".turbofile-image-page-spacer");
@@ -4063,8 +4055,7 @@ let TurboFileEditor = class extends EditorPane {
     this.imageGridRenderedRange = {
       startIndex: range.startIndex,
       endIndex: range.endIndex,
-      columns,
-      rowHeight,
+      columns: state.columns,
       total: state.images.length
     };
     const indexes = [];
@@ -4096,7 +4087,6 @@ let TurboFileEditor = class extends EditorPane {
       thumb.addEventListener("error", () => this.handleImageGridThumbnailError(state, index));
       thumb.src = thumbnailSrc;
       thumb.alt = image.item.name;
-      this.applyImageGridThumbnailDisplaySize(thumb, preview, image, state);
       preview.appendChild(thumb);
     } else {
       const placeholder = $(".turbofile-image-page-card-placeholder");
@@ -4125,62 +4115,6 @@ let TurboFileEditor = class extends EditorPane {
       }
     });
     return card;
-  }
-  applyImageGridLayoutStyles(grid, state) {
-    grid.style.setProperty("--turbofile-image-grid-columns", String(this.getImageGridColumnCount(state)));
-    grid.style.setProperty("--turbofile-image-grid-min-column-width", `${Math.round(this.getImageGridMinColumnWidth(state))}px`);
-  }
-  applyImageGridThumbnailDisplaySize(thumb, preview, image, state) {
-    const displaySize = this.getImageGridThumbnailDisplaySize(image, state);
-    if (!displaySize) {
-      thumb.style.removeProperty("width");
-      thumb.style.removeProperty("height");
-      preview.style.removeProperty("min-width");
-      preview.style.removeProperty("min-height");
-      return;
-    }
-    thumb.style.width = `${displaySize.width}px`;
-    thumb.style.height = `${displaySize.height}px`;
-    preview.style.minWidth = `${displaySize.width}px`;
-    preview.style.minHeight = `${displaySize.height}px`;
-  }
-  getImageGridThumbnailDesiredSize(image, state) {
-    if (!image.width || !image.height) {
-      return void 0;
-    }
-    const scale = this.normalizeImageGridThumbnailScale(state.thumbnailScale);
-    return {
-      width: Math.max(1, Math.round(image.width * scale)),
-      height: Math.max(1, Math.round(image.height * scale))
-    };
-  }
-  getImageGridThumbnailDisplaySize(image, state) {
-    const desiredSize = this.getImageGridThumbnailDesiredSize(image, state);
-    if (!desiredSize) {
-      return void 0;
-    }
-    const maxWidth = this.getImageGridMaxImageDisplayWidth();
-    if (desiredSize.width <= maxWidth) {
-      return desiredSize;
-    }
-    const ratio = maxWidth / desiredSize.width;
-    return {
-      width: maxWidth,
-      height: Math.max(1, Math.round(desiredSize.height * ratio))
-    };
-  }
-  getImageGridMaxThumbnailDisplaySize(state) {
-    let width = 0;
-    let height = 0;
-    for (const image of state.images) {
-      const displaySize = this.getImageGridThumbnailDisplaySize(image, state);
-      if (!displaySize) {
-        continue;
-      }
-      width = Math.max(width, displaySize.width);
-      height = Math.max(height, displaySize.height);
-    }
-    return { width, height };
   }
   appendImageGridCardChrome(preview, image, index) {
     const info = $(".turbofile-image-page-card-info");
@@ -7220,8 +7154,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
     this.disposeImageGridObserver();
     this.clearImageGridScrollTimer();
     this.clearImageGridScrollRaf();
-    this.clearImageGridScrollRestoreState();
-    this.clearImageGridLayoutRefreshRaf();
     this.clearImageGridThumbnailQueue();
     this.clearImageGridPreviewPrefetchTimer();
     this.releaseImageGridStateImages(state);
@@ -7731,21 +7663,25 @@ HSV (${this.toHsvColor(r, g, b)})`;
     this.render();
   }
   setImageGridThumbnailScale(scale) {
-    const state = this.imageGridState;
-    if (!state) {
+    if (!this.imageGridState) {
       return;
     }
     const nextScale = this.normalizeImageGridThumbnailScale(scale);
-    if (state.thumbnailScale === nextScale) {
+    if (this.imageGridState.thumbnailScale === nextScale) {
       return;
     }
-    const body = this.syncImageGridScrollState(state);
-    state.thumbnailScale = nextScale;
+    this.imageGridState.thumbnailScale = nextScale;
     this.imageGridRenderedRange = void 0;
     this.clearImageGridThumbnailQueue();
-    this.clearImageGridLayoutRefreshRaf();
-    this.updateImageGridScaleControlState(state);
-    this.updateImageGridVirtualSlice(state, this.getImageGridVirtualRange(state), !!body);
+    this.clearImageGridLoadedImageIndexes();
+    for (const image of this.imageGridState.images) {
+      this.releaseImageBlobUrl(image.thumbnailUrl);
+      image.thumbnailUrl = void 0;
+      image.thumbnailContent = "";
+      image.thumbnailLoading = false;
+      image.thumbnailError = void 0;
+    }
+    this.render();
   }
   normalizeImageGridThumbnailScale(scale) {
     const rounded = Math.round(scale);
@@ -7754,29 +7690,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
   getImageGridScaleLabel(scale) {
     const normalized = this.normalizeImageGridThumbnailScale(scale);
     return normalized === 1 ? "1x" : `${normalized}x`;
-  }
-  updateImageGridScaleControlState(state) {
-    if (!this.container || this.imageGridState !== state || this.activePage !== "images") {
-      return;
-    }
-    const selectedScale = this.normalizeImageGridThumbnailScale(state.thumbnailScale);
-    const label = this.container.querySelector(".turbofile-image-page-scale-label");
-    if (label) {
-      label.textContent = this.getImageGridScaleLabel(selectedScale);
-    }
-    for (const item of Array.from(this.container.querySelectorAll(".turbofile-image-page-scale-option"))) {
-      const itemScale = this.normalizeImageGridThumbnailScale(Number(item.dataset.scale));
-      const isActive = itemScale === selectedScale;
-      item.classList.toggle("is-active", isActive);
-      item.setAttribute("aria-selected", isActive ? "true" : "false");
-      const check = item.querySelector(".turbofile-image-page-scale-check");
-      if (check) {
-        clearNode(check);
-        if (isActive) {
-          check.appendChild(renderIcon(Codicon.check));
-        }
-      }
-    }
   }
   normalizeImageGridStateColumns(state) {
     const nextColumns = this.normalizeImageGridColumns(state.columns);
@@ -8240,7 +8153,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
       thumb.addEventListener("error", () => this.handleImageGridThumbnailError(state, index));
       thumb.src = thumbnailSrc;
       thumb.alt = image.item.name;
-      this.applyImageGridThumbnailDisplaySize(thumb, preview, image, state);
       preview.appendChild(thumb);
     } else {
       const placeholder = $(".turbofile-image-page-card-placeholder");
@@ -8248,38 +8160,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
       preview.appendChild(placeholder);
     }
     this.appendImageGridCardChrome(preview, image, index);
-    this.updateImageGridLayoutStyles(state);
-  }
-  updateImageGridLayoutStyles(state) {
-    if (!this.container || this.imageGridState !== state || this.activePage !== "images") {
-      return;
-    }
-    this.syncImageGridScrollState(state);
-    const columns = this.getImageGridColumnCount(state);
-    const rowHeight = this.getImageGridRowHeight(state);
-    const rendered = this.imageGridRenderedRange;
-    if (rendered && (rendered.columns !== columns || rendered.rowHeight !== rowHeight)) {
-      this.imageGridRenderedRange = void 0;
-      this.scheduleImageGridLayoutRefresh(state);
-      return;
-    }
-    const grid = this.container.querySelector(".turbofile-image-page-grid");
-    if (grid) {
-      this.applyImageGridLayoutStyles(grid, state);
-    }
-  }
-  scheduleImageGridLayoutRefresh(state) {
-    if (!this.container || this.imageGridState !== state || this.activePage !== "images" || this.imageGridLayoutRefreshRaf) {
-      return;
-    }
-    this.imageGridLayoutRefreshRaf = getWindow(this.container).requestAnimationFrame(() => {
-      this.imageGridLayoutRefreshRaf = 0;
-      if (!this.container || this.imageGridState !== state || this.activePage !== "images") {
-        return;
-      }
-      const body = this.syncImageGridScrollState(state);
-      this.updateImageGridVirtualSlice(state, this.getImageGridVirtualRange(state), !!body);
-    });
   }
   getImageGridDefaultViewportHeight() {
     const height = this.container?.clientHeight ?? 0;
@@ -8290,7 +8170,7 @@ HSV (${this.toHsvColor(r, g, b)})`;
     if (!total) {
       return { startIndex: 0, endIndex: 0, topSpacerHeight: 0, bottomSpacerHeight: 0 };
     }
-    const columns = this.getImageGridColumnCount(state);
+    const columns = Math.max(1, state.columns);
     const rowHeight = this.getImageGridRowHeight(state);
     const rowStep = rowHeight + IMAGE_GRID_CARD_GAP;
     const totalRows = Math.ceil(total / columns);
@@ -8304,50 +8184,30 @@ HSV (${this.toHsvColor(r, g, b)})`;
     return { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight };
   }
   getImageGridRowHeight(state) {
-    const columnWidth = this.getImageGridColumnWidth(state);
-    const previewHeight = columnWidth * 150 / 220;
-    const imageHeight = this.getImageGridMaxThumbnailDisplaySize(state).height;
-    return Math.max(150, Math.round(Math.max(previewHeight, imageHeight) + IMAGE_GRID_CARD_VERTICAL_CHROME));
-  }
-  getImageGridColumnCount(state) {
-    const requestedColumns = Math.max(1, state.columns);
     const width = this.getImageGridBodyWidth();
-    const minColumnWidth = this.getImageGridMinColumnWidth(state);
-    const columnsThatFit = Math.max(1, Math.floor((width + IMAGE_GRID_CARD_GAP) / (minColumnWidth + IMAGE_GRID_CARD_GAP)));
-    return Math.min(requestedColumns, columnsThatFit);
-  }
-  getImageGridColumnWidth(state) {
-    const width = this.getImageGridBodyWidth();
-    const columns = this.getImageGridColumnCount(state);
+    const columns = Math.max(1, state.columns);
     const available = width - IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1);
-    return Math.max(this.getImageGridMinColumnWidth(state), available / columns);
-  }
-  getImageGridMinColumnWidth(state) {
-    const displayWidth = this.getImageGridMaxThumbnailDisplaySize(state).width;
-    const imageColumnWidth = displayWidth > 0 ? displayWidth + IMAGE_GRID_CARD_HORIZONTAL_CHROME : 0;
-    return Math.min(this.getImageGridBodyWidth(), Math.max(IMAGE_GRID_THUMB_MIN, imageColumnWidth));
-  }
-  getImageGridMaxImageDisplayWidth() {
-    return Math.max(1, this.getImageGridBodyWidth() - IMAGE_GRID_CARD_HORIZONTAL_CHROME);
+    const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
+    const previewHeight = columnWidth * 150 / 220;
+    return Math.max(150, Math.round(previewHeight + IMAGE_GRID_CARD_VERTICAL_CHROME));
   }
   getImageGridBodyWidth() {
     const body = this.container?.querySelector(".turbofile-image-page-body");
     const measured = body?.clientWidth ?? 0;
-    if (body && measured > 0) {
-      const gridBody = body;
-      const style = getWindow(gridBody).getComputedStyle(gridBody);
-      const paddingLeft = style ? Number.parseFloat(style.paddingLeft) || 0 : 0;
-      const paddingRight = style ? Number.parseFloat(style.paddingRight) || 0 : 0;
-      return Math.max(320, measured - paddingLeft - paddingRight);
+    if (measured > 0) {
+      return Math.max(320, measured - 28);
     }
     const fallback = this.container?.clientWidth ?? 1440;
     return Math.max(320, fallback - 28);
   }
   getImageGridThumbnailRequestWidth(state) {
-    const columnWidth = this.getImageGridColumnWidth(state);
+    const width = this.getImageGridBodyWidth();
+    const columns = Math.max(1, state.columns);
+    const available = width - IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1);
+    const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
     const ownerWindow = this.container?.ownerDocument.defaultView;
     const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-    const scaled = Math.round(columnWidth * dpr);
+    const scaled = Math.round(columnWidth * dpr * this.normalizeImageGridThumbnailScale(state.thumbnailScale));
     return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
   }
   shouldUseOriginalImageGridCardSource(width, height) {
@@ -8378,7 +8238,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
     if (!state) {
       return;
     }
-    this.imageGridScrollEventSeq++;
     state.scrollTop = body.scrollTop;
     state.viewportHeight = body.clientHeight || state.viewportHeight;
     this.trimImageGridThumbnailQueue(state);
@@ -8392,24 +8251,12 @@ HSV (${this.toHsvColor(r, g, b)})`;
       }
       const range = this.getImageGridVirtualRange(state);
       const rendered = this.imageGridRenderedRange;
-      if (rendered && rendered.startIndex === range.startIndex && rendered.endIndex === range.endIndex && rendered.columns === this.getImageGridColumnCount(state) && rendered.rowHeight === this.getImageGridRowHeight(state) && rendered.total === state.images.length) {
+      if (rendered && rendered.startIndex === range.startIndex && rendered.endIndex === range.endIndex && rendered.columns === state.columns && rendered.total === state.images.length) {
         return;
       }
       this.clearImageGridScrollTimer();
-      this.updateImageGridVirtualSlice(state, range, true);
+      this.updateImageGridVirtualSlice(state, range);
     });
-  }
-  syncImageGridScrollState(state) {
-    if (!this.container || this.imageGridState !== state || this.activePage !== "images") {
-      return void 0;
-    }
-    const body = this.container.querySelector(".turbofile-image-page-body");
-    if (!body) {
-      return void 0;
-    }
-    state.scrollTop = body.scrollTop;
-    state.viewportHeight = body.clientHeight || state.viewportHeight;
-    return body;
   }
   handleImageGridWheel(event, body) {
     const state = this.imageGridState;
@@ -8436,7 +8283,7 @@ HSV (${this.toHsvColor(r, g, b)})`;
     const width = this.getImageGridBodyWidth();
     return Math.max(IMAGE_GRID_COLUMN_MIN, Math.floor((width + IMAGE_GRID_CARD_GAP) / (IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_GAP)));
   }
-  updateImageGridVirtualSlice(state, range, preserveScroll = false) {
+  updateImageGridVirtualSlice(state, range) {
     if (!this.container || this.imageGridState !== state || this.activePage !== "images") {
       return;
     }
@@ -8444,43 +8291,7 @@ HSV (${this.toHsvColor(r, g, b)})`;
     if (!grid) {
       return;
     }
-    const body = preserveScroll ? this.container.querySelector(".turbofile-image-page-body") : void 0;
-    const scrollTop = body ? body.scrollTop : state.scrollTop;
-    let effectiveRange = range;
-    if (body) {
-      state.scrollTop = scrollTop;
-      state.viewportHeight = body.clientHeight || state.viewportHeight;
-      effectiveRange = this.getImageGridVirtualRange(state);
-    }
-    if (!body) {
-      this.renderImageGridSlice(grid, state, effectiveRange);
-      return;
-    }
-    this.imageGridRestoringScroll++;
-    try {
-      this.renderImageGridSlice(grid, state, effectiveRange);
-      this.restoreImageGridScrollTop(state, body, scrollTop);
-    } catch (error) {
-      this.imageGridRestoringScroll = Math.max(0, this.imageGridRestoringScroll - 1);
-      throw error;
-    }
-  }
-  restoreImageGridScrollTop(state, body, scrollTop) {
-    const scrollEventSeq = this.imageGridScrollEventSeq;
-    state.scrollTop = scrollTop;
-    body.scrollTop = scrollTop;
-    getWindow(body).requestAnimationFrame(() => {
-      try {
-        if (body.isConnected && this.imageGridState === state && this.activePage === "images") {
-          if (body.scrollTop === 0 && scrollTop > 0 && state.scrollTop === scrollTop && this.imageGridScrollEventSeq === scrollEventSeq) {
-            body.scrollTop = scrollTop;
-          }
-          state.scrollTop = body.scrollTop;
-        }
-      } finally {
-        this.imageGridRestoringScroll = Math.max(0, this.imageGridRestoringScroll - 1);
-      }
-    });
+    this.renderImageGridSlice(grid, state, range);
   }
   clearImageGridScrollTimer() {
     if (!this.imageGridScrollRenderTimer) {
@@ -8497,18 +8308,6 @@ HSV (${this.toHsvColor(r, g, b)})`;
     getWindow(this.container).cancelAnimationFrame(this.imageGridScrollRaf);
     this.imageGridScrollRaf = 0;
   }
-  clearImageGridScrollRestoreState() {
-    this.imageGridRestoringScroll = 0;
-    this.imageGridScrollEventSeq++;
-  }
-  clearImageGridLayoutRefreshRaf() {
-    if (!this.imageGridLayoutRefreshRaf || !this.container) {
-      this.imageGridLayoutRefreshRaf = 0;
-      return;
-    }
-    getWindow(this.container).cancelAnimationFrame(this.imageGridLayoutRefreshRaf);
-    this.imageGridLayoutRefreshRaf = 0;
-  }
   clearImageGridPreviewPrefetchTimer() {
     if (!this.imageGridPreviewPrefetchTimer) {
       return;
@@ -8518,8 +8317,7 @@ HSV (${this.toHsvColor(r, g, b)})`;
   }
   getImageGridVisibleIndexes(state) {
     const rendered = this.imageGridRenderedRange;
-    const currentRange = this.getImageGridVirtualRange(state);
-    const range = this.imageGridState === state && rendered && rendered.columns === this.getImageGridColumnCount(state) && rendered.rowHeight === this.getImageGridRowHeight(state) && rendered.total === state.images.length && rendered.startIndex === currentRange.startIndex && rendered.endIndex === currentRange.endIndex ? { startIndex: rendered.startIndex, endIndex: rendered.endIndex } : currentRange;
+    const range = this.imageGridState === state && rendered && rendered.columns === state.columns && rendered.total === state.images.length ? { startIndex: rendered.startIndex, endIndex: rendered.endIndex } : this.getImageGridVirtualRange(state);
     const indexes = [];
     for (let index = range.startIndex; index < range.endIndex; index++) {
       indexes.push(index);
@@ -8549,16 +8347,15 @@ HSV (${this.toHsvColor(r, g, b)})`;
   }
   isImageGridIndexNearViewport(state, index) {
     const rendered = this.imageGridRenderedRange;
-    const currentRange = this.getImageGridVirtualRange(state);
-    if (this.imageGridState === state && rendered && rendered.columns === this.getImageGridColumnCount(state) && rendered.rowHeight === this.getImageGridRowHeight(state) && rendered.total === state.images.length && rendered.startIndex === currentRange.startIndex && rendered.endIndex === currentRange.endIndex) {
+    if (this.imageGridState === state && rendered && rendered.columns === state.columns && rendered.total === state.images.length) {
       return index >= rendered.startIndex && index < rendered.endIndex;
     }
-    return index >= currentRange.startIndex && index < currentRange.endIndex;
+    const range = this.getImageGridVirtualRange(state);
+    return index >= range.startIndex && index < range.endIndex;
   }
   releaseImageGridImagesOutsideRange(state, range) {
-    const columns = this.getImageGridColumnCount(state);
-    const keepThumbnailStart = Math.max(0, range.startIndex - columns);
-    const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + columns);
+    const keepThumbnailStart = Math.max(0, range.startIndex - state.columns);
+    const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + state.columns);
     for (const index of Array.from(this.imageGridLoadedThumbnailIndexes)) {
       const image = state.images[index];
       if (!image) {
