@@ -1039,6 +1039,23 @@ export class TurboFileEditor extends EditorPane {
 		this.currentFileDragSide = undefined;
 		this.hasStartedNativeWindowsDrag = false;
 		this.setExternalDropTargetSide(undefined);
+		this.clearInternalDropTargetHighlight();
+	}
+
+	/**
+	 * Defers work triggered by a drop until after the current drop event returns. Re-rendering the
+	 * file list synchronously inside the drop handler removes the dragged source row before the
+	 * browser has finished tearing down the drag, which can leave the drag image (the lingering
+	 * "shadow") floating on screen. Running on the next timer tick lets that teardown complete first.
+	 */
+	private deferAfterDrag(action: () => void): void {
+		getWindow(this.container).setTimeout(action, 0);
+	}
+
+	private clearInternalDropTargetHighlight(): void {
+		for (const row of this.container?.querySelectorAll<HTMLElement>('.turbofile-file-row.is-internal-drop-target') ?? []) {
+			row.classList.remove('is-internal-drop-target');
+		}
 	}
 
 	/**
@@ -2710,13 +2727,15 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== side) {
-				void this.transferSelected(sourceSide, side, initiatedAt);
+				this.deferAfterDrag(() => void this.transferSelected(sourceSide, side, initiatedAt));
 				return;
 			}
 
+			// Read the external paths synchronously (the dataTransfer is only valid inside the handler),
+			// then defer the transfer so the drag image is cleared before the list re-renders.
 			const externalPaths = this.extractExternalDropPaths(event);
 			if (externalPaths.length) {
-				void this.transferExternalPaths(side, externalPaths, 'copy', initiatedAt);
+				this.deferAfterDrag(() => void this.transferExternalPaths(side, externalPaths, 'copy', initiatedAt));
 			}
 		});
 		list.addEventListener('contextmenu', event => this.showPaneContextMenu(side, event));
@@ -3312,6 +3331,38 @@ export class TurboFileEditor extends EditorPane {
 			row.addEventListener('pointerdown', event => {
 				this.prefetchPaneDirectory(side, item.path);
 				this.maybeOpenPaneDirectoryOnFastDoubleClick(side, item, event, renaming);
+			});
+			// Drop a same-pane selection onto a folder row (or the ".." row) to move those items
+			// into that directory, like Windows Explorer / TurboFile-web.
+			const dropTargetPath = item.path;
+			row.addEventListener('dragover', event => {
+				if (this.currentFileDragSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath)) {
+					return;
+				}
+				event.preventDefault();
+				event.stopPropagation();
+				if (event.dataTransfer) {
+					event.dataTransfer.dropEffect = 'move';
+				}
+				row.classList.add('is-internal-drop-target');
+			});
+			row.addEventListener('dragleave', event => {
+				const relatedTarget = event.relatedTarget;
+				if (relatedTarget instanceof Node && row.contains(relatedTarget)) {
+					return;
+				}
+				row.classList.remove('is-internal-drop-target');
+			});
+			row.addEventListener('drop', event => {
+				if (this.currentFileDragSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath)) {
+					return;
+				}
+				event.preventDefault();
+				event.stopPropagation();
+				row.classList.remove('is-internal-drop-target');
+				const targetLabel = item.parent ? '上一级目录' : item.name;
+				this.clearCurrentFileDragState();
+				this.deferAfterDrag(() => void this.moveSelectedItemsIntoDirectory(side, dropTargetPath, targetLabel));
 			});
 		}
 		row.addEventListener('dblclick', () => {
@@ -7248,6 +7299,120 @@ export class TurboFileEditor extends EditorPane {
 		return sourceDevice.host === targetDevice.host
 			&& (sourceDevice.port || 22) === (targetDevice.port || 22)
 			&& sourceDevice.username === targetDevice.username;
+	}
+
+	private pathsEqualForDevice(left: string, right: string, windowsPath: boolean): boolean {
+		return windowsPath ? isSameWindowsPath(left, right) : trimTrailingSlash(left) === trimTrailingSlash(right);
+	}
+
+	/**
+	 * True when `candidate` is `ancestor` itself or nested below it. Used to forbid moving a folder
+	 * into itself or one of its own descendants.
+	 */
+	private isPathInsideOrEqual(candidate: string, ancestor: string, windowsPath: boolean): boolean {
+		if (windowsPath) {
+			const c = candidate.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+			const a = ancestor.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+			return c === a || c.startsWith(`${a}\\`);
+		}
+		const c = trimTrailingSlash(candidate);
+		const a = trimTrailingSlash(ancestor);
+		return c === a || c.startsWith(`${a}/`);
+	}
+
+	/**
+	 * The subset of the current selection on `side` that can actually be moved into `targetDir`:
+	 * skips items already living in that directory (no-op) and folders that would be moved into
+	 * themselves or a descendant.
+	 */
+	private getDirectoryMoveTargets(side: 'left' | 'right', targetDir: string): TurboFileFileItem[] {
+		const device = this.getPaneDevice(side);
+		if (!device || !targetDir) {
+			return [];
+		}
+		const windowsPath = this.isWindowsDevice(device);
+		return this.getSelectedTransferItems(side).filter(item => {
+			if (!item.path || item.parent) {
+				return false;
+			}
+			const itemParent = getPaneParentPath(item.path, windowsPath);
+			if (itemParent && this.pathsEqualForDevice(itemParent, targetDir, windowsPath)) {
+				return false;
+			}
+			if (item.directory && this.isPathInsideOrEqual(targetDir, item.path, windowsPath)) {
+				return false;
+			}
+			return true;
+		});
+	}
+
+	private canMoveSelectionIntoDirectory(side: 'left' | 'right', targetItem: TurboFileFileItem, targetDir: string): boolean {
+		if (!targetItem.directory && !targetItem.parent) {
+			return false;
+		}
+		return this.getDirectoryMoveTargets(side, targetDir).length > 0;
+	}
+
+	/**
+	 * Moves the current same-pane selection into `targetDir` using a native same-device rename, the
+	 * same primitive used by cut/paste. Powers dragging rows onto a folder or the ".." row.
+	 */
+	private async moveSelectedItemsIntoDirectory(side: 'left' | 'right', targetDir: string, targetLabel: string): Promise<void> {
+		const device = this.getPaneDevice(side);
+		if (!device) {
+			return;
+		}
+		const sourceItems = this.getDirectoryMoveTargets(side, targetDir);
+		if (!sourceItems.length) {
+			return;
+		}
+
+		const windowsPath = this.isWindowsDevice(device);
+		const batch = sourceItems.length > 1;
+		const strategy = windowsPath ? 'local-move' : 'remote-move';
+		const task = this.beginTask('transfer', batch ? `移动 ${sourceItems.length} 项到 ${targetLabel}` : `移动 ${sourceItems[0].name} 到 ${targetLabel}`, device.name);
+		task.progress = 0;
+		task.cancelRequested = false;
+		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
+		task.speedSamples = [];
+
+		const failures: string[] = [];
+		let completed = 0;
+		let totalBytes = 0;
+		for (const [index, sourceItem] of sourceItems.entries()) {
+			const transferItem = task.transferItems[index];
+			task.activeTransferItemIndex = index;
+			transferItem.status = 'running';
+			transferItem.startedAt = Date.now();
+			transferItem.progress = 0;
+			transferItem.strategy = strategy;
+			const itemBytes = Math.max(sourceItem.rawSize, transferItem.totalBytes, 0);
+			const targetPath = joinPanePath(targetDir, sourceItem.name, windowsPath);
+			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
+			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path!), targetPath);
+			if (result.ok) {
+				completed++;
+				totalBytes += itemBytes;
+				transferItem.status = 'success';
+				transferItem.progress = 100;
+				transferItem.transferredBytes = itemBytes;
+				transferItem.totalBytes = Math.max(itemBytes, transferItem.totalBytes);
+				transferItem.endedAt = Date.now();
+			} else {
+				transferItem.status = 'error';
+				transferItem.error = result.message;
+				transferItem.endedAt = Date.now();
+				failures.push(`${sourceItem.name}: ${result.message}`);
+			}
+		}
+
+		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
+		await this.refreshPane(side, { force: true });
+		if (failures.length) {
+			this.finishTask(task, 'error', batch ? `移动完成 ${completed} 项，失败 ${failures.length} 项。` : `移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			return;
+		}
+		this.finishTask(task, 'success', batch ? `移动完成：${completed} 项 → ${targetLabel}` : `移动完成：${sourceItems[0].name} → ${targetLabel}`, { bytes: totalBytes, strategy });
 	}
 
 	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {

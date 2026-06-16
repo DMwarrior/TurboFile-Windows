@@ -2365,6 +2365,12 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	color: var(--vscode-list-activeSelectionForeground);
 }
 
+.turbofile-file-row.is-internal-drop-target {
+	background: color-mix(in srgb, var(--tf-brand-blue, #042aff) 16%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tf-brand-blue, #042aff) 55%, transparent);
+	border-radius: 4px;
+}
+
 .turbofile-file-row.is-renaming {
 	grid-template-columns: minmax(220px, 1fr);
 }
