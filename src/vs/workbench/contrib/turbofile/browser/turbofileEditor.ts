@@ -56,6 +56,7 @@ import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
+import { getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
@@ -1061,8 +1062,8 @@ export class TurboFileEditor extends EditorPane {
 	/**
 	 * dragstart handler for a file-list row. Marks the drag as TurboFile-originated (so internal
 	 * drop handlers can detect it via the side data) and remembers the source side so a later
-	 * dragleave from the window can hand off to the Windows native drag pipeline. Drags from the
-	 * TurboFile file area are always copy-only by design — there is no Shift-to-move semantic.
+	 * dragleave from the window can hand off to the Windows native drag pipeline. Same-pane folder
+	 * row drops move items, while pane-to-pane and external drops keep the existing copy behavior.
 	 *
 	 * Selection rule: if the dragged row is part of the current multi-selection, drag the whole
 	 * selection; otherwise drag just that single row (without disturbing the previous selection
@@ -1085,7 +1086,7 @@ export class TurboFileEditor extends EditorPane {
 		this.currentFileDragSide = side;
 		this.hasStartedNativeWindowsDrag = false;
 
-		event.dataTransfer.effectAllowed = 'copy';
+		event.dataTransfer.effectAllowed = getTurboFileRowDragEffectAllowed();
 		event.dataTransfer.setData('application/x-turbofile-side', side);
 		event.dataTransfer.setData('application/x-turbofile-operation', 'copy');
 
@@ -1290,6 +1291,11 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const targetSide = this.getTransferDropTargetSide(event);
+		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.currentFileDragSide;
+		if (!shouldHandleTurboFilePaneDropAtPage(sourceSide, targetSide)) {
+			this.setExternalDropTargetSide(undefined);
+			return;
+		}
 		event.preventDefault();
 		event.stopPropagation();
 		if (event.dataTransfer) {
@@ -1305,10 +1311,14 @@ export class TurboFileEditor extends EditorPane {
 
 		const initiatedAt = Date.now();
 		const targetSide = this.getTransferDropTargetSide(event);
+		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.currentFileDragSide;
+		if (!shouldHandleTurboFilePaneDropAtPage(sourceSide, targetSide)) {
+			this.setExternalDropTargetSide(undefined);
+			return;
+		}
 		event.preventDefault();
 		event.stopPropagation();
 		this.setExternalDropTargetSide(undefined);
-		const sourceSide = this.getTurboFileDragSourceSide(event);
 		if (sourceSide) {
 			if (sourceSide !== targetSide) {
 				void this.transferSelected(sourceSide, targetSide, initiatedAt);
