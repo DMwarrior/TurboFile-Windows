@@ -4615,6 +4615,172 @@ body.turbofile-shell .turbofile-theme-toggle {
 	height: 17px;
 }
 
+.turbofile-titlebar-menu {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 100%;
+	margin-left: 8px;
+	-webkit-app-region: no-drag;
+	position: relative;
+	z-index: 2500;
+}
+
+.turbofile-titlebar-menu-button,
+.turbofile-titlebar-update-button {
+	height: 28px;
+	border: 0;
+	border-radius: 6px;
+	color: var(--vscode-titleBar-activeForeground, #cccccc);
+	background: transparent;
+	cursor: pointer;
+	-webkit-app-region: no-drag;
+	outline: none;
+}
+
+.turbofile-titlebar-menu-button {
+	padding: 0 9px;
+	font-size: 14px;
+	line-height: 28px;
+}
+
+.turbofile-titlebar-update-button {
+	width: 28px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	color: #ffffff;
+	background: #168bd8;
+}
+
+.turbofile-titlebar-menu-button:hover,
+.turbofile-titlebar-menu-button:focus-visible {
+	background: color-mix(in srgb, var(--vscode-titleBar-activeForeground, #ffffff) 10%, transparent);
+	color: var(--vscode-titleBar-activeForeground, #ffffff);
+}
+
+.turbofile-titlebar-update-button:hover,
+.turbofile-titlebar-update-button:focus-visible {
+	background: #1f9ff2;
+	box-shadow: 0 4px 12px color-mix(in srgb, #168bd8 36%, transparent);
+}
+
+.turbofile-about-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 10000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.24);
+	-webkit-app-region: no-drag;
+}
+
+.turbofile-about-dialog {
+	width: min(572px, calc(100vw - 32px));
+	border: 1px solid var(--vscode-window-activeBorder, var(--vscode-widget-border, #3c3c3c));
+	border-radius: 8px;
+	overflow: hidden;
+	color: var(--vscode-foreground, #cccccc);
+	background: var(--vscode-editor-background, #1f1f1f);
+	box-shadow: 0 18px 54px rgba(0, 0, 0, 0.38);
+}
+
+.turbofile-about-header {
+	height: 44px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0 12px 0 16px;
+	box-sizing: border-box;
+}
+
+.turbofile-about-header-title {
+	font-size: 15px;
+	font-weight: 500;
+}
+
+.turbofile-about-close {
+	width: 32px;
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 0;
+	border-radius: 4px;
+	color: var(--vscode-foreground, #cccccc);
+	background: transparent;
+	cursor: pointer;
+}
+
+.turbofile-about-close:hover,
+.turbofile-about-close:focus-visible {
+	background: color-mix(in srgb, var(--vscode-foreground, #ffffff) 12%, transparent);
+}
+
+.turbofile-about-content {
+	min-height: 292px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 16px;
+	padding: 22px 32px 30px;
+	box-sizing: border-box;
+	text-align: center;
+}
+
+.turbofile-about-app-icon {
+	width: 92px;
+	height: 92px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 28px;
+	color: #ffffff;
+	background: linear-gradient(135deg, #36a3ff, #7d5cff 72%);
+	box-shadow: 0 10px 26px color-mix(in srgb, #2f80ff 34%, transparent);
+}
+
+.turbofile-about-app-icon .turbofile-bi-icon {
+	width: 46px;
+	height: 46px;
+}
+
+.turbofile-about-name {
+	font-size: 26px;
+	font-weight: 700;
+}
+
+.turbofile-about-version,
+.turbofile-about-copyright {
+	font-size: 16px;
+	color: color-mix(in srgb, var(--vscode-foreground, #cccccc) 84%, transparent);
+}
+
+.turbofile-about-footer {
+	display: flex;
+	justify-content: flex-end;
+	padding: 16px 18px 22px;
+	background: color-mix(in srgb, var(--vscode-editor-background, #1f1f1f) 88%, var(--vscode-foreground, #cccccc));
+}
+
+.turbofile-about-ok {
+	min-width: 120px;
+	height: 46px;
+	border: 1px solid var(--vscode-focusBorder, #0078d4);
+	border-radius: 6px;
+	color: var(--vscode-button-foreground, #ffffff);
+	background: var(--vscode-button-background, #0e639c);
+	cursor: pointer;
+}
+
+.turbofile-about-ok:hover,
+.turbofile-about-ok:focus-visible {
+	background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
 .turbofile-appearance-page .turbofile-appearance-card:not(.turbofile-appearance-font-card) {
 	display: none !important;
 }

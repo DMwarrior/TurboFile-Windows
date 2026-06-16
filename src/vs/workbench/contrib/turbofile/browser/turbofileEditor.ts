@@ -37,6 +37,8 @@ import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IProductService } from '../../../../platform/product/common/productService.js';
+import { IUpdateService } from '../../../../platform/update/common/update.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext, IUntypedFileEditorInput } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
@@ -51,6 +53,7 @@ import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWor
 import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
+import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
@@ -661,6 +664,7 @@ export class TurboFileEditor extends EditorPane {
 	private editorGroupContainer: HTMLElement | undefined;
 	private currentInput: TurboFileEditorInput | undefined;
 	private isEditorVisible = false;
+	private aboutDialogElement: HTMLElement | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -683,7 +687,9 @@ export class TurboFileEditor extends EditorPane {
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
-		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+		@IUpdateService private readonly updateService: IUpdateService,
+		@IProductService private readonly productService: IProductService
 	) {
 		super((new.target as typeof TurboFileEditor).ID, group, telemetryService, workbenchThemeService, storageService);
 
@@ -731,14 +737,16 @@ export class TurboFileEditor extends EditorPane {
 		}));
 		this._register(this.workbenchThemeService.onDidColorThemeChange(() => {
 			this.applyTurboFileThemeState();
-			this.ensureTitlebarThemeToggle();
+			this.ensureTitlebarChrome();
 			if (this.activePage === 'themes') {
 				this.render();
 			}
 		}));
+		this._register(this.updateService.onStateChange(() => this.ensureTitlebarAppMenu()));
 		void this.syncNativeEditorDisplaySettings();
 		void this.loadColorThemes();
 		void this.refreshWindowsDriveRoots();
+		this.ensureTitlebarChrome();
 		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
 		this.render();
 		void this.refreshPane('left');
@@ -795,7 +803,7 @@ export class TurboFileEditor extends EditorPane {
 		if (visible) {
 			void this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
-			this.ensureTitlebarThemeToggle();
+			this.ensureTitlebarChrome();
 		}
 	}
 
@@ -816,6 +824,8 @@ export class TurboFileEditor extends EditorPane {
 			this.terminalPanelVisibilityResetHandle = undefined;
 		}
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
+		this.closeAboutDialog();
+		this.removeTitlebarAppMenu();
 		this.removeTitlebarThemeToggle();
 		this.clearLiveTransferTicker();
 		this.clearFileListScrollRaf('left');
@@ -858,7 +868,7 @@ export class TurboFileEditor extends EditorPane {
 		shell.appendChild(content);
 		this.container.appendChild(shell);
 		this.registerWorkbenchKeyboardShortcuts();
-		this.ensureTitlebarThemeToggle();
+		this.ensureTitlebarChrome();
 
 		if (this.imageGridState?.previewVisible) {
 			this.container.appendChild(this.renderImagePreviewOverlay());
@@ -1351,6 +1361,101 @@ export class TurboFileEditor extends EditorPane {
 		return page;
 	}
 
+	private ensureTitlebarChrome(): void {
+		this.ensureTitlebarAppMenu();
+		this.ensureTitlebarThemeToggle();
+	}
+
+	private ensureTitlebarAppMenu(retry = 0): void {
+		if (!document.body.classList.contains('turbofile-shell')) {
+			return;
+		}
+		this.removeTitlebarAppMenu();
+		const titlebarLeft = document.querySelector<HTMLElement>('.monaco-workbench .part.titlebar .titlebar-container > .titlebar-left');
+		if (!titlebarLeft) {
+			if (retry < 10) {
+				setTimeout(() => this.ensureTitlebarAppMenu(retry + 1), 100);
+			}
+			return;
+		}
+
+		const menu = this.createTitlebarAppMenu();
+		const appIcon = titlebarLeft.querySelector<HTMLElement>('.window-appicon');
+		const nativeMenubar = titlebarLeft.querySelector<HTMLElement>('.menubar');
+		if (nativeMenubar) {
+			titlebarLeft.insertBefore(menu, nativeMenubar);
+		} else if (appIcon?.nextSibling) {
+			titlebarLeft.insertBefore(menu, appIcon.nextSibling);
+		} else {
+			titlebarLeft.appendChild(menu);
+		}
+	}
+
+	private removeTitlebarAppMenu(): void {
+		for (const menu of Array.from(document.querySelectorAll('.turbofile-titlebar-menu'))) {
+			menu.remove();
+		}
+	}
+
+	private createTitlebarAppMenu(): HTMLElement {
+		const menu = $('.turbofile-titlebar-menu');
+		const updateActionKind = getTurboFileTitlebarUpdateActionKind(this.updateService.state);
+		if (updateActionKind !== 'hidden') {
+			menu.appendChild(this.createTitlebarUpdateButton(updateActionKind));
+		}
+		menu.appendChild(this.createTitlebarMenuButton('设置', button => this.showTitlebarMenu(button, '设置', [])));
+		menu.appendChild(this.createTitlebarMenuButton('视图', button => this.showTitlebarMenu(button, '视图', [])));
+		menu.appendChild(this.createTitlebarMenuButton('帮助', button => this.showTitlebarMenu(button, '帮助', [
+			toAction({ id: 'turbofile.help.about', label: '关于极速传', enabled: true, run: () => this.showAboutDialog() })
+		])));
+		return menu;
+	}
+
+	private createTitlebarUpdateButton(kind: TurboFileTitlebarUpdateActionKind): HTMLButtonElement {
+		const button = $('button.turbofile-titlebar-update-button') as HTMLButtonElement;
+		button.type = 'button';
+		const title = kind === 'download' ? '下载更新' : kind === 'install' ? '安装更新' : '重启以更新';
+		button.title = title;
+		button.setAttribute('aria-label', title);
+		button.appendChild(renderIcon(Codicon.cloudDownload));
+		button.addEventListener('click', event => {
+			event.preventDefault();
+			event.stopPropagation();
+			void this.runTitlebarUpdateAction(kind);
+		});
+		return button;
+	}
+
+	private createTitlebarMenuButton(label: string, onClick: (button: HTMLElement) => void): HTMLButtonElement {
+		const button = $('button.turbofile-titlebar-menu-button') as HTMLButtonElement;
+		button.type = 'button';
+		button.textContent = label;
+		button.addEventListener('click', event => {
+			event.preventDefault();
+			event.stopPropagation();
+			onClick(button);
+		});
+		return button;
+	}
+
+	private showTitlebarMenu(anchor: HTMLElement, title: string, actions: IAction[]): void {
+		const fallbackAction = toAction({ id: `turbofile.titlebar.${title}.empty`, label: '暂无内容', enabled: false, run: () => { } });
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => actions.length ? actions : [fallbackAction]
+		});
+	}
+
+	private async runTitlebarUpdateAction(kind: TurboFileTitlebarUpdateActionKind): Promise<void> {
+		if (kind === 'download') {
+			await this.updateService.downloadUpdate(true);
+		} else if (kind === 'install') {
+			await this.updateService.applyUpdate();
+		} else if (kind === 'restart') {
+			await this.updateService.quitAndInstall();
+		}
+	}
+
 	private ensureTitlebarThemeToggle(retry = 0): void {
 		if (!document.body.classList.contains('turbofile-shell')) {
 			return;
@@ -1388,6 +1493,67 @@ export class TurboFileEditor extends EditorPane {
 			void this.applyAppearanceMode(targetMode);
 		});
 		return button;
+	}
+
+	private showAboutDialog(): void {
+		this.closeAboutDialog();
+		const overlay = $('.turbofile-about-overlay');
+		overlay.setAttribute('role', 'presentation');
+		const dialog = $('.turbofile-about-dialog');
+		dialog.setAttribute('role', 'dialog');
+		dialog.setAttribute('aria-modal', 'true');
+		dialog.setAttribute('aria-labelledby', 'turbofile-about-title');
+
+		const header = $('.turbofile-about-header');
+		const headerTitle = $('div#turbofile-about-title.turbofile-about-header-title');
+		headerTitle.textContent = '关于极速传';
+		const close = $('button.turbofile-about-close') as HTMLButtonElement;
+		close.type = 'button';
+		close.title = '关闭';
+		close.setAttribute('aria-label', '关闭');
+		close.appendChild(renderIcon(Codicon.close));
+		close.addEventListener('click', () => this.closeAboutDialog());
+		header.append(headerTitle, close);
+
+		const content = $('.turbofile-about-content');
+		const icon = $('.turbofile-about-app-icon');
+		icon.appendChild(renderTurboFileIcon('lightning-charge-fill'));
+		const name = $('div.turbofile-about-name');
+		name.textContent = this.productService.nameShort || '极速传';
+		const version = $('div.turbofile-about-version');
+		version.textContent = `版本 ${this.productService.version}`;
+		const copyright = $('div.turbofile-about-copyright');
+		copyright.textContent = '© 极速传';
+		content.append(icon, name, version, copyright);
+
+		const footer = $('.turbofile-about-footer');
+		const ok = $('button.turbofile-about-ok') as HTMLButtonElement;
+		ok.type = 'button';
+		ok.textContent = '确定';
+		ok.addEventListener('click', () => this.closeAboutDialog());
+		footer.appendChild(ok);
+
+		dialog.append(header, content, footer);
+		overlay.appendChild(dialog);
+		overlay.addEventListener('click', event => {
+			if (event.target === overlay) {
+				this.closeAboutDialog();
+			}
+		});
+		overlay.addEventListener('keydown', event => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				this.closeAboutDialog();
+			}
+		});
+		this.aboutDialogElement = overlay;
+		document.body.appendChild(overlay);
+		getWindow(overlay).requestAnimationFrame(() => ok.focus({ preventScroll: true }));
+	}
+
+	private closeAboutDialog(): void {
+		this.aboutDialogElement?.remove();
+		this.aboutDialogElement = undefined;
 	}
 
 	private renderDevicePageCard(device: TurboFileDevice): HTMLElement {
