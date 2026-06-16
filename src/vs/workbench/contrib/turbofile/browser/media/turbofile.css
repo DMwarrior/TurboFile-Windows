@@ -4589,7 +4589,7 @@ body.hc-black .turbofile-live-transfer-panel {
 	transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
-body.turbofile-main-editor-visible .turbofile-theme-toggle {
+body.turbofile-shell .turbofile-theme-toggle {
 	display: inline-flex;
 }
 

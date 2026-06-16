@@ -796,8 +796,6 @@ export class TurboFileEditor extends EditorPane {
 			void this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
 			this.ensureTitlebarThemeToggle();
-		} else {
-			this.removeTitlebarThemeToggle();
 		}
 	}
 
@@ -1354,7 +1352,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private ensureTitlebarThemeToggle(retry = 0): void {
-		if (!document.body.classList.contains('turbofile-main-editor-visible')) {
+		if (!document.body.classList.contains('turbofile-shell')) {
 			return;
 		}
 		this.removeTitlebarThemeToggle();
