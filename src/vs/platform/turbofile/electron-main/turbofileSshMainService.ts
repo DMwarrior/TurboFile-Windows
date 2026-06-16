@@ -16,6 +16,7 @@ import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
@@ -188,7 +189,6 @@ interface ITurboFileSshTerminalMainSession {
 	bootstrapping: boolean;
 	hasDataListener: boolean;
 	closed: boolean;
-	sharedDirectorySessionKey?: string;
 }
 
 interface IRemoteDirectorySftpSession {
@@ -1689,6 +1689,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return entries.sort((a, b) => FILE_ENTRY_NAME_COLLATOR.compare(a, b));
 	}
 
+	private localTarListEncodingPromise: Promise<string> | undefined;
+
+	/**
+	 * The bundled Windows `tar.exe` (libarchive bsdtar) reads `-T` list files using the process
+	 * ANSI code page, not UTF-8. Writing the list as UTF-8 makes non-ASCII names (e.g. Chinese)
+	 * unreadable and aborts the transfer ("Couldn't visit directory: No such file or directory").
+	 * Resolve the system code page once so list files are encoded the way bsdtar expects; falls
+	 * back to UTF-8 on non-Windows or when detection fails.
+	 */
+	private async getLocalTarListEncoding(): Promise<string> {
+		if (!this.localTarListEncodingPromise) {
+			this.localTarListEncodingPromise = (async () => {
+				if (platform() !== 'win32') {
+					return 'utf8';
+				}
+				try {
+					const encoding = await resolveTerminalEncoding();
+					const iconv = await import('@vscode/iconv-lite-umd');
+					return iconv.default.encodingExists(encoding) ? encoding : 'utf8';
+				} catch {
+					return 'utf8';
+				}
+			})();
+		}
+		return this.localTarListEncodingPromise;
+	}
+
+	private async createLocalTarListBuffer(entries: readonly string[]): Promise<Buffer> {
+		const encoding = await this.getLocalTarListEncoding();
+		if (encoding === 'utf8') {
+			return createTarNullListBuffer(entries);
+		}
+		const iconv = await import('@vscode/iconv-lite-umd');
+		return Buffer.from(iconv.default.encode(`${entries.join('\0')}\0`, encoding));
+	}
+
 	private async writeLocalTarChunkLists(tempRoot: string, entries: readonly string[]): Promise<ILocalTarChunk[]> {
 		const chunkCount = Math.min(LOCAL_PARALLEL_TAR_CHUNK_COUNT, entries.length);
 		const chunks = Array.from({ length: chunkCount }, () => [] as string[]);
@@ -1699,14 +1735,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			.filter(chunk => chunk.length > 0)
 			.map(async (chunk, index) => {
 				const listPath = join(tempRoot, `chunk-${String(index).padStart(2, '0')}.lst`);
-				await fsp.writeFile(listPath, createTarNullListBuffer(chunk));
+				await fsp.writeFile(listPath, await this.createLocalTarListBuffer(chunk));
 				return { listPath, entryCount: chunk.length };
 			}));
 	}
 
 	private async writeLocalTarListFile(tempRoot: string, names: readonly string[]): Promise<string> {
 		const listPath = join(tempRoot, 'items.lst');
-		await fsp.writeFile(listPath, createTarNullListBuffer(names.map(name => normalizeTarListPath(name))));
+		await fsp.writeFile(listPath, await this.createLocalTarListBuffer(names.map(name => normalizeTarListPath(name))));
 		return listPath;
 	}
 
@@ -3649,8 +3685,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error(configResult.message);
 		}
 
-		const reusableDirectorySession = await this.getReusableDirectorySftpSession(options);
-		const client = reusableDirectorySession?.client ?? await this.connect(configResult.config);
+		// Use a dedicated connection per terminal instead of reusing the directory-browsing client.
+		// Sharing coupled the terminal's lifetime to the directory session's idle timer, so an
+		// unrelated idle eviction could close the client mid-task and kill the terminal. A dedicated
+		// connection lives until the user closes the terminal (or a real network failure).
+		const client = await this.connect(configResult.config);
 		let stream: ISSHShellStream | undefined;
 		try {
 			stream = await this.openShell(client, cols, rows);
@@ -3664,8 +3703,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bootstrapBuffer: '',
 				bootstrapping: true,
 				hasDataListener: false,
-				closed: false,
-				sharedDirectorySessionKey: reusableDirectorySession?.key
+				closed: false
 			};
 			this.terminalSessions.set(sessionId, session);
 
@@ -3714,11 +3752,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			};
 		} catch (error) {
 			stream?.end();
-			if (!reusableDirectorySession) {
-				client.end();
-			} else {
-				this.touchDirectorySftpSession(reusableDirectorySession.key);
-			}
+			client.end();
 			throw error;
 		}
 	}
@@ -4752,7 +4786,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			port: options.port || 22,
 			username: options.username,
 			readyTimeout: options.timeout ?? 10000,
-			tryKeyboard: false
+			tryKeyboard: false,
+			// Keep idle connections alive so long-running terminal tasks (and slow transfers) are not
+			// dropped by NAT/firewall/server idle timeouts. ~15s pings, tolerate ~3min of unanswered
+			// pings before treating the link as dead.
+			keepaliveInterval: 15000,
+			keepaliveCountMax: 12
 		};
 
 		if (options.password !== undefined) {
@@ -5158,14 +5197,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} catch {
 			// Ignore cleanup errors from already closed SSH channels.
 		}
-		if (session.sharedDirectorySessionKey) {
-			this.touchDirectorySftpSession(session.sharedDirectorySessionKey);
-		} else {
-			try {
-				session.client.end();
-			} catch {
-				// Ignore cleanup errors from already closed SSH clients.
-			}
+		try {
+			session.client.end();
+		} catch {
+			// Ignore cleanup errors from already closed SSH clients.
 		}
 		session.exitEmitter.fire(exitCode);
 		session.dataEmitter.dispose();
