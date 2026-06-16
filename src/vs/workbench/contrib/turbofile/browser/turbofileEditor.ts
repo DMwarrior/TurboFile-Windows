@@ -4621,7 +4621,7 @@ export class TurboFileEditor extends EditorPane {
 		const grid = $('.turbofile-image-page-grid');
 		grid.setAttribute('role', 'listbox');
 		grid.setAttribute('aria-multiselectable', 'true');
-		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
+		grid.style.setProperty('--turbofile-image-grid-columns', String(this.getImageGridEffectiveColumns(state)));
 		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
 		this.renderImageGridSlice(grid, state, range);
 		body.appendChild(grid);
@@ -4812,7 +4812,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderImageGridSlice(grid: HTMLElement, state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
 		clearNode(grid);
-		grid.style.setProperty('--turbofile-image-grid-columns', String(state.columns));
+		grid.style.setProperty('--turbofile-image-grid-columns', String(this.getImageGridEffectiveColumns(state)));
 		grid.style.setProperty('--turbofile-image-grid-scale', String(state.thumbnailScale));
 		this.releaseImageGridImagesOutsideRange(state, range);
 
@@ -4834,7 +4834,7 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridRenderedRange = {
 			startIndex: range.startIndex,
 			endIndex: range.endIndex,
-			columns: state.columns,
+			columns: this.getImageGridEffectiveColumns(state),
 			total: state.images.length
 		};
 		const indexes: number[] = [];
@@ -9386,13 +9386,24 @@ export class TurboFileEditor extends EditorPane {
 		return Math.max(480, height - 44);
 	}
 
+	/**
+	 * The number of columns actually laid out. The user picks a base column count, and the zoom
+	 * factor divides it so that larger thumbnails get proportionally wider cells and stay fully
+	 * visible (object-fit: contain) instead of being scaled past the cell bounds and clipped.
+	 */
+	private getImageGridEffectiveColumns(state: TurboFileImageGridState): number {
+		const base = Math.max(1, state.columns);
+		const scale = this.normalizeImageGridThumbnailScale(state.thumbnailScale);
+		return clampNumber(Math.round(base / scale), 1, base);
+	}
+
 	private getImageGridVirtualRange(state: TurboFileImageGridState): TurboFileImageGridRange {
 		const total = state.images.length;
 		if (!total) {
 			return { startIndex: 0, endIndex: 0, topSpacerHeight: 0, bottomSpacerHeight: 0 };
 		}
 
-		const columns = Math.max(1, state.columns);
+		const columns = this.getImageGridEffectiveColumns(state);
 		const rowHeight = this.getImageGridRowHeight(state);
 		const rowStep = rowHeight + IMAGE_GRID_CARD_GAP;
 		const totalRows = Math.ceil(total / columns);
@@ -9408,7 +9419,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridRowHeight(state: TurboFileImageGridState): number {
 		const width = this.getImageGridBodyWidth();
-		const columns = Math.max(1, state.columns);
+		const columns = this.getImageGridEffectiveColumns(state);
 		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
 		const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
 		const previewHeight = columnWidth * 150 / 220;
@@ -9427,12 +9438,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridThumbnailRequestWidth(state: TurboFileImageGridState): number {
 		const width = this.getImageGridBodyWidth();
-		const columns = Math.max(1, state.columns);
+		const columns = this.getImageGridEffectiveColumns(state);
 		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
 		const columnWidth = Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
 		const ownerWindow = this.container?.ownerDocument.defaultView;
 		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-		const scaled = Math.round(columnWidth * dpr * this.normalizeImageGridThumbnailScale(state.thumbnailScale));
+		const scaled = Math.round(columnWidth * dpr);
 		return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 	}
 
@@ -9480,7 +9491,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 			const range = this.getImageGridVirtualRange(state);
 			const rendered = this.imageGridRenderedRange;
-			if (rendered && rendered.startIndex === range.startIndex && rendered.endIndex === range.endIndex && rendered.columns === state.columns && rendered.total === state.images.length) {
+			if (rendered && rendered.startIndex === range.startIndex && rendered.endIndex === range.endIndex && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
 				return;
 			}
 			this.clearImageGridScrollTimer();
@@ -9558,7 +9569,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridVisibleIndexes(state: TurboFileImageGridState): number[] {
 		const rendered = this.imageGridRenderedRange;
-		const range = this.imageGridState === state && rendered && rendered.columns === state.columns && rendered.total === state.images.length
+		const range = this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length
 			? { startIndex: rendered.startIndex, endIndex: rendered.endIndex }
 			: this.getImageGridVirtualRange(state);
 		const indexes: number[] = [];
@@ -9594,7 +9605,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private isImageGridIndexNearViewport(state: TurboFileImageGridState, index: number): boolean {
 		const rendered = this.imageGridRenderedRange;
-		if (this.imageGridState === state && rendered && rendered.columns === state.columns && rendered.total === state.images.length) {
+		if (this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
 			return index >= rendered.startIndex && index < rendered.endIndex;
 		}
 		const range = this.getImageGridVirtualRange(state);
@@ -9602,8 +9613,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private releaseImageGridImagesOutsideRange(state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
-		const keepThumbnailStart = Math.max(0, range.startIndex - state.columns);
-		const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + state.columns);
+		const keepRowWidth = this.getImageGridEffectiveColumns(state);
+		const keepThumbnailStart = Math.max(0, range.startIndex - keepRowWidth);
+		const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + keepRowWidth);
 		for (const index of Array.from(this.imageGridLoadedThumbnailIndexes)) {
 			const image = state.images[index];
 			if (!image) {

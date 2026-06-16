@@ -3745,8 +3745,6 @@ body.hc-black .turbofile-live-transfer-panel {
 	max-height: 100%;
 	object-fit: contain;
 	display: block;
-	transform: scale(var(--turbofile-image-grid-scale, 1));
-	transform-origin: center center;
 }
 
 .turbofile-image-page-card-placeholder {
@@ -5558,17 +5556,7 @@ body.turbofile-shell .turbofile-theme-toggle {
 	object-fit: contain;
 	border-radius: 0;
 	background: transparent;
-	transform: scale(var(--turbofile-image-grid-scale, 1));
-	transform-origin: center center;
-	transition: opacity 200ms ease, transform 160ms ease;
-}
-
-.vs .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
-.vs-dark .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
-.hc-black .turbofile-workbench .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
-.turbofile-workbench.is-turbofile-light .turbofile-image-page-card:hover .turbofile-image-page-card-preview img,
-.turbofile-workbench.is-turbofile-dark .turbofile-image-page-card:hover .turbofile-image-page-card-preview img {
-	transform: scale(var(--turbofile-image-grid-scale, 1));
+	transition: opacity 200ms ease;
 }
 
 .turbofile-image-page-card-info {
