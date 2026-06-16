@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../../common/turbofileDragDrop.js';
+import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../../common/turbofileDragDrop.js';
 
 suite('TurboFileDragDrop', () => {
 	test('lets folder rows handle same-pane moves while the page handles copies and external drops', () => {
@@ -18,6 +18,13 @@ suite('TurboFileDragDrop', () => {
 			false,
 			true,
 			true
+		]);
+	});
+
+	test('refreshes both source and target directories after a same-pane folder move', () => {
+		assert.deepStrictEqual(getTurboFileDirectoryMoveRefreshPaths('/work/images', '/work/images/done'), [
+			'/work/images',
+			'/work/images/done'
 		]);
 	});
 });

@@ -56,7 +56,7 @@ import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
-import { getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
+import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
@@ -6562,6 +6562,25 @@ export class TurboFileEditor extends EditorPane {
 		return `${device.id}|${device.host}|${device.port || 0}|${device.username}|${device.authType ?? ''}|${path}`;
 	}
 
+	private invalidatePaneDirectoryCaches(device: TurboFileDevice, paths: readonly string[]): void {
+		const keys = new Set(paths.map(path => this.getPaneDirectoryCacheKey(device, path)));
+		for (const key of keys) {
+			this.paneDirectoryCache.delete(key);
+			this.paneDirectoryInflight.delete(key);
+		}
+	}
+
+	private getVisiblePaneSidesForDeviceDirectories(device: TurboFileDevice, paths: readonly string[]): ('left' | 'right')[] {
+		const windowsPath = this.isWindowsDevice(device);
+		return (['left', 'right'] as const).filter(side => {
+			const paneDevice = this.getPaneDevice(side);
+			if (!paneDevice || !this.isSameDeviceForNativeOperation(device, paneDevice)) {
+				return false;
+			}
+			return paths.some(path => this.pathsEqualForDevice(this.paneStates[side].path, path, windowsPath));
+		});
+	}
+
 	private isMissingPanePathError(error: unknown): boolean {
 		const message = error instanceof Error ? error.message : String(error);
 		return /no such file|no such file or directory|file not found|path not found|enoent/i.test(message);
@@ -7377,6 +7396,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const refreshPaths = getTurboFileDirectoryMoveRefreshPaths(this.paneStates[side].path, targetDir);
 		const windowsPath = this.isWindowsDevice(device);
 		const batch = sourceItems.length > 1;
 		const strategy = windowsPath ? 'local-move' : 'remote-move';
@@ -7385,6 +7405,8 @@ export class TurboFileEditor extends EditorPane {
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
+		this.invalidatePaneDirectoryCaches(device, refreshPaths);
+		this.removePaneItems(side, sourceItems);
 
 		const failures: string[] = [];
 		let completed = 0;
@@ -7408,6 +7430,7 @@ export class TurboFileEditor extends EditorPane {
 				transferItem.transferredBytes = itemBytes;
 				transferItem.totalBytes = Math.max(itemBytes, transferItem.totalBytes);
 				transferItem.endedAt = Date.now();
+				this.invalidatePaneDirectoryCaches(device, refreshPaths);
 			} else {
 				transferItem.status = 'error';
 				transferItem.error = result.message;
@@ -7417,7 +7440,12 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
-		await this.refreshPane(side, { force: true });
+		this.invalidatePaneDirectoryCaches(device, refreshPaths);
+		const visibleRefreshSides = this.getVisiblePaneSidesForDeviceDirectories(device, refreshPaths);
+		await Promise.all([
+			...visibleRefreshSides.map(side => this.refreshPane(side, { force: true })),
+			this.loadPaneDirectory(device, targetDir, true, 'prefetch').catch(() => undefined)
+		]);
 		if (failures.length) {
 			this.finishTask(task, 'error', batch ? `移动完成 ${completed} 项，失败 ${failures.length} 项。` : `移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
 			return;

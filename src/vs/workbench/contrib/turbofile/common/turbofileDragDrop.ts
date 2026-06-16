@@ -12,3 +12,7 @@ export function getTurboFileRowDragEffectAllowed(): 'copyMove' {
 export function shouldHandleTurboFilePaneDropAtPage(sourceSide: TurboFilePaneSide | undefined, targetSide: TurboFilePaneSide): boolean {
 	return sourceSide === undefined || sourceSide !== targetSide;
 }
+
+export function getTurboFileDirectoryMoveRefreshPaths(sourceDir: string, targetDir: string): string[] {
+	return sourceDir === targetDir ? [sourceDir] : [sourceDir, targetDir];
+}
