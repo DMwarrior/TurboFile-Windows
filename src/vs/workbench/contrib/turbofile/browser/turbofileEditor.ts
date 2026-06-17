@@ -9805,7 +9805,17 @@ export class TurboFileEditor extends EditorPane {
 		if (!grid) {
 			return;
 		}
+		// renderImageGridSlice clears the grid before refilling it, and renderImageGridCard reads
+		// body.clientWidth, which forces a synchronous layout. During that flush the grid is empty
+		// or partially filled, so body.scrollHeight briefly drops and the browser clamps
+		// body.scrollTop to 0 — that's the "scrolling jumps back to the top" regression. Re-apply
+		// the saved scrollTop right after the rebuild so the user's position is preserved.
+		const body = this.container.querySelector<HTMLElement>('.turbofile-image-page-body');
+		const savedScrollTop = state.scrollTop;
 		this.renderImageGridSlice(grid, state, range);
+		if (body && body.scrollTop !== savedScrollTop) {
+			body.scrollTop = savedScrollTop;
+		}
 	}
 
 	private clearImageGridScrollTimer(): void {
