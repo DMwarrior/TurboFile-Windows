@@ -58,7 +58,6 @@ import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbench
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
-import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 
@@ -466,6 +465,10 @@ const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
+const IMAGE_PREVIEW_MIN_DIM = 320;
+const IMAGE_PREVIEW_MAX_DIM = 2200;
+const IMAGE_PREVIEW_QUALITY = 82;
+const IMAGE_PREVIEW_DIM_STEP = 128;
 const IMAGE_READ_CACHE_MAX_ENTRIES = 512;
 const IMAGE_READ_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const TURBOFILE_APPEARANCE_DARK_THEME_LABEL = '2017 Dark (Visual Studio - C/C++)';
@@ -9429,8 +9432,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		try {
-			const previousColumns = this.getImageGridEffectiveColumns(state);
-			const previousRowHeight = this.getImageGridRowHeight(state);
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
 			const shouldReadOriginalFirst = this.shouldUseOriginalImageGridCardSource(image.width, image.height);
 			let result = shouldReadOriginalFirst
@@ -9470,26 +9471,16 @@ export class TurboFileEditor extends EditorPane {
 			}
 			this.releaseImageBlobUrl(image.thumbnailUrl);
 			const thumbnailUrl = result.ok ? this.createImageObjectUrl(result) : undefined;
-			const sourceWidth = result.originalWidth ?? result.width ?? resolvedWidth;
-			const sourceHeight = result.originalHeight ?? result.height ?? resolvedHeight;
 			image.thumbnailContent = thumbnailUrl ? '' : result.ok ? result.content : '';
 			image.thumbnailUrl = thumbnailUrl;
 			image.thumbnailMime = result.mime || getMimeType(image.item.name);
 			image.thumbnailError = result.ok ? undefined : result.message;
-			image.width = sourceWidth;
-			image.height = sourceHeight;
-			this.clearImageGridLayoutMetrics(state);
+			image.width = result.width ?? resolvedWidth;
+			image.height = result.height ?? resolvedHeight;
 			if (result.ok) {
 				this.imageGridLoadedThumbnailIndexes.add(index);
 			}
-			const nextColumns = this.getImageGridEffectiveColumns(state);
-			const nextRowHeight = this.getImageGridRowHeight(state);
-			if (previousColumns !== nextColumns || previousRowHeight !== nextRowHeight) {
-				this.imageGridRenderedRange = undefined;
-				this.updateImageGridVirtualSlice(state, this.getImageGridVirtualRange(state));
-			} else {
-				this.updateImageGridCard(index);
-			}
+			this.updateImageGridCard(index);
 		} catch (error) {
 			if (this.imageGridState === state) {
 				image.thumbnailError = error instanceof Error ? error.message : String(error);
@@ -9520,12 +9511,23 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const request = this.getImagePreviewRequestSize();
 		image.previewLoading = true;
 		if (!silent && state.selectedIndex === index && (!requestSeq || requestSeq === this.imageGridPreviewRequestSeq)) {
 			this.updateImagePreviewOverlay();
 		}
 		try {
-			const result = await this.readImageGridImage(device, image.item.path, createTurboFileImagePreviewReadOptions(image.item.rawSize, image.item.rawModified));
+			const result = await this.readImageGridImage(device, image.item.path, {
+				encoding: 'base64',
+				width: request.width,
+				height: request.height,
+				quality: request.quality,
+				format: 'jpeg',
+				interpolation: 'lanczos',
+				maxBytes: 128 * 1024 * 1024,
+				sourceSize: image.item.rawSize,
+				sourceModified: image.item.rawModified
+			});
 			if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
 				return;
 			}
@@ -9771,6 +9773,20 @@ export class TurboFileEditor extends EditorPane {
 
 	private shouldUseOriginalImageGridCardSource(width: number | undefined, height: number | undefined): boolean {
 		return !!width && !!height && width <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD && height <= IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD;
+	}
+
+	private getImagePreviewRequestSize(): { width: number; height: number; quality: number } {
+		const ownerWindow = this.container?.ownerDocument.defaultView;
+		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
+		const viewportWidth = ownerWindow?.innerWidth || this.container?.clientWidth || 1440;
+		const viewportHeight = ownerWindow?.innerHeight || this.container?.clientHeight || 900;
+		const widthRaw = clampNumber(Math.round(viewportWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+		const heightRaw = clampNumber(Math.round(viewportHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+		return {
+			width: clampNumber(quantizeNumber(widthRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
+			height: clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM),
+			quality: IMAGE_PREVIEW_QUALITY
+		};
 	}
 
 	private getImageGridThumbnailParallelLimit(state: TurboFileImageGridState): number {

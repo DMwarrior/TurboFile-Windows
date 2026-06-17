@@ -25,18 +25,14 @@ import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChange
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
-// Large source images (4K+ PNGs, dense generated frames) routinely need 10-20s for ImageMagick to
-// decode and downscale over SSH. A 4s budget aborted those before any bytes flowed, leaving the
-// grid stuck on generic file icons and forcing the slow full-download fallback. 25s matches the
-// proven web build and only affects the worst-case wait, not the common fast path.
-const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 25000;
+const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
 const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const WINDOWS_DRAG_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
-const IMAGE_THUMBNAIL_CACHE_VERSION = 2;
+const IMAGE_THUMBNAIL_CACHE_VERSION = 1;
 const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
@@ -6193,16 +6189,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			&& !looksLikeWindowsPath(endpoint.path)
 			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
 		if (shouldTryRemoteTransform) {
-			const [thumbnail, sourceSize] = await Promise.all([
-				this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation),
-				this.tryReadRemoteImageSizeViaImageMagick(endpoint)
-			]);
+			const thumbnail = await this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation);
 			if (thumbnail) {
-				return {
-					...thumbnail,
-					originalWidth: sourceSize?.width ?? thumbnail.originalWidth ?? thumbnail.width,
-					originalHeight: sourceSize?.height ?? thumbnail.originalHeight ?? thumbnail.height
-				};
+				return thumbnail;
 			}
 		}
 
@@ -6495,42 +6484,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
 		}
-	}
-
-	private async tryReadRemoteImageSizeViaImageMagick(endpoint: ITurboFileTransferEndpoint): Promise<IImageSize | undefined> {
-		if (!endpoint.connection) {
-			return undefined;
-		}
-
-		const tool = await this.getRemoteImageTool(endpoint);
-		if (!tool) {
-			return undefined;
-		}
-
-		const source = quotePosixShellArg(endpoint.path);
-		const format = quotePosixShellArg('%w %h');
-		const command = tool === 'magick'
-			? `${tool} identify -format ${format} ${source}`
-			: `identify -format ${format} ${source} 2>/dev/null || ${tool} ${source} -format ${format} info:`;
-		let output = '';
-		try {
-			await this.withDirectorySshClient(endpoint, client => this.execRemote(client, command, {
-				timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS,
-				onStdout: chunk => {
-					output += chunk;
-				}
-			}));
-		} catch {
-			return undefined;
-		}
-
-		const match = /(?<width>\d+)\s+(?<height>\d+)/.exec(output.trim());
-		if (!match?.groups) {
-			return undefined;
-		}
-		const width = Number(match.groups.width);
-		const height = Number(match.groups.height);
-		return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? { width, height } : undefined;
 	}
 
 	private async getRemoteImageTool(endpoint: ITurboFileTransferEndpoint): Promise<'magick' | 'convert' | undefined> {
