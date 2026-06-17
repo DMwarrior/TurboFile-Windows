@@ -6579,41 +6579,40 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
+		// Always emit JPEG (or PNG when explicitly requested) from the remote transform, never WebP.
+		// Some servers' ImageMagick WebP delegate produced byte streams that passed a shallow magic
+		// check but that this build's Chromium <img> decoder rejected ("Failed to load image") for
+		// certain sources (e.g. super-resolution PNGs), while small images that take the local
+		// nativeImage path (JPEG/PNG output) always rendered. JPEG decodes universally and is
+		// verifiable via nativeImage, so it removes that whole failure class.
+		const effectiveFormat: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
 		const source = quotePosixShellArg(endpoint.path);
 		const thumbnail = ` -thumbnail ${quotePosixShellArg(geometry)}`;
 		const filter = interpolation === 'lanczos' ? ' -filter Lanczos' : '';
-		const qualityOption = format === 'png' ? '' : ` -quality ${quality}`;
-		const outputFormat = format === 'webp' ? 'webp:-' : format === 'png' ? 'png:-' : 'jpg:-';
-		const mime = format === 'webp' ? 'image/webp' : format === 'png' ? 'image/png' : 'image/jpeg';
+		const qualityOption = effectiveFormat === 'png' ? '' : ` -quality ${quality}`;
+		const outputFormat = effectiveFormat === 'png' ? 'png:-' : 'jpg:-';
+		const mime = effectiveFormat === 'png' ? 'image/png' : 'image/jpeg';
 		const command = `${tool} ${source}${thumbnail}${filter} -strip${qualityOption} ${outputFormat}`;
 
 		try {
 			const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
 			assertImageBuffer(buffer, mime);
 			const size = getImageSize(buffer);
+			if (!size) {
+				// The header looked valid but nativeImage (same decoder family as the renderer's <img>)
+				// could not actually decode the bytes — truncated output, a timeout cutting the stream
+				// short, or an incompatible encoder. Reject so the caller falls back to the local
+				// download + transform path, which is guaranteed renderable, instead of handing the
+				// renderer an <img> source it cannot decode.
+				throw new Error('Remote thumbnail produced an undecodable image.');
+			}
 			return {
 				buffer,
 				mime,
-				width: size?.width,
-				height: size?.height
+				width: size.width,
+				height: size.height
 			};
 		} catch (error) {
-			if (format === 'webp') {
-				try {
-					const jpegCommand = `${tool} ${source}${thumbnail}${filter} -strip${qualityOption} jpg:-`;
-					const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, jpegCommand, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
-					assertImageBuffer(buffer, 'image/jpeg');
-					const size = getImageSize(buffer);
-					return {
-						buffer,
-						mime: 'image/jpeg',
-						width: size?.width,
-						height: size?.height
-					};
-				} catch {
-					// Fall through to clearing the tool cache below.
-				}
-			}
 			// A single corrupt/unsupported image should not disable thumbnail acceleration for
 			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
