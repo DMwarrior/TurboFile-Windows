@@ -620,6 +620,12 @@ export class TurboFileEditor extends EditorPane {
 	private imageGridThumbnailLoadingCount = 0;
 	private imageGridRenderedRange: { startIndex: number; endIndex: number; columns: number; total: number } | undefined;
 	private imageGridLayoutMetrics: TurboFileImageGridLayoutMetrics | undefined;
+	// Memoized scroll-body width. Measuring body.clientWidth forces a synchronous layout; reading it
+	// once per card during a slice rebuild caused dozens of forced reflows per scroll frame, which
+	// both janked scrolling and made the grid's scrollHeight momentarily collapse (the browser then
+	// clamped scrollTop, producing the post-scroll "jump/jitter"). The body width only changes on
+	// window/pane resize, so cache it and invalidate on layout() and full image-page renders.
+	private imageGridBodyWidthCache: number | undefined;
 	private imageGridPreviewRequestSeq = 0;
 	private imageGridPreviewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly imageGridLoadedThumbnailIndexes = new Set<number>();
@@ -808,6 +814,9 @@ export class TurboFileEditor extends EditorPane {
 
 	override layout(_dimension: Dimension, _position?: IDomPosition): void {
 		// CSS grid owns the fast-transfer two-pane layout.
+		// The image-grid body width is derived from the viewport, so drop its cache on resize.
+		this.invalidateImageGridBodyWidthCache();
+		this.imageGridLayoutMetrics = undefined;
 	}
 
 	override setVisible(visible: boolean): void {
@@ -4636,6 +4645,9 @@ export class TurboFileEditor extends EditorPane {
 		if (!state) {
 			return page;
 		}
+		// The scroll body is recreated on every full render; drop the cached width so this pass
+		// re-measures (and so a post-attach measurement below picks up the real body width).
+		this.invalidateImageGridBodyWidthCache();
 		this.normalizeImageGridStateColumns(state);
 		const range = this.getImageGridVirtualRange(state);
 
@@ -4701,13 +4713,17 @@ export class TurboFileEditor extends EditorPane {
 		body.appendChild(grid);
 		page.appendChild(body);
 		const scrollTop = state.scrollTop;
-		if (scrollTop > 0) {
-			getWindow(body).requestAnimationFrame(() => {
-				if (body.isConnected) {
-					body.scrollTop = scrollTop;
-				}
-			});
-		}
+		getWindow(body).requestAnimationFrame(() => {
+			if (!body.isConnected) {
+				return;
+			}
+			// Now that the body is in the document, drop the render-time (container-based) width
+			// estimate so subsequent scroll passes measure the real attached body exactly once.
+			this.invalidateImageGridBodyWidthCache();
+			if (scrollTop > 0) {
+				body.scrollTop = scrollTop;
+			}
+		});
 		return page;
 	}
 
@@ -5062,7 +5078,7 @@ export class TurboFileEditor extends EditorPane {
 		const histogram = this.renderImagePreviewTopAction(Codicon.graphLine, '直方图', () => this.toggleImagePreviewHistogram(), state.histogramVisible);
 		histogram.dataset.turbofilePreviewToggle = 'histogram';
 		toolbar.appendChild(histogram);
-		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, '下载图片', () => this.downloadImageGridPreview()));
+		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.download, '下载图片', () => { void this.downloadImageGridPreview(); }));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.trash, '删除图片', () => { void this.deleteImageGridPreview(); }));
 		toolbar.appendChild(this.renderImagePreviewTopAction(Codicon.close, '关闭', () => this.closeImageGridPreview()));
 		overlay.appendChild(toolbar);
@@ -8850,22 +8866,41 @@ export class TurboFileEditor extends EditorPane {
 		this.imagePreviewRenderSeq++;
 	}
 
-	private downloadImageGridPreview(): void {
+	private async downloadImageGridPreview(): Promise<void> {
 		const state = this.imageGridState;
 		const image = state?.images[state.selectedIndex];
-		const src = this.getImagePreviewSource(image);
-		if (!image || !src) {
+		const device = state ? this.getPaneDevice(state.side) : undefined;
+		if (!image?.item.path || !device) {
 			return;
 		}
-		const ownerDocument = this.container?.ownerDocument ?? document;
-		const anchor = ownerDocument.createElement('a');
-		anchor.href = src;
-		anchor.download = image.item.name;
-		anchor.rel = 'noopener';
-		anchor.style.display = 'none';
-		ownerDocument.body.appendChild(anchor);
-		anchor.click();
-		anchor.remove();
+		try {
+			// Always save the true original bytes — the on-screen preview may be a display-resolution
+			// downscale for very large images, but a download must produce the real file.
+			const result = await this.sshService.readImage(await this.toTransferEndpoint(device, image.item.path), {
+				encoding: 'base64',
+				forceOriginal: true,
+				maxBytes: 256 * 1024 * 1024,
+				sourceSize: image.item.rawSize,
+				sourceModified: image.item.rawModified
+			});
+			if (!result.ok || !result.content) {
+				throw new Error(result.message || '无法读取原始图片。');
+			}
+			const src = `data:${result.mime || getMimeType(image.item.name)};base64,${result.content}`;
+			const ownerDocument = this.container?.ownerDocument ?? document;
+			const anchor = ownerDocument.createElement('a');
+			anchor.href = src;
+			anchor.download = image.item.name;
+			anchor.rel = 'noopener';
+			anchor.style.display = 'none';
+			ownerDocument.body.appendChild(anchor);
+			anchor.click();
+			anchor.remove();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `下载图片失败：${message}`;
+			this.render();
+		}
 	}
 
 	private canCopyPreviewImage(): boolean {
@@ -9711,13 +9746,20 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridBodyWidth(): number {
+		if (this.imageGridBodyWidthCache !== undefined) {
+			return this.imageGridBodyWidthCache;
+		}
 		const body = this.container?.querySelector<HTMLElement>('.turbofile-image-page-body');
 		const measured = body?.clientWidth ?? 0;
-		if (measured > 0) {
-			return Math.max(320, measured - 28);
-		}
-		const fallback = this.container?.clientWidth ?? 1440;
-		return Math.max(320, fallback - 28);
+		const width = measured > 0
+			? Math.max(320, measured - 28)
+			: Math.max(320, (this.container?.clientWidth ?? 1440) - 28);
+		this.imageGridBodyWidthCache = width;
+		return width;
+	}
+
+	private invalidateImageGridBodyWidthCache(): void {
+		this.imageGridBodyWidthCache = undefined;
 	}
 
 	private getImageGridThumbnailRequestWidth(state: TurboFileImageGridState): number {
@@ -9805,16 +9847,17 @@ export class TurboFileEditor extends EditorPane {
 		if (!grid) {
 			return;
 		}
-		// renderImageGridSlice clears the grid before refilling it, and renderImageGridCard reads
-		// body.clientWidth, which forces a synchronous layout. During that flush the grid is empty
-		// or partially filled, so body.scrollHeight briefly drops and the browser clamps
-		// body.scrollTop to 0 — that's the "scrolling jumps back to the top" regression. Re-apply
-		// the saved scrollTop right after the rebuild so the user's position is preserved.
+		// The body-width cache means renderImageGridSlice no longer forces a layout mid-refill, so the
+		// browser should not collapse scrollHeight and clamp scrollTop. As a safety net, capture the
+		// live scroll position before the rebuild and only restore it if the rebuild actually drove
+		// scrollTop backwards (a collapse). Using the live pre-render value — not the stale state —
+		// ensures we never yank against ongoing inertial scrolling, which is what caused the jitter.
 		const body = this.container.querySelector<HTMLElement>('.turbofile-image-page-body');
-		const savedScrollTop = state.scrollTop;
+		const scrollTopBeforeRender = body ? body.scrollTop : state.scrollTop;
 		this.renderImageGridSlice(grid, state, range);
-		if (body && body.scrollTop !== savedScrollTop) {
-			body.scrollTop = savedScrollTop;
+		if (body && body.scrollTop < scrollTopBeforeRender) {
+			body.scrollTop = scrollTopBeforeRender;
+			state.scrollTop = scrollTopBeforeRender;
 		}
 	}
 

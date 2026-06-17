@@ -25,7 +25,11 @@ import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChange
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
-const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
+// Large source images (4K+ PNGs, dense generated frames) routinely need 10-20s for ImageMagick to
+// decode and downscale over SSH. A 4s budget aborted those before any bytes flowed, leaving the
+// grid stuck on generic file icons and forcing the slow full-download fallback. 25s matches the
+// proven web build and only affects the worst-case wait, not the common fast path.
+const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 25000;
 const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
