@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, shouldUseOriginalTurboFileImageGridSource } from '../../common/turbofileImageGridSizing.js';
+import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns } from '../../common/turbofileImageGridSizing.js';
 
 suite('TurboFileImageGridSizing', () => {
 	test('keeps the old 1x grid size for large images', () => {
@@ -49,17 +49,6 @@ suite('TurboFileImageGridSizing', () => {
 				getTurboFileImageGridEffectiveColumns(12, 2816, 424, 16)
 			],
 			[12, 6]
-		);
-	});
-
-	test('does not treat a small thumbnail as a small original image', () => {
-		assert.deepStrictEqual(
-			[
-				shouldUseOriginalTurboFileImageGridSource(96, 64, undefined, undefined, 100),
-				shouldUseOriginalTurboFileImageGridSource(96, 64, 2048, 1344, 100),
-				shouldUseOriginalTurboFileImageGridSource(96, 64, 96, 64, 100)
-			],
-			[false, false, true]
 		);
 	});
 });

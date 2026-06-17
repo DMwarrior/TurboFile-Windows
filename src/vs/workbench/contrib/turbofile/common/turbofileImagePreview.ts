@@ -9,7 +9,6 @@ export function createTurboFileImagePreviewReadOptions(sourceSize: number, sourc
 	return {
 		encoding: 'base64',
 		forceOriginal: true,
-		preferBuffer: true,
 		maxBytes: 128 * 1024 * 1024,
 		sourceSize,
 		sourceModified

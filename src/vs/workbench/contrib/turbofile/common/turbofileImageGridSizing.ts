@@ -44,18 +44,6 @@ export function getTurboFileImageGridEffectiveColumns(maxColumns: number, availa
 	return Math.max(1, Math.min(columns, Math.floor((width + itemGap) / (itemWidth + itemGap))));
 }
 
-export function shouldUseOriginalTurboFileImageGridSource(width: number | undefined, height: number | undefined, originalWidth: number | undefined, originalHeight: number | undefined, threshold: number): boolean {
-	const sourceWidth = normalizePositiveNumber(originalWidth, 0);
-	const sourceHeight = normalizePositiveNumber(originalHeight, 0);
-	const fallbackWidth = normalizePositiveNumber(width, 0);
-	const fallbackHeight = normalizePositiveNumber(height, 0);
-	const dimensionLimit = Math.max(1, Math.round(threshold));
-	if (!sourceWidth || !sourceHeight) {
-		return false;
-	}
-	return sourceWidth <= dimensionLimit && sourceHeight <= dimensionLimit && fallbackWidth <= dimensionLimit && fallbackHeight <= dimensionLimit;
-}
-
 function normalizePositiveNumber(value: number | undefined, fallback: number): number {
 	return Number.isFinite(value) && value !== undefined && value > 0 ? value : fallback;
 }
