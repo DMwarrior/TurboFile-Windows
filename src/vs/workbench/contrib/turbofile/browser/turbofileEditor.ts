@@ -443,8 +443,11 @@ const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKe
 ];
 const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const IMAGE_GRID_COLUMN_MIN = 4;
-const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
+const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 4;
+// Render a small viewport-adjacent buffer (1 row) but prefetch thumbnails much further ahead so
+// the wheel keeps revealing already-loaded cards instead of empty placeholders.
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
+const IMAGE_GRID_THUMBNAIL_PREFETCH_ROWS = 6;
 const IMAGE_GRID_CARD_GAP = 16;
 const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
 const IMAGE_GRID_CARD_INLINE_CHROME = 16;
@@ -460,9 +463,9 @@ const IMAGE_PREVIEW_WHEEL_DIVISOR = 10;
 const IMAGE_PREVIEW_WHEEL_DELTA_LIMIT = 5;
 const IMAGE_PREVIEW_ZOOM_RATIO = 0.1;
 const IMAGE_GRID_THUMB_QUALITY = 72;
-const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
-const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
-const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
+const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 24;
+const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 14;
+const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 10;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -4911,11 +4914,23 @@ export class TurboFileEditor extends EditorPane {
 			columns: this.getImageGridEffectiveColumns(state),
 			total: state.images.length
 		};
-		const indexes: number[] = [];
+		// Prioritize the rendered slice for immediate display, then queue the wider prefetch window
+		// so the rows just outside the viewport are already loaded by the time the wheel reaches them.
+		const visibleIndexes: number[] = [];
 		for (let index = range.startIndex; index < range.endIndex; index++) {
-			indexes.push(index);
+			visibleIndexes.push(index);
 		}
-		this.queueImageGridThumbnailLoads(state, indexes, true);
+		this.queueImageGridThumbnailLoads(state, visibleIndexes, true);
+		const prefetch = this.getImageGridPrefetchIndexRange(state);
+		const prefetchIndexes: number[] = [];
+		for (let index = prefetch.startIndex; index < prefetch.endIndex; index++) {
+			if (index < range.startIndex || index >= range.endIndex) {
+				prefetchIndexes.push(index);
+			}
+		}
+		if (prefetchIndexes.length) {
+			this.queueImageGridThumbnailLoads(state, prefetchIndexes, false);
+		}
 	}
 
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
@@ -5256,7 +5271,11 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImagePreviewSource(image: TurboFileImageGridImage | undefined): string {
-		return this.getImagePreviewFullSource(image);
+		// Prefer the full-resolution preview when it's loaded, but fall back to the already-cached
+		// thumbnail so wheel-navigating between previews shows something instantly instead of an
+		// empty stage while the original streams in. The thumbnail is replaced as soon as the
+		// preview blob arrives.
+		return this.getImagePreviewFullSource(image) || this.getImagePreviewThumbnailSource(image);
 	}
 
 	private getImagePreviewFullSource(image: TurboFileImageGridImage | undefined): string {
@@ -8872,7 +8891,8 @@ export class TurboFileEditor extends EditorPane {
 		const gridState = this.imageGridState;
 		if (gridState?.previewVisible) {
 			const image = gridState.images[gridState.selectedIndex];
-			return !!image && !!this.getImagePreviewSource(image);
+			// Copy semantics target the real image, not the placeholder thumbnail.
+			return !!image && !!this.getImagePreviewFullSource(image);
 		}
 		return false;
 	}
@@ -9455,6 +9475,12 @@ export class TurboFileEditor extends EditorPane {
 			} else {
 				this.updateImageGridCard(index);
 			}
+			// If the preview is open on this image and the real preview hasn't loaded yet, the
+			// freshly-arrived thumbnail is now the placeholder source — push it into the overlay so
+			// the user sees something immediately while the full image keeps streaming.
+			if (state.previewVisible && state.selectedIndex === index && !this.getImagePreviewFullSource(image)) {
+				this.updateImagePreviewOverlay();
+			}
 		} catch (error) {
 			if (this.imageGridState === state) {
 				image.thumbnailError = error instanceof Error ? error.message : String(error);
@@ -9473,7 +9499,9 @@ export class TurboFileEditor extends EditorPane {
 		if (!image?.item.path || !device || this.imageGridState !== state) {
 			return;
 		}
-		if (this.getImagePreviewSource(image)) {
+		// Only the full preview source counts here — the thumbnail fallback used for instant
+		// display in the overlay must not short-circuit the real preview request.
+		if (this.getImagePreviewFullSource(image)) {
 			await this.ensureImagePreviewElementLoaded(state, index);
 			this.finishImageGridPreviewLoad(state, index, requestSeq, silent);
 			return;
@@ -9654,6 +9682,28 @@ export class TurboFileEditor extends EditorPane {
 		const topSpacerHeight = startRow * rowStep;
 		const bottomSpacerHeight = Math.max(0, (totalRows - endRow) * rowStep);
 		return { startIndex, endIndex, topSpacerHeight, bottomSpacerHeight };
+	}
+
+	/**
+	 * Index range of thumbnails worth keeping warm (loading + retaining): the viewport plus several
+	 * rows above and below. Wider than the rendered range so wheel scrolls land on already-loaded
+	 * cards and a back-scroll doesn't have to re-fetch what we just dropped.
+	 */
+	private getImageGridPrefetchIndexRange(state: TurboFileImageGridState): { startIndex: number; endIndex: number } {
+		const total = state.images.length;
+		if (!total) {
+			return { startIndex: 0, endIndex: 0 };
+		}
+		const columns = this.getImageGridEffectiveColumns(state);
+		const rowHeight = this.getImageGridRowHeight(state);
+		const rowStep = rowHeight + IMAGE_GRID_CARD_GAP;
+		const totalRows = Math.ceil(total / columns);
+		const viewportHeight = Math.max(1, state.viewportHeight || this.getImageGridDefaultViewportHeight());
+		const startRow = Math.max(0, Math.floor(state.scrollTop / rowStep) - IMAGE_GRID_THUMBNAIL_PREFETCH_ROWS);
+		const endRow = Math.min(totalRows, Math.ceil((state.scrollTop + viewportHeight) / rowStep) + IMAGE_GRID_THUMBNAIL_PREFETCH_ROWS);
+		const startIndex = Math.min(total, startRow * columns);
+		const endIndex = Math.min(total, Math.max(startIndex, endRow * columns));
+		return { startIndex, endIndex };
 	}
 
 	private getImageGridRowHeight(state: TurboFileImageGridState): number {
@@ -9844,10 +9894,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridVisibleIndexes(state: TurboFileImageGridState): number[] {
-		const rendered = this.imageGridRenderedRange;
-		const range = this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length
-			? { startIndex: rendered.startIndex, endIndex: rendered.endIndex }
-			: this.getImageGridVirtualRange(state);
+		// Use the wider prefetch range so trimImageGridThumbnailQueue keeps inflight loads for the
+		// rows about to enter the viewport. Trimming against only the rendered range cancelled work
+		// that was about to become visible.
+		const range = this.getImageGridPrefetchIndexRange(state);
 		const indexes: number[] = [];
 		for (let index = range.startIndex; index < range.endIndex; index++) {
 			indexes.push(index);
@@ -9880,18 +9930,19 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private isImageGridIndexNearViewport(state: TurboFileImageGridState, index: number): boolean {
-		const rendered = this.imageGridRenderedRange;
-		if (this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
-			return index >= rendered.startIndex && index < rendered.endIndex;
-		}
-		const range = this.getImageGridVirtualRange(state);
+		// "Near viewport" now means inside the wider thumbnail prefetch window. Restricting it to the
+		// rendered range tied loading to the small overscan and made the wheel race ahead of the
+		// queue; widening it to ±IMAGE_GRID_THUMBNAIL_PREFETCH_ROWS lets cards appear already-loaded.
+		const range = this.getImageGridPrefetchIndexRange(state);
 		return index >= range.startIndex && index < range.endIndex;
 	}
 
 	private releaseImageGridImagesOutsideRange(state: TurboFileImageGridState, range: TurboFileImageGridRange): void {
-		const keepRowWidth = this.getImageGridEffectiveColumns(state);
-		const keepThumbnailStart = Math.max(0, range.startIndex - keepRowWidth);
-		const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + keepRowWidth);
+		// Keep thumbnails for the full prefetch window so a wheel reversal doesn't have to re-fetch
+		// rows the user just scrolled past — they're still warm and pop in instantly on the way back.
+		const prefetch = this.getImageGridPrefetchIndexRange(state);
+		const keepThumbnailStart = Math.min(range.startIndex, prefetch.startIndex);
+		const keepThumbnailEnd = Math.max(range.endIndex, prefetch.endIndex);
 		for (const index of Array.from(this.imageGridLoadedThumbnailIndexes)) {
 			const image = state.images[index];
 			if (!image) {
