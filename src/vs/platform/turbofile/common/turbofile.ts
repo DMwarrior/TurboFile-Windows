@@ -29,6 +29,8 @@ export interface ITurboFileSshService {
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
+	createImageResource(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileImageResourceOptions): Promise<ITurboFileImageResourceResult>;
+	releaseImageResource(url: string): Promise<void>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
 	writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
 	compressPath(endpoint: ITurboFileTransferEndpoint, targetPath?: string): Promise<ITurboFileFileOperationResult>;
@@ -249,6 +251,16 @@ export interface ITurboFileReadImageOptions extends ITurboFileReadFileOptions {
 	readonly forceOriginal?: boolean;
 	readonly sourceSize?: number;
 	readonly sourceModified?: number;
+}
+
+export interface ITurboFileImageResourceOptions extends Omit<ITurboFileReadImageOptions, 'encoding'> {
+}
+
+export interface ITurboFileImageResourceResult {
+	readonly ok: boolean;
+	readonly message: string;
+	readonly url?: string;
+	readonly mime?: string;
 }
 
 export interface ITurboFileReadFileResult {

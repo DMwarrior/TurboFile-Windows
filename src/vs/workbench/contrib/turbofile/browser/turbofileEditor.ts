@@ -22,7 +22,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
 import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
@@ -58,6 +58,7 @@ import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbench
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
+import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 
@@ -5416,6 +5417,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private loadImagePreviewElement(loader: HTMLImageElement, src: string): Promise<HTMLImageElement> {
 		return new Promise((resolve, reject) => {
+			let retries = 0;
 			loader.onload = async () => {
 				try {
 					await loader.decode?.();
@@ -5424,7 +5426,16 @@ export class TurboFileEditor extends EditorPane {
 				}
 				resolve(loader);
 			};
-			loader.onerror = () => reject(new Error('Failed to load image'));
+			loader.onerror = () => {
+				if (retries < 1) {
+					retries++;
+					setTimeout(() => {
+						loader.src = src;
+					}, 180);
+					return;
+				}
+				reject(new Error('Failed to load image'));
+			};
 			loader.src = src;
 		});
 	}
@@ -9374,6 +9385,14 @@ export class TurboFileEditor extends EditorPane {
 		return result;
 	}
 
+	private isRemoteSshImageDevice(device: TurboFileDevice): boolean {
+		return device.id !== LOCAL_WINDOWS_DEVICE_ID;
+	}
+
+	private async createImageGridResourceUrl(device: TurboFileDevice, path: string, options: ITurboFileImageResourceOptions): Promise<{ ok: boolean; message: string; url?: string; mime?: string }> {
+		return this.sshService.createImageResource(await this.toTransferEndpoint(device, path), options);
+	}
+
 	private getImageReadCacheKey(device: TurboFileDevice, path: string, options: ITurboFileReadImageOptions): string {
 		return JSON.stringify({
 			device: device.id,
@@ -9433,6 +9452,26 @@ export class TurboFileEditor extends EditorPane {
 
 		try {
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
+			if (this.isRemoteSshImageDevice(device)) {
+				const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImageGridResourceOptions(requestWidth, image.item.rawSize, image.item.rawModified));
+				if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+					if (result.url) {
+						this.releaseImageBlobUrl(result.url);
+					}
+					return;
+				}
+				this.releaseImageBlobUrl(image.thumbnailUrl);
+				image.thumbnailContent = '';
+				image.thumbnailUrl = result.ok ? result.url : undefined;
+				image.thumbnailMime = result.mime || getMimeType(image.item.name);
+				image.thumbnailError = result.ok ? undefined : result.message;
+				if (result.ok) {
+					this.imageGridLoadedThumbnailIndexes.add(index);
+				}
+				this.updateImageGridCard(index);
+				return;
+			}
+
 			const shouldReadOriginalFirst = this.shouldUseOriginalImageGridCardSource(image.width, image.height);
 			let result = shouldReadOriginalFirst
 				? await this.readImageGridImage(device, image.item.path, {
@@ -9517,6 +9556,26 @@ export class TurboFileEditor extends EditorPane {
 			this.updateImagePreviewOverlay();
 		}
 		try {
+			if (this.isRemoteSshImageDevice(device)) {
+				const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImagePreviewResourceOptions(this.isWindowsDevice(device), request, image.item.rawSize, image.item.rawModified));
+				if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
+					if (result.url) {
+						this.releaseImageBlobUrl(result.url);
+					}
+					return;
+				}
+				this.releaseImageBlobUrl(image.previewUrl);
+				image.previewContent = '';
+				image.previewUrl = result.ok ? result.url : undefined;
+				image.previewMime = result.mime || getMimeType(image.item.name);
+				image.previewError = result.ok ? undefined : result.message;
+				if (result.ok) {
+					this.imageGridLoadedPreviewIndexes.add(index);
+					await this.ensureImagePreviewElementLoaded(state, index);
+				}
+				return;
+			}
+
 			const result = await this.readImageGridImage(device, image.item.path, {
 				encoding: 'base64',
 				width: request.width,
@@ -10124,6 +10183,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (url.startsWith('blob:')) {
 			URL.revokeObjectURL(url);
+			return;
+		}
+		if (url.startsWith('turbofile-image:')) {
+			void this.sshService.releaseImageResource(url);
 		}
 	}
 

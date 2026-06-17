@@ -13,9 +13,9 @@ import { PassThrough } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
-import { app, BrowserWindow, clipboard, nativeImage } from 'electron';
+import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -35,6 +35,9 @@ const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_VERSION = 1;
 const IMAGE_THUMBNAIL_CACHE_MAX_BYTES = 512 * 1024 * 1024;
 const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
+const TURBOFILE_IMAGE_RESOURCE_SCHEME = 'turbofile-image';
+const IMAGE_RESOURCE_TTL_MS = 10 * 60 * 1000;
+const IMAGE_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 1000;
 const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
 const WINDOWS_DRAG_COPY_HOOK_POLL_MS = 50;
 const TURBOFILE_WINDOWS_DRAG_COPY_HOOK_CLSID = '{D650A1FA-43C6-4B8F-8C83-80B028353F64}';
@@ -340,8 +343,18 @@ interface ILocalTarChunk {
 	readonly entryCount: number;
 }
 
+interface ITurboFileImageResourceDescriptor {
+	readonly endpoint: ITurboFileTransferEndpoint;
+	readonly options: ITurboFileImageResourceOptions;
+	readonly createdAt: number;
+	expiresAt: number;
+}
+
 export class TurboFileSshMainService implements ITurboFileSshService {
 	declare readonly _serviceBrand: undefined;
+
+	private static imageProtocolRegistered = false;
+	private static imageProtocolService: TurboFileSshMainService | undefined;
 
 	private nativeRequire: NodeRequire | undefined;
 	private terminalSessionSequence = 1;
@@ -364,9 +377,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
+	private readonly imageResourceDescriptors = new Map<string, ITurboFileImageResourceDescriptor>();
+	private imageResourceCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	private windowsDragCopyHookRegistrationPromise: Promise<void> | undefined;
 
 	constructor() {
+		this.ensureTurboFileImageProtocolRegistered();
 		// A freshly-registered CopyHook handler is not picked up by the already-running Explorer
 		// until Explorer reloads (WinSCP documents the same: its dragext needs a logoff/restart to
 		// load). Prepare the handler eagerly at startup so the very first drag-to-Windows works,
@@ -3604,6 +3620,124 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				mime: getMimeType(endpoint.path),
 				size: 0
 			};
+		}
+	}
+
+	async createImageResource(endpoint: ITurboFileTransferEndpoint, options: ITurboFileImageResourceOptions = {}): Promise<ITurboFileImageResourceResult> {
+		try {
+			const now = Date.now();
+			this.trimExpiredImageResources(now);
+			this.ensureImageResourceCleanupTimer();
+
+			const token = randomUUID();
+			this.imageResourceDescriptors.set(token, {
+				endpoint,
+				options: { ...options },
+				createdAt: now,
+				expiresAt: now + IMAGE_RESOURCE_TTL_MS
+			});
+
+			return {
+				ok: true,
+				message: 'Image resource created.',
+				url: `${TURBOFILE_IMAGE_RESOURCE_SCHEME}://${token}`,
+				mime: getMimeType(endpoint.path)
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				message: error instanceof Error ? error.message : String(error),
+				mime: getMimeType(endpoint.path)
+			};
+		}
+	}
+
+	async releaseImageResource(url: string): Promise<void> {
+		const token = this.getImageResourceToken(url);
+		if (token) {
+			this.imageResourceDescriptors.delete(token);
+		}
+	}
+
+	private ensureTurboFileImageProtocolRegistered(): void {
+		TurboFileSshMainService.imageProtocolService = this;
+		if (TurboFileSshMainService.imageProtocolRegistered) {
+			return;
+		}
+
+		protocol.handle(TURBOFILE_IMAGE_RESOURCE_SCHEME, request => {
+			const service = TurboFileSshMainService.imageProtocolService;
+			if (!service) {
+				return new Response('TurboFile image service is unavailable.', { status: 503 });
+			}
+			return service.handleTurboFileImageProtocolRequest(request);
+		});
+		TurboFileSshMainService.imageProtocolRegistered = true;
+	}
+
+	private async handleTurboFileImageProtocolRequest(request: GlobalRequest): Promise<GlobalResponse> {
+		try {
+			const token = this.getImageResourceToken(request.url);
+			if (!token) {
+				return new Response('Invalid TurboFile image resource.', { status: 400 });
+			}
+
+			const descriptor = this.imageResourceDescriptors.get(token);
+			if (!descriptor) {
+				return new Response('TurboFile image resource was not found.', { status: 404 });
+			}
+
+			const now = Date.now();
+			if (descriptor.expiresAt <= now) {
+				this.imageResourceDescriptors.delete(token);
+				return new Response('TurboFile image resource expired.', { status: 410 });
+			}
+
+			descriptor.expiresAt = now + IMAGE_RESOURCE_TTL_MS;
+			const result = await this.readImageBuffer(descriptor.endpoint, descriptor.options);
+			const body = result.buffer.buffer.slice(result.buffer.byteOffset, result.buffer.byteOffset + result.buffer.byteLength) as ArrayBuffer;
+			return new Response(body, {
+				status: 200,
+				headers: {
+					'Content-Type': result.mime || getMimeType(descriptor.endpoint.path),
+					'Cache-Control': 'no-store'
+				}
+			});
+		} catch (error) {
+			return new Response(error instanceof Error ? error.message : String(error), { status: 500 });
+		}
+	}
+
+	private getImageResourceToken(url: string): string | undefined {
+		try {
+			const parsed = new URL(url);
+			if (parsed.protocol !== `${TURBOFILE_IMAGE_RESOURCE_SCHEME}:`) {
+				return undefined;
+			}
+			const token = parsed.hostname || parsed.pathname.replace(/^\/+/, '').split('/')[0];
+			return token ? decodeURIComponent(token) : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private ensureImageResourceCleanupTimer(): void {
+		if (this.imageResourceCleanupTimer) {
+			return;
+		}
+		this.imageResourceCleanupTimer = setInterval(() => this.trimExpiredImageResources(Date.now()), IMAGE_RESOURCE_CLEANUP_INTERVAL_MS);
+		(this.imageResourceCleanupTimer as unknown as { unref?: () => void }).unref?.();
+	}
+
+	private trimExpiredImageResources(now: number): void {
+		for (const [token, descriptor] of this.imageResourceDescriptors) {
+			if (descriptor.expiresAt <= now) {
+				this.imageResourceDescriptors.delete(token);
+			}
+		}
+		if (this.imageResourceDescriptors.size === 0 && this.imageResourceCleanupTimer) {
+			clearInterval(this.imageResourceCleanupTimer);
+			this.imageResourceCleanupTimer = undefined;
 		}
 	}
 
