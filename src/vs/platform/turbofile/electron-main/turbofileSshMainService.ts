@@ -25,10 +25,7 @@ import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChange
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
-// Large PNGs (e.g. 4K+ generated frames) routinely need 10–20 s for ImageMagick to decode and
-// thumbnail over SSH. The previous 4 s budget killed those requests before they could produce any
-// bytes, leaving cards stuck on the generic file icon and forcing the slow full-download fallback.
-const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 60000;
+const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
 const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
