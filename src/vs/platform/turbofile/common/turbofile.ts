@@ -5,6 +5,7 @@
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Event } from '../../../base/common/event.js';
+import { VSBuffer } from '../../../base/common/buffer.js';
 
 export const ITurboFileSshService = createDecorator<ITurboFileSshService>('turboFileSshService');
 
@@ -29,6 +30,7 @@ export interface ITurboFileSshService {
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
+	readImageWithBuffer(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<[ITurboFileReadFileResult, VSBuffer | undefined]>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
 	writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
 	compressPath(endpoint: ITurboFileTransferEndpoint, targetPath?: string): Promise<ITurboFileFileOperationResult>;
@@ -247,6 +249,7 @@ export interface ITurboFileReadImageOptions extends ITurboFileReadFileOptions {
 	readonly format?: 'jpeg' | 'png' | 'webp';
 	readonly interpolation?: 'area' | 'lanczos';
 	readonly forceOriginal?: boolean;
+	readonly preferBuffer?: boolean;
 	readonly sourceSize?: number;
 	readonly sourceModified?: number;
 }
@@ -262,4 +265,5 @@ export interface ITurboFileReadFileResult {
 	readonly height?: number;
 	readonly originalWidth?: number;
 	readonly originalHeight?: number;
+	readonly buffer?: VSBuffer;
 }

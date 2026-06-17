@@ -14,8 +14,10 @@ import { pipeline } from 'node:stream/promises';
 import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage } from 'electron';
+import { VSBuffer } from '../../../base/common/buffer.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { getTurboFileImageSizeFromHeader } from '../common/turbofileImageSize.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -3583,13 +3585,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async readImage(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions = {}): Promise<ITurboFileReadFileResult> {
+		const [result] = await this.readImageResult(endpoint, options, false);
+		return result;
+	}
+
+	async readImageWithBuffer(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions = {}): Promise<[ITurboFileReadFileResult, VSBuffer | undefined]> {
+		return this.readImageResult(endpoint, options, true);
+	}
+
+	private async readImageResult(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions, preferBuffer: boolean): Promise<[ITurboFileReadFileResult, VSBuffer | undefined]> {
 		const encoding = options.encoding ?? 'base64';
 		try {
 			const result = await this.readImageBuffer(endpoint, options);
-			return {
+			const buffer = preferBuffer ? VSBuffer.wrap(result.buffer) : undefined;
+			return [{
 				ok: true,
 				message: 'Image loaded.',
-				content: encoding === 'base64' ? result.buffer.toString('base64') : result.buffer.toString('utf8'),
+				content: preferBuffer ? '' : encoding === 'base64' ? result.buffer.toString('base64') : result.buffer.toString('utf8'),
 				encoding,
 				mime: result.mime,
 				size: result.buffer.byteLength,
@@ -3597,16 +3609,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				height: result.height,
 				originalWidth: result.originalWidth,
 				originalHeight: result.originalHeight
-			};
+			}, buffer];
 		} catch (error) {
-			return {
+			return [{
 				ok: false,
 				message: error instanceof Error ? error.message : String(error),
 				content: '',
 				encoding,
 				mime: getMimeType(endpoint.path),
 				size: 0
-			};
+			}, undefined];
 		}
 	}
 
@@ -6192,15 +6204,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			&& !looksLikeWindowsPath(endpoint.path)
 			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
 		if (shouldTryRemoteTransform) {
-			const [thumbnail, sourceSize] = await Promise.all([
+			const [thumbnail, headerSize] = await Promise.all([
 				this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation),
-				this.tryReadRemoteImageSizeViaImageMagick(endpoint)
+				this.tryReadImageHeaderSize(endpoint)
 			]);
 			if (thumbnail) {
 				return {
 					...thumbnail,
-					originalWidth: sourceSize?.width ?? thumbnail.originalWidth ?? thumbnail.width,
-					originalHeight: sourceSize?.height ?? thumbnail.originalHeight ?? thumbnail.height
+					originalWidth: headerSize?.width ?? thumbnail.originalWidth,
+					originalHeight: headerSize?.height ?? thumbnail.originalHeight
 				};
 			}
 		}
@@ -6332,6 +6344,54 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} catch {
 			return undefined;
 		}
+	}
+
+	private async tryReadImageHeaderSize(endpoint: ITurboFileTransferEndpoint): Promise<IImageSize | undefined> {
+		try {
+			const header = endpoint.kind === 'local'
+				? await this.readLocalFileHeaderBuffer(endpoint.path, 128 * 1024)
+				: await this.readRemoteFileHeaderBuffer(endpoint, 128 * 1024);
+			return getTurboFileImageSizeFromHeader(header);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async readLocalFileHeaderBuffer(path: string, maxBytes: number): Promise<Buffer> {
+		const handle = await fsp.open(path, 'r');
+		try {
+			const stat = await handle.stat();
+			if (!stat.isFile()) {
+				return Buffer.alloc(0);
+			}
+			const length = Math.min(Math.max(0, maxBytes), stat.size);
+			const buffer = Buffer.alloc(length);
+			const result = await handle.read(buffer, 0, length, 0);
+			return result.bytesRead === length ? buffer : buffer.subarray(0, result.bytesRead);
+		} finally {
+			await handle.close();
+		}
+	}
+
+	private async readRemoteFileHeaderBuffer(endpoint: ITurboFileTransferEndpoint, maxBytes: number): Promise<Buffer> {
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const stat = await this.remoteStat(sftp, endpoint.path);
+			if (stat.isDirectory()) {
+				return Buffer.alloc(0);
+			}
+			const length = Math.min(Math.max(0, maxBytes), stat.size);
+			if (length <= 0) {
+				return Buffer.alloc(0);
+			}
+			const handle = await this.openRemoteFile(sftp, endpoint.path, 'r');
+			try {
+				const buffer = Buffer.alloc(length);
+				const bytesRead = await this.readRemoteFileChunk(sftp, handle, buffer, length, 0);
+				return bytesRead === length ? buffer : buffer.subarray(0, Math.max(0, bytesRead));
+			} finally {
+				await this.closeRemoteFile(sftp, handle);
+			}
+		});
 	}
 
 	private async writeCachedImageThumbnail(cacheKey: string, result: IImageBufferResult): Promise<void> {
@@ -6494,42 +6554,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
 		}
-	}
-
-	private async tryReadRemoteImageSizeViaImageMagick(endpoint: ITurboFileTransferEndpoint): Promise<IImageSize | undefined> {
-		if (!endpoint.connection) {
-			return undefined;
-		}
-
-		const tool = await this.getRemoteImageTool(endpoint);
-		if (!tool) {
-			return undefined;
-		}
-
-		const source = quotePosixShellArg(endpoint.path);
-		const format = quotePosixShellArg('%w %h');
-		const command = tool === 'magick'
-			? `${tool} identify -format ${format} ${source}`
-			: `identify -format ${format} ${source} 2>/dev/null || ${tool} ${source} -format ${format} info:`;
-		let output = '';
-		try {
-			await this.withDirectorySshClient(endpoint, client => this.execRemote(client, command, {
-				timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS,
-				onStdout: chunk => {
-					output += chunk;
-				}
-			}));
-		} catch {
-			return undefined;
-		}
-
-		const match = /(?<width>\d+)\s+(?<height>\d+)/.exec(output.trim());
-		if (!match?.groups) {
-			return undefined;
-		}
-		const width = Number(match.groups.width);
-		const height = Number(match.groups.height);
-		return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? { width, height } : undefined;
 	}
 
 	private async getRemoteImageTool(endpoint: ITurboFileTransferEndpoint): Promise<'magick' | 'convert' | undefined> {
@@ -9119,6 +9143,10 @@ function looksLikeWindowsPath(path: string): boolean {
 }
 
 function getImageSize(buffer: Buffer): IImageSize | undefined {
+	const headerSize = getTurboFileImageSizeFromHeader(buffer);
+	if (headerSize) {
+		return headerSize;
+	}
 	const bmpSize = getBmpImageSize(buffer);
 	if (bmpSize) {
 		return bmpSize;
