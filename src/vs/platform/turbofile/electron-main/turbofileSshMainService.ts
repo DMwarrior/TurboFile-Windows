@@ -1350,11 +1350,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (sizePromise) {
 				bytes = Math.max(bytes, await sizePromise);
 			}
-			const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => bytes);
-			if (bytes > 0 && targetSize !== bytes) {
-				throw new Error(`Tar upload size mismatch: expected ${bytes}, got ${targetSize}.`);
-			}
-			const resultBytes = bytes > 0 ? bytes : targetSize;
+			// The tar pipe already fails loudly (non-zero exit on either side) if the archive is
+			// truncated, so once the byte total is known we trust it and skip the post-transfer remote
+			// `du`. That verification walked every file and was brutally slow on a cold cache (tens of
+			// seconds for a 30k-file tree), which is why the first transfer used to sit at 100% for a
+			// long time while a delete + retransfer — with the cache warm — finished immediately. We
+			// only fall back to a remote size scan when the total is genuinely unknown.
+			const resultBytes = bytes > 0 ? bytes : await this.getRemotePathContentSizeByCommand(request.target).catch(() => 0);
 			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar upload completed.', true, { strategy: 'tar-upload' });
 			return this.createTransferResult(true, 'tar-upload', resultBytes, 'Tar upload completed.', startedAt, request.progressId);
 		} catch (error) {
@@ -1411,11 +1413,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (sizePromise) {
 				bytes = Math.max(bytes, await sizePromise);
 			}
-			const targetSize = await getLocalPathSize(request.target.path).catch(() => bytes);
-			if (bytes > 0 && targetSize !== bytes) {
-				throw new Error(`Tar download size mismatch: expected ${bytes}, got ${targetSize}.`);
-			}
-			const resultBytes = bytes > 0 ? bytes : targetSize;
+			// See the upload path: the tar pipe already errors out on a truncated archive, so when the
+			// byte total is known we skip the post-transfer local rescan. `getLocalPathSize` recursively
+			// stats every extracted file, which on a cold NTFS metadata cache takes tens of seconds for a
+			// 30k-file tree — the "finished but still spinning" delay on the first transfer. Only scan
+			// when the total is unknown so the completion size is still populated.
+			const resultBytes = bytes > 0 ? bytes : await getLocalPathSize(request.target.path).catch(() => 0);
 			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar download completed.', true, { strategy: 'tar-download' });
 			return this.createTransferResult(true, 'tar-download', resultBytes, 'Tar download completed.', startedAt, request.progressId);
 		} catch (error) {
@@ -1487,7 +1490,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			client = await this.connect(configResult.config);
 			const sourceStream = await this.openRemoteCommandStream(client, buildTarCreateFromDirectoryCommand(source.path), 'tar download create');
-			tarProcess = spawn('tar.exe', ['-xf', '-', '-C', localDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+			tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), '-xf', '-', '-C', localDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 			if (!tarProcess.stdin || !tarProcess.stdout) {
 				throw new Error('Local tar download did not provide pipes.');
 			}
@@ -1516,7 +1519,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			});
 			try {
-				tarProcess = spawn('tar.exe', tarArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), ...tarArgs], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 				sshProcess = spawn(tool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env });
 				sshProcess.stdout?.resume();
 				if (!tarProcess.stdout || !sshProcess.stdin) {
@@ -1548,7 +1551,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			try {
 				sshProcess = spawn(tool.executable, sshArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
-				tarProcess = spawn('tar.exe', tarArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+				tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), ...tarArgs], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 				tarProcess.stdout?.resume();
 				if (!sshProcess.stdout || !tarProcess.stdin) {
 					throw new Error('Native tar download did not provide required pipes.');
@@ -1811,6 +1814,37 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return this.localTarListEncodingPromise;
 	}
 
+	private localTarCharsetArgsPromise: Promise<string[]> | undefined;
+
+	/**
+	 * Windows `tar.exe` is libarchive `bsdtar`, which interprets archive member names in the process
+	 * ANSI code page (e.g. GBK) unless told otherwise. The peer on a transfer is a UTF-8 Linux host
+	 * (GNU tar), so without this option non-ASCII names (e.g. Chinese) garble in both directions:
+	 * on extract bsdtar reads the remote's raw UTF-8 bytes as GBK, and on create it would emit GBK.
+	 * `--options hdrcharset=UTF-8` makes bsdtar read/write archive names as UTF-8 so both ends agree.
+	 * The flag is only valid for bsdtar (GNU tar rejects --options and is already UTF-8 native), and
+	 * only matters on Windows, so it is emitted just for a detected bsdtar. SSH↔SSH transfers never
+	 * touch local tar, which is why they were never affected.
+	 */
+	private getLocalTarCharsetArgs(): Promise<string[]> {
+		if (!this.localTarCharsetArgsPromise) {
+			this.localTarCharsetArgsPromise = (async () => {
+				if (platform() !== 'win32') {
+					return [];
+				}
+				try {
+					const version = await new Promise<string>((resolve, reject) => {
+						execFile('tar.exe', ['--version'], { windowsHide: true }, (error, stdout) => error ? reject(error) : resolve(stdout));
+					});
+					return /bsdtar|libarchive/i.test(version) ? ['--options', 'hdrcharset=UTF-8'] : [];
+				} catch {
+					return [];
+				}
+			})();
+		}
+		return this.localTarCharsetArgsPromise;
+	}
+
 	private async createLocalTarListBuffer(entries: readonly string[]): Promise<Buffer> {
 		const encoding = await this.getLocalTarListEncoding();
 		if (encoding === 'utf8') {
@@ -1889,7 +1923,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			});
 			try {
-				tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), '-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 				sshProcess = spawn(sshTool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: sshEnv });
 				sshProcess.stdout?.resume();
 				if (!tarProcess.stdout || !sshProcess.stdin) {
@@ -1944,7 +1978,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			});
 			try {
-				tarProcess = spawn('tar.exe', ['-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+				tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), '-cf', '-', '-C', localRoot, '--null', '-T', chunk.listPath], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 				zstdProcess = spawn(zstdTool.executable, [`-${LOCAL_TAR_ZSTD_LEVEL}`, '-T1', '-c'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: zstdTool.env });
 				sshProcess = spawn(sshTool.executable, sshArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: sshEnv });
 				sshProcess.stdout?.resume();
@@ -3108,7 +3142,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			client = await this.connect(configResult.config);
 			const sourceStream = await this.openRemoteCommandStream(client, buildTarCreateFromItemsCommand(plan.parentPath, plan.names), 'batch tar download create');
-			tarProcess = spawn('tar.exe', ['-xf', '-', '-C', targetDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+			tarProcess = spawn('tar.exe', [...await this.getLocalTarCharsetArgs(), '-xf', '-', '-C', targetDirectory], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 			if (!tarProcess.stdin || !tarProcess.stdout) {
 				throw new Error('Local batch tar download did not provide pipes.');
 			}
@@ -3896,7 +3930,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			const archivePath = targetPath ?? getDefaultArchivePath(endpoint.path, endpoint.kind === 'local' ? 'zip' : 'tar.gz');
 			if (endpoint.kind === 'local') {
-				await runLocalCommand('tar.exe', ['-a', '-cf', archivePath, '-C', dirname(endpoint.path), basename(endpoint.path)]);
+				await runLocalCommand('tar.exe', [...await this.getLocalTarCharsetArgs(), '-a', '-cf', archivePath, '-C', dirname(endpoint.path), basename(endpoint.path)]);
 			} else {
 				await this.withSshClient(endpoint, client => this.execRemote(client, `mkdir -p ${quotePosixShellArg(getRemoteParentPath(archivePath))} && tar -czf ${quotePosixShellArg(archivePath)} -C ${quotePosixShellArg(getRemoteParentPath(endpoint.path))} ${quotePosixShellArg(getTransferName(endpoint.path))}`));
 			}
@@ -3913,7 +3947,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				outputDirectory = await getAvailableLocalDirectory(outputDirectory);
 				await fsp.mkdir(outputDirectory, { recursive: true });
-				await runLocalCommand('tar.exe', ['-xf', endpoint.path, '-C', outputDirectory]);
+				await runLocalCommand('tar.exe', [...await this.getLocalTarCharsetArgs(), '-xf', endpoint.path, '-C', outputDirectory]);
 			} else {
 				const outputSetup = `out=${quotePosixShellArg(outputDirectory)}; if [ -e "$out" ] && [ ! -d "$out" ]; then out="$out"_extracted; fi; mkdir -p "$out"`;
 				const command = isZipPath(endpoint.path)
