@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { ConnectConfig } from 'ssh2';
-import { createReadStream, createWriteStream, existsSync, promises as fsp } from 'fs';
+import { appendFileSync, createReadStream, createWriteStream, existsSync, promises as fsp } from 'fs';
 import { basename, dirname, join } from 'node:path';
 import { networkInterfaces, platform, tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -25,7 +25,16 @@ import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChange
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
 const REMOTE_IMAGE_TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
-const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 4000;
+// Large source images can need 10-20s for ImageMagick to decode and downscale over SSH; a short
+// budget aborts them before any bytes flow. The common case still returns in well under a second.
+const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 25000;
+// Max concurrent SSH image reads (remote thumbnail transforms + downloads). The image grid renders
+// cards as <img src="turbofile-image://">, and Chromium fetches every visible card at once. Dozens
+// of simultaneous `client.exec` calls on one SSH connection blow past the server's MaxSessions
+// limit and every command fails with "Unable to exec", so the whole grid stays on generic icons.
+// A small global cap keeps thumbnail generation under that ceiling (leaving channels free for
+// directory/SFTP work) while still loading several images in parallel.
+const SSH_IMAGE_READ_MAX_CONCURRENCY = 6;
 const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
@@ -380,6 +389,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly imageResourceDescriptors = new Map<string, ITurboFileImageResourceDescriptor>();
 	private imageResourceCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	private windowsDragCopyHookRegistrationPromise: Promise<void> | undefined;
+	// Caps concurrent SSH image reads. The image grid renders cards as <img src="turbofile-image://">,
+	// and Chromium fetches every visible card at once — dozens of simultaneous `client.exec` calls on
+	// one SSH connection blow past the server's MaxSessions limit and every command fails with
+	// "Unable to exec". A small global limit keeps thumbnail generation under that ceiling (leaving
+	// channels free for directory/SFTP work) while still loading several images in parallel.
+	private imageReadActiveCount = 0;
+	private readonly imageReadWaiters: Array<() => void> = [];
 
 	constructor() {
 		this.ensureTurboFileImageProtocolRegistered();
@@ -6265,7 +6281,43 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
+	/**
+	 * Acquires a slot from the SSH image-read concurrency limiter, awaiting a free slot when the cap
+	 * is reached. Hand-off on release keeps the active count exact. Prevents the grid's burst of
+	 * parallel <img> fetches from exhausting the SSH connection's channels ("Unable to exec").
+	 */
+	private async acquireImageReadSlot(): Promise<void> {
+		if (this.imageReadActiveCount < SSH_IMAGE_READ_MAX_CONCURRENCY) {
+			this.imageReadActiveCount++;
+			return;
+		}
+		await new Promise<void>(resolve => this.imageReadWaiters.push(resolve));
+	}
+
+	private releaseImageReadSlot(): void {
+		const next = this.imageReadWaiters.shift();
+		if (next) {
+			// Hand the slot directly to the next waiter; active count stays the same.
+			next();
+			return;
+		}
+		this.imageReadActiveCount = Math.max(0, this.imageReadActiveCount - 1);
+	}
+
 	private async readImageBuffer(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions): Promise<IImageBufferResult> {
+		// Only SSH reads contend for connection channels; local reads run unthrottled.
+		if (endpoint.kind !== 'ssh') {
+			return this.readImageBufferInner(endpoint, options);
+		}
+		await this.acquireImageReadSlot();
+		try {
+			return await this.readImageBufferInner(endpoint, options);
+		} finally {
+			this.releaseImageReadSlot();
+		}
+	}
+
+	private async readImageBufferInner(endpoint: ITurboFileTransferEndpoint, options: ITurboFileReadImageOptions): Promise<IImageBufferResult> {
 		const targetWidth = clampPositiveInt(options.width);
 		const targetHeight = clampPositiveInt(options.height);
 		const quality = clampQuality(options.quality);
@@ -6308,6 +6360,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		const size = getImageSize(buffer);
+		logImageDebug(`original path=${endpoint.path} bytes=${buffer.byteLength} decoded=${size ? `${size.width}x${size.height}` : 'NONE'} mime=${getMimeType(endpoint.path)}`);
 		return {
 			buffer,
 			mime: getMimeType(endpoint.path),
@@ -6322,6 +6375,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const shouldTryRemoteTransform = endpoint.kind === 'ssh'
 			&& !looksLikeWindowsPath(endpoint.path)
 			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
+		logImageDebug(`scaled path=${endpoint.path} fpSize=${sourceFingerprint?.size ?? 'n/a'} target=${targetWidth}x${targetHeight} fmt=${format} tryRemote=${shouldTryRemoteTransform}`);
 		if (shouldTryRemoteTransform) {
 			const thumbnail = await this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation);
 			if (thumbnail) {
@@ -6329,11 +6383,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 
+		logImageDebug(`scaled-fallback-download path=${endpoint.path} maxBytes=${sourceMaxBytes}`);
 		const sourceBuffer = endpoint.kind === 'local'
 			? await this.readLocalFileBuffer(endpoint.path, sourceMaxBytes)
 			: await this.readRemoteFileBuffer(endpoint, sourceMaxBytes);
 		const sourceSize = getImageSize(sourceBuffer);
 		const sourceMime = getMimeType(endpoint.path);
+		logImageDebug(`scaled-fallback-decoded path=${endpoint.path} bytes=${sourceBuffer.byteLength} decoded=${sourceSize ? `${sourceSize.width}x${sourceSize.height}` : 'NONE'} mime=${sourceMime}`);
 		if (sourceMime === 'image/bmp') {
 			const bmp = tryCreateBmpPngVariant(sourceBuffer, targetWidth, targetHeight);
 			if (bmp) {
@@ -6361,8 +6417,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			};
 		}
 		try {
-			return this.transformImageBuffer(sourceBuffer, endpoint.path, targetWidth, targetHeight, quality, format);
+			const transformed = this.transformImageBuffer(sourceBuffer, endpoint.path, targetWidth, targetHeight, quality, format);
+			logImageDebug(`scaled-local-transform-ok path=${endpoint.path} outBytes=${transformed.buffer.byteLength} outMime=${transformed.mime}`);
+			return transformed;
 		} catch (error) {
+			logImageDebug(`scaled-local-transform-FAIL path=${endpoint.path} err=${error instanceof Error ? error.message : String(error)} -> returning RAW ${sourceMime} bytes=${sourceBuffer.byteLength}`);
 			if (sourceMime.startsWith('image/')) {
 				return {
 					buffer: sourceBuffer,
@@ -6598,6 +6657,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
 			assertImageBuffer(buffer, mime);
 			const size = getImageSize(buffer);
+			logImageDebug(`remote-thumb path=${endpoint.path} tool=${tool} geom=${geometry} bytes=${buffer.byteLength} decoded=${size ? `${size.width}x${size.height}` : 'NONE'}`);
 			if (!size) {
 				// The header looked valid but nativeImage (same decoder family as the renderer's <img>)
 				// could not actually decode the bytes — truncated output, a timeout cutting the stream
@@ -6613,6 +6673,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				height: size.height
 			};
 		} catch (error) {
+			logImageDebug(`remote-thumb-FAIL path=${endpoint.path} tool=${tool} geom=${geometry} err=${error instanceof Error ? error.message : String(error)}`);
 			// A single corrupt/unsupported image should not disable thumbnail acceleration for
 			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
@@ -9424,6 +9485,16 @@ function getPngCrcTable(): Uint32Array {
 	}
 	pngCrcTable = table;
 	return table;
+}
+
+// TEMP DIAGNOSTIC: trace the SSH image read path to find why large super-resolution images fail to
+// load. Writes to <tmpdir>/turbofile-image-debug.log. Remove once the root cause is fixed.
+function logImageDebug(message: string): void {
+	try {
+		appendFileSync(join(tmpdir(), 'turbofile-image-debug.log'), `${new Date().toISOString()} ${message}\n`);
+	} catch {
+		// Diagnostics must never break image loading.
+	}
 }
 
 function assertImageBuffer(buffer: Buffer, mime: string): void {
