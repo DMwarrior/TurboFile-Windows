@@ -1725,6 +1725,49 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return entries.sort((a, b) => FILE_ENTRY_NAME_COLLATOR.compare(a, b));
 	}
 
+	/**
+	 * Pre-walk the local source tree on the Node side and write a null-separated file list so the
+	 * bundled cygwin `rsync.exe` can skip its own recursive scan via `--files-from`. cygwin's
+	 * per-entry `stat()` is ~10-50× slower than Node's `readdir(... withFileTypes)`, so a directory
+	 * of 30k tiny files (the `1024x40` test set) keeps rsync silent for 20+ seconds before the
+	 * first byte is sent. Building the list ourselves drops that to well under a second.
+	 *
+	 * Only runs on Windows (where cygwin's stat is the bottleneck) and only when every item shares
+	 * the same parent directory so a single rsync invocation with one source root suffices.
+	 * Returns `undefined` to indicate the caller should fall back to the per-item-argument form.
+	 */
+	private async buildLocalRsyncFastListFile(items: readonly ITurboFileBatchTransferItem[]): Promise<{ readonly listPath: string; readonly sourceBase: string } | undefined> {
+		if (platform() !== 'win32' || !items.length) {
+			return undefined;
+		}
+		const sourceBase = dirname(items[0].sourcePath);
+		if (!sourceBase || sourceBase === items[0].sourcePath) {
+			return undefined;
+		}
+		for (const item of items) {
+			if (dirname(item.sourcePath) !== sourceBase) {
+				return undefined;
+			}
+		}
+		let entries: readonly string[];
+		try {
+			entries = await this.collectLocalTarRelativeEntries(sourceBase, items.map(item => basename(item.sourcePath)));
+		} catch {
+			return undefined;
+		}
+		if (!entries.length) {
+			return undefined;
+		}
+		const listPath = join(tmpdir(), `turbofile-rsync-list-${randomUUID()}`);
+		try {
+			await fsp.writeFile(listPath, createTarNullListBuffer(entries));
+		} catch {
+			await fsp.rm(listPath, { force: true }).catch(() => undefined);
+			return undefined;
+		}
+		return { listPath, sourceBase };
+	}
+
 	private localTarListEncodingPromise: Promise<string> | undefined;
 
 	/**
@@ -2479,23 +2522,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			// Progress is driven by rsync's own --info=progress2 transferred byte count.
 			if (isUpload) {
-				const sourceArgs = items.map(item => toRsyncLocalPath(item.sourcePath, tool.pathFlavor));
-				await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
-					return this.runCancelableLocalCommand(tool.executable, [
-						...buildLocalRsyncOptionArgs(true),
-						buildRsyncPathWithMkdirOption(request.targetDirectory.path),
-						'-e',
-						buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath),
-						...sourceArgs,
-						formatRsyncRemoteSpec(connection, ensureTrailingRemoteSlash(request.targetDirectory.path))
-					], {
-						env,
-						onStdout: progress.handleOutput,
-						onStderr: progress.handleOutput,
-						inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
-						inactivityMessage: `Batch rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
-					}, request.progressId);
-				});
+				// Walk the source on the Node side so rsync skips its slow cygwin scan and starts
+				// transferring within ~1s instead of stalling on "preparing" for 20+s on large trees.
+				const fastList = await this.buildLocalRsyncFastListFile(items);
+				try {
+					await withLocalRsyncSshEnvironment(connection, tool, (env, identityPath) => {
+						const args: string[] = [
+							...buildLocalRsyncOptionArgs(true),
+							buildRsyncPathWithMkdirOption(request.targetDirectory.path),
+							'-e',
+							buildLocalRsyncSshTransport(connection, tool.sshExecutable, identityPath)
+						];
+						if (fastList) {
+							args.push(
+								`--files-from=${toRsyncLocalPath(fastList.listPath, tool.pathFlavor)}`,
+								'--from0',
+								`${toRsyncLocalPath(fastList.sourceBase, tool.pathFlavor)}/`
+							);
+						} else {
+							for (const item of items) {
+								args.push(toRsyncLocalPath(item.sourcePath, tool.pathFlavor));
+							}
+						}
+						args.push(formatRsyncRemoteSpec(connection, ensureTrailingRemoteSlash(request.targetDirectory.path)));
+						return this.runCancelableLocalCommand(tool.executable, args, {
+							env,
+							onStdout: progress.handleOutput,
+							onStderr: progress.handleOutput,
+							inactivityTimeoutMs: LOCAL_RSYNC_STALL_TIMEOUT_MS,
+							inactivityMessage: `Batch rsync upload produced no output for ${LOCAL_RSYNC_STALL_TIMEOUT_MS} ms.`
+						}, request.progressId);
+					});
+				} finally {
+					if (fastList) {
+						await fsp.rm(fastList.listPath, { force: true }).catch(() => undefined);
+					}
+				}
 			} else {
 				await ensureLocalDirectory(request.targetDirectory.path);
 				const sourceArgs = items.map(item => formatRsyncRemoteSpec(connection, item.sourcePath));
