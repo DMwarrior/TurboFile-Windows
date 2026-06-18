@@ -3613,7 +3613,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async waitForWindowsDragCopyHookTarget(targetFile: string, fakeDirectoryName: string): Promise<string> {
 		const deadline = Date.now() + WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS;
+		const desktopFallbackDirs = this.getWindowsDragDesktopFallbackDirs();
 		while (Date.now() < deadline) {
+			// 1) The CopyHook captured the destination. This covers drops onto ordinary directories and
+			//    open Explorer windows (the hook is registered for the file-system Directory class).
 			try {
 				const raw = await fsp.readFile(targetFile, 'utf8');
 				const captured = raw.replace(/^\uFEFF/, '');
@@ -3629,10 +3632,51 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					throw error;
 				}
 			}
+
+			// 2) Fallback for drops onto the live Desktop. The desktop background is a special shell
+			//    folder, so its drop is handled by the desktop's own drop target and never consults the
+			//    Directory CopyHook (confirmed via the hook log: ordinary folders on any drive fire the
+			//    hook, the relocated D:\Desktop drop does not). In that case Explorer physically copies
+			//    the empty fake folder onto the desktop, so detect it there and use the desktop \u2014 resolved
+			//    through Electron so it follows a relocated (e.g. D:\Desktop) shell folder \u2014 as the target.
+			for (const desktopDir of desktopFallbackDirs) {
+				const landedFolder = join(desktopDir, fakeDirectoryName);
+				try {
+					if ((await fsp.stat(landedFolder)).isDirectory()) {
+						await fsp.rm(landedFolder, { recursive: true, force: true }).catch(() => undefined);
+						return desktopDir;
+					}
+				} catch {
+					// The fake folder has not landed in this candidate yet; keep polling.
+				}
+			}
 			await delay(WINDOWS_DRAG_COPY_HOOK_POLL_MS);
 		}
 
 		throw new Error('Windows drop target capture timed out.');
+	}
+
+	/**
+	 * Candidate Desktop directories used to recover a drop the Directory CopyHook never saw (see
+	 * {@link waitForWindowsDragCopyHookTarget}). `app.getPath('desktop')` honors a relocated Desktop
+	 * (e.g. moved to D:\), and the raw profile Desktop is added as a defensive secondary.
+	 */
+	private getWindowsDragDesktopFallbackDirs(): string[] {
+		const dirs: string[] = [];
+		const add = (dir: string | undefined): void => {
+			if (dir && !dirs.some(existing => existing.toLowerCase() === dir.toLowerCase())) {
+				dirs.push(dir);
+			}
+		};
+		try {
+			add(app.getPath('desktop'));
+		} catch {
+			// Electron could not resolve the desktop; fall back to the profile path below.
+		}
+		if (process.env.USERPROFILE) {
+			add(join(process.env.USERPROFILE, 'Desktop'));
+		}
+		return dirs;
 	}
 
 	private async ensureWindowsDragCopyHookRegistered(): Promise<void> {
