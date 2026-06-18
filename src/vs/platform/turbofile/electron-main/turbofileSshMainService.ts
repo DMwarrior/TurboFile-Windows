@@ -328,6 +328,12 @@ interface IRsyncProgressReporter {
 	readonly reportProgress: (transferredBytes: number, force?: boolean, toCheck?: number, totalChecks?: number, transferIndex?: number, percent?: number, speedBytesPerSecond?: number) => void;
 	readonly getLastBytes: () => number;
 	readonly getActivityTime: () => number | undefined;
+	/**
+	 * Publish the known byte total so the UI shows a size (and a real percentage) while rsync is
+	 * still building its file list and has not emitted any transferred bytes yet. The total is
+	 * computed concurrently on the Node side, mirroring how the tar path fills its denominator.
+	 */
+	readonly setTotalBytes: (totalBytes: number) => void;
 }
 
 interface ILocalSshTool {
@@ -1216,8 +1222,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, 0, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
-					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' });
+					const initialTotalBytes = Math.max(0, bytes);
+					this.fireTransferProgress(request, 0, initialTotalBytes, 'transfer', 'Uploading over local rsync.', true, { strategy: 'rsync-upload' });
+					const progress = this.createRsyncProgressReporter(request, initialTotalBytes, 'transfer', 'Uploading over local rsync.', { strategy: 'rsync-upload' });
+					// Show the size from the first second by computing it concurrently with rsync's scan.
+					if (initialTotalBytes <= 0) {
+						void getLocalPathSize(request.source.path).then(total => progress.setTotalBytes(total)).catch(() => undefined);
+					}
 					await this.runLocalRsyncUpload(request, bytes, progress.handleOutput);
 					const resultBytes = progress.getLastBytes() || bytes;
 					await this.verifySshUploadSize(request.target, 0, 'Local rsync upload');
@@ -1253,8 +1264,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			try {
 				if (protocol === 'rsync') {
-					this.fireTransferProgress(request, 0, 0, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
-					const progress = this.createRsyncProgressReporter(request, 0, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' });
+					const initialTotalBytes = Math.max(0, bytes);
+					this.fireTransferProgress(request, 0, initialTotalBytes, 'transfer', 'Downloading over local rsync.', true, { strategy: 'rsync-download' });
+					const progress = this.createRsyncProgressReporter(request, initialTotalBytes, 'transfer', 'Downloading over local rsync.', { strategy: 'rsync-download' });
+					// Show the size from the first second by computing it concurrently with rsync's scan.
+					if (initialTotalBytes <= 0) {
+						void this.getRemotePathContentSizeByCommand(request.source).then(total => progress.setTotalBytes(total)).catch(() => undefined);
+					}
 					await this.runLocalRsyncDownload(request, bytes, progress.handleOutput);
 					const resultBytes = progress.getLastBytes() || bytes;
 					this.fireTransferProgress(request, resultBytes, 0, 'complete', 'Local rsync download completed.', true, { strategy: 'rsync-download' });
@@ -2506,15 +2522,28 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const connection = isUpload ? request.targetDirectory.connection! : request.source.connection!;
 		try {
 			const tool = await resolveLocalRsyncTool();
-			const progress = this.createRsyncProgressReporter(request, 0, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
+			const initialTotalBytes = Math.max(0, expectedBytes);
+			const progress = this.createRsyncProgressReporter(request, initialTotalBytes, 'transfer', isUpload ? 'Batch rsync upload in progress.' : 'Batch rsync download in progress.', {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length
 			});
 
+			// Mirror the tar path's early phase: compute the byte total concurrently (a Node-side walk
+			// is ~50× faster than rsync's cygwin file-list scan) and publish it the moment it resolves.
+			// This makes the size and a real percentage appear within ~1s, so the transfer no longer
+			// looks stuck at "preparing / 0 B" during rsync's own (unavoidable) file-list build. The
+			// actual bytes are still moved by rsync — only the denominator is borrowed from tar's trick.
+			if (initialTotalBytes <= 0) {
+				const sizePromise = isUpload
+					? this.getLocalBatchTarBytes(items)
+					: this.getRemoteBatchSourceContentSize(request.source, items);
+				void sizePromise.then(total => progress.setTotalBytes(total)).catch(() => undefined);
+			}
+
 			// Fire 'transfer' (not 'prepare') right away: rsync starts immediately and may stay quiet
 			// while scanning its file list, and the last phase label should not read as "preparing".
-			this.fireTransferProgress(request, 0, 0, 'transfer', isUpload ? 'Starting batch rsync upload.' : 'Starting batch rsync download.', true, {
+			this.fireTransferProgress(request, 0, initialTotalBytes, 'transfer', isUpload ? 'Starting batch rsync upload.' : 'Starting batch rsync download.', true, {
 				strategy: isUpload ? 'rsync-upload' : 'rsync-download',
 				completedItems: 0,
 				totalItems: items.length,
@@ -5768,7 +5797,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private createRsyncProgressReporter(request: { readonly progressId?: string; readonly clientStartedAt?: number }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
-		void totalBytes;
+		// `knownTotalBytes` is the denominator the UI shows. rsync's --info=progress2 only emits a
+		// transferred count once data starts flowing, which on a large tree can be 10s+ after the
+		// process starts; publishing a concurrently-computed total here keeps the display showing the
+		// size (and a real percentage) from the first second instead of a blank "preparing" state.
+		let knownTotalBytes = Math.max(0, totalBytes);
 		let lastBytes = 0;
 		let rsyncProgressBuffer = '';
 		let lastActivityAt: number | undefined;
@@ -5805,7 +5838,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				lastSpeedBytesPerSecond = speedBytesPerSecond;
 			}
 			lastActivityAt = Date.now();
-			this.fireTransferProgress(request, normalizedTransferred, 0, phase, detail, force, {
+			// Never let an estimated total round down below what rsync has already moved, otherwise the
+			// progress bar would jump backwards when the transferred count overtakes the estimate.
+			const emittedTotal = knownTotalBytes > 0 ? Math.max(knownTotalBytes, normalizedTransferred) : 0;
+			this.fireTransferProgress(request, normalizedTransferred, emittedTotal, phase, detail, force, {
 				...extra,
 				...(toCheck !== undefined ? { toCheck } : {}),
 				...(totalChecks !== undefined ? { totalChecks } : {}),
@@ -5828,12 +5864,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			},
 			reportProgress,
 			getLastBytes: () => lastBytes,
-			getActivityTime: () => lastActivityAt
+			getActivityTime: () => lastActivityAt,
+			setTotalBytes: total => {
+				const normalizedTotal = Math.max(0, total);
+				if (normalizedTotal <= knownTotalBytes) {
+					return;
+				}
+				knownTotalBytes = normalizedTotal;
+				// Force one event so the size appears immediately, even before rsync moves a byte.
+				reportProgress(lastBytes, true);
+			}
 		};
 	}
 
 	private createParallelRsyncProgressReporter(request: { readonly progressId?: string; readonly clientStartedAt?: number }, totalBytes: number, phase: ITurboFileTransferProgressEvent['phase'], detail: string, extra: ITransferProgressEventExtra = {}, onAcceptedProgress?: () => void): IRsyncProgressReporter {
-		void totalBytes;
+		let knownTotalBytes = Math.max(0, totalBytes);
 		const transferredByIndex = new Map<number, number>();
 		const speedByIndex = new Map<number, number>();
 		let outputBuffer = '';
@@ -5855,7 +5900,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			lastBytes = transferredBytes;
 			lastSpeedBytesPerSecond = speedBytesPerSecond;
 			lastActivityAt = Date.now();
-			this.fireTransferProgress(request, transferredBytes, 0, phase, detail, force, {
+			const emittedTotal = knownTotalBytes > 0 ? Math.max(knownTotalBytes, transferredBytes) : 0;
+			this.fireTransferProgress(request, transferredBytes, emittedTotal, phase, detail, force, {
 				...extra,
 				...(speedBytesPerSecond > 0 || previousSpeedBytesPerSecond > 0 ? { speedBytesPerSecond } : {})
 			});
@@ -5902,7 +5948,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				report(true);
 			},
 			getLastBytes: () => lastBytes,
-			getActivityTime: () => lastActivityAt
+			getActivityTime: () => lastActivityAt,
+			setTotalBytes: total => {
+				const normalizedTotal = Math.max(0, total);
+				if (normalizedTotal <= knownTotalBytes) {
+					return;
+				}
+				knownTotalBytes = normalizedTotal;
+				report(true);
+			}
 		};
 	}
 

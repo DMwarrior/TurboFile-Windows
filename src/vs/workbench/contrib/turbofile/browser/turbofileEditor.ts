@@ -3775,10 +3775,11 @@ export class TurboFileEditor extends EditorPane {
 				startedAt: task.startedAt,
 				transferStartedAt: task.transferStartedAt
 			});
-			const isRunningRsyncTask = task.status === 'running' && this.isRsyncStrategy(task.strategy);
 			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined && task.totalBytes !== undefined) {
 				transferredBytes += task.transferredBytes ?? 0;
-				totalBytes += isRunningRsyncTask ? 0 : task.totalBytes ?? 0;
+				// task.totalBytes is already 0 while an rsync total is unknown and the real size once the
+				// main process resolves it, so no rsync-specific zeroing is needed here anymore.
+				totalBytes += task.totalBytes ?? 0;
 				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
 				addStartedAt(taskVisibleStartedAt);
 				continue;
@@ -3812,7 +3813,9 @@ export class TurboFileEditor extends EditorPane {
 	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem, task?: TurboFileTask): number {
 		const strategy = item.strategy ?? task?.strategy;
 		if ((task?.status === 'running' || item.status === 'running') && this.isRsyncStrategy(strategy)) {
-			return 0;
+			// Show the concurrently-computed rsync total when known, but don't fall back to the listing
+			// rawSize (which can disagree with rsync's own transferred count and make the bar jumpy).
+			return Math.max(item.totalBytes, 0);
 		}
 		return Math.max(item.totalBytes, item.rawSize, item.transferredBytes, 0);
 	}
@@ -4067,7 +4070,10 @@ export class TurboFileEditor extends EditorPane {
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
 		const isRsyncProgress = strategy?.startsWith('rsync') ?? false;
 		const knownTotalBytes = activeItem ? activeItem.totalBytes : task.totalBytes ?? 0;
-		const totalBytes = isRsyncProgress ? 0 : event.totalBytes > 0 ? event.totalBytes : knownTotalBytes;
+		// rsync used to be forced to an unknown (0) total because it had no reliable size up front.
+		// The main process now computes the byte total concurrently and ships it in event.totalBytes,
+		// so honor it for every strategy; rsync only falls back to 0 when no total is known yet.
+		const totalBytes = event.totalBytes > 0 ? event.totalBytes : (isRsyncProgress ? 0 : knownTotalBytes);
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
