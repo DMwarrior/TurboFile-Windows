@@ -647,13 +647,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const stat = await fsp.stat(request.source.path);
 				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
 				if (stat.isDirectory()) {
-					if (shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
+					if (shouldUseTarForLocalSshTransfer(request.target.preferredProtocol)) {
 						const tarResult = await this.tryLocalToSshTarTransfer(request, bytes, startedAt);
 						if (tarResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return tarResult;
 						}
-						throw new Error('Tar upload unavailable for directory transfer.');
+						// tar/auto have no other route, so a tar failure is fatal. rsync only borrows tar
+						// for its instant start; if the remote lacks tar it falls back to the rsync command.
+						if (shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
+							throw new Error('Tar upload unavailable for directory transfer.');
+						}
 					}
 					if (request.target.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.target.preferredProtocol);
@@ -707,12 +711,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					? Math.max(0, request.expectedBytes ?? 0)
 					: Math.max(0, request.expectedBytes ?? 0);
 				if (sourceType === 'directory') {
-					if (shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
+					if (shouldUseTarForLocalSshTransfer(request.source.preferredProtocol)) {
 						const tarResult = await this.trySshToLocalTarTransfer(request, bytes, startedAt);
 						if (tarResult?.ok) {
 							return tarResult;
 						}
-						throw new Error('Tar download unavailable for directory transfer.');
+						// tar/auto have no other route, so a tar failure is fatal. rsync only borrows tar
+						// for its instant start; if the remote lacks tar it falls back to the rsync command.
+						if (shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
+							throw new Error('Tar download unavailable for directory transfer.');
+						}
 					}
 					if (request.source.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.source.preferredProtocol);
@@ -1295,7 +1303,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'local' || request.target.kind !== 'ssh' || !request.target.connection) {
 			return undefined;
 		}
-		if (!shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
+		if (!shouldUseTarForLocalSshTransfer(request.target.preferredProtocol)) {
 			return undefined;
 		}
 		if (request.target.supportsTar === false || looksLikeWindowsPath(request.target.path)) {
@@ -1354,7 +1362,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'local' || !request.source.connection) {
 			return undefined;
 		}
-		if (!shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
+		if (!shouldUseTarForLocalSshTransfer(request.source.preferredProtocol)) {
 			return undefined;
 		}
 		if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
@@ -2234,7 +2242,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const expectedBytes = this.getBatchExpectedBytes(request, items);
 		const initialAttempt = this.getInitialBatchTransferAttempt(request, items);
 		const initialStrategy = transferAttemptToDirectionalStrategy(request.source, request.targetDirectory, initialAttempt);
-		const initialIsRsync = initialAttempt?.protocol === 'rsync';
+		// local↔SSH rsync now streams through the tar path, which fires its own size-bearing 'prepare'
+		// event, so keep this initial event tar-shaped (show the expected size) rather than the
+		// rsync 0-byte 'transfer' label. SSH↔SSH rsync still preps remotely and keeps the instant label.
+		const isLocalSshDirection = (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh')
+			|| (request.source.kind === 'ssh' && request.targetDirectory.kind === 'local');
+		const initialIsRsync = initialAttempt?.protocol === 'rsync' && !isLocalSshDirection;
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, initialIsRsync ? 0 : expectedBytes, initialIsRsync ? 'transfer' : 'prepare', initialIsRsync ? 'Starting batch rsync transfer.' : 'Preparing batch transfer.', true, {
@@ -2823,7 +2836,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async tryBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number, forceProtocol = false): Promise<ITurboFileBatchTransferResult | undefined> {
 		if (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh') {
-			if (!forceProtocol && !shouldPreferTarForMultiItemTransfer(request.targetDirectory.preferredProtocol)) {
+			if (!forceProtocol && !shouldUseTarForLocalSshTransfer(request.targetDirectory.preferredProtocol)) {
 				return undefined;
 			}
 			if (request.targetDirectory.supportsTar === false || looksLikeWindowsPath(request.targetDirectory.path)) {
@@ -2863,7 +2876,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		if (request.source.kind === 'ssh' && request.targetDirectory.kind === 'local') {
-			if (!forceProtocol && !shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
+			if (!forceProtocol && !shouldUseTarForLocalSshTransfer(request.source.preferredProtocol)) {
 				return undefined;
 			}
 			if (request.source.supportsTar === false || looksLikeWindowsPath(request.source.path)) {
@@ -8069,6 +8082,19 @@ function getDirectoryLocalCommandTransferProtocolOrder(preferredProtocol: TurboF
 
 function shouldPreferTarForMultiItemTransfer(preferredProtocol: TurboFileTransferProtocol | undefined): boolean {
 	return preferredProtocol === undefined || preferredProtocol === 'auto-fast' || preferredProtocol === 'tar';
+}
+
+/**
+ * For the local↔SSH direction, rsync transfers also stream through the tar path. rsync must
+ * `stat()` every file to build its sender file list before the first byte flows; with the bundled
+ * cygwin `rsync.exe` on Windows a directory of tens of thousands of small files stays "preparing"
+ * for 20s+. tar instead streams bytes immediately and computes the byte total concurrently, so the
+ * UI starts within ~1s and still shows a size. rsync stays available as a fallback (via
+ * `shouldUseTarOnlyForBatchTransfer` returning false for it) when the remote lacks tar. SSH↔SSH
+ * rsync preps remotely and is unaffected, so it keeps using {@link shouldPreferTarForMultiItemTransfer}.
+ */
+function shouldUseTarForLocalSshTransfer(preferredProtocol: TurboFileTransferProtocol | undefined): boolean {
+	return shouldPreferTarForMultiItemTransfer(preferredProtocol) || preferredProtocol === 'rsync';
 }
 
 function shouldUseTarOnlyForBatchTransfer(request: ITurboFileBatchTransferRequest): boolean {
