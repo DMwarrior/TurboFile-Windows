@@ -9467,7 +9467,10 @@ function buildPosixNamesAndTypesListCommand(path: string): string {
 // directory (via `cd`) so `%n` echoes them back exactly, letting the caller map results by name.
 function buildPosixStatEntriesCommand(directoryPath: string, names: readonly string[]): string {
 	const args = names.map(name => quotePosixShellArg(`./${normalizeTarListPath(name)}`)).join(' ');
-	return `cd ${quotePosixShellArg(directoryPath)} && LC_ALL=C stat -c '%n\\0%s\\0%Y\\0' -- ${args}`;
+	// Must be --printf, not -c: GNU stat only interprets backslash escapes (so `\0` becomes a real NUL
+	// separator) with --printf; `-c` would emit the literal two characters "\0" and the output would
+	// never parse, leaving size/date blank.
+	return `cd ${quotePosixShellArg(directoryPath)} && LC_ALL=C stat --printf='%n\\0%s\\0%Y\\0' -- ${args}`;
 }
 
 function parseRemoteStatEntries(text: string): ITurboFileEntryStat[] {
