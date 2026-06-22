@@ -17,6 +17,17 @@ export interface ITurboFileSshService {
 	detectCapabilities(options: ITurboFileSshConnectionOptions): Promise<ITurboFileRemoteCapabilitiesResult>;
 	installTransferDependencies(options: ITurboFileSshConnectionOptions, packages: readonly TurboFileTransferDependency[]): Promise<ITurboFileDependencyInstallResult>;
 	listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
+	/**
+	 * Lists a remote directory returning only names + type, skipping the per-file stat for size and
+	 * modified time. This loads huge directories instantly (one round trip, no stat); the missing
+	 * size/modified are filled in afterwards for visible rows via {@link statRemoteEntries}.
+	 */
+	listRemoteDirectoryNames(options: ITurboFileSshConnectionOptions, path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
+	/**
+	 * Fetches size + modified time for specific entries of a remote directory in a single round trip.
+	 * Used to lazily enrich the rows currently visible after a names-only listing.
+	 */
+	statRemoteEntries(options: ITurboFileSshConnectionOptions, directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]>;
 	listLocalDirectory(path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
 	transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult>;
 	transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult>;
@@ -77,6 +88,12 @@ export interface ITurboFileFileEntry {
 export interface ITurboFileDirectoryListing {
 	readonly path: string;
 	readonly entries: ITurboFileFileEntry[];
+}
+
+export interface ITurboFileEntryStat {
+	readonly name: string;
+	readonly size: number;
+	readonly modified: number;
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';

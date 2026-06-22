@@ -64,14 +64,18 @@ import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsy
 
 interface TurboFileFileItem {
 	readonly name: string;
-	readonly size: string;
-	readonly rawSize: number;
-	readonly modified: string;
-	readonly rawModified: number;
+	// size/modified are mutable so a names-only (instant) remote listing can be enriched in place once
+	// the lazily-fetched size + modified time for the visible rows arrives.
+	size: string;
+	rawSize: number;
+	modified: string;
+	rawModified: number;
 	readonly type: TurboFileFileType;
 	readonly directory?: boolean;
 	readonly parent?: boolean;
 	readonly path?: string;
+	/** True when this row came from a names-only listing and still needs its size/date filled in. */
+	attrsPending?: boolean;
 }
 
 interface TurboFilePaneState {
@@ -643,6 +647,10 @@ export class TurboFileEditor extends EditorPane {
 	private readonly fileListScrollRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRestoreRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRenderedRange: Record<'left' | 'right', { startIndex: number; endIndex: number; total: number } | undefined> = { left: undefined, right: undefined };
+	// Lazy size/date enrichment of names-only remote listings: serialize per side and remember if more
+	// rows scrolled into view while a batch was in flight so they get picked up right after.
+	private readonly remoteEnrichInFlight: Record<'left' | 'right', boolean> = { left: false, right: false };
+	private readonly remoteEnrichAgain: Record<'left' | 'right', boolean> = { left: false, right: false };
 	private readonly paneDirectoryCache = new Map<string, TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryInflight = new TurboFileDirectoryInflightTracker<TurboFileDirectoryCacheEntry>();
 	private readonly paneDeviceSnapshots = new Map<string, TurboFilePaneDeviceSnapshot>();
@@ -3161,6 +3169,7 @@ export class TurboFileEditor extends EditorPane {
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = state.scrollTop;
 		this.restoreRenderedFileListScroll(side, list);
+		this.scheduleEnrichVisibleRemoteRows(side);
 	}
 
 	private renderFileListSlice(side: 'left' | 'right', list: HTMLElement, range: TurboFileFileListRange): void {
@@ -3270,6 +3279,76 @@ export class TurboFileEditor extends EditorPane {
 		const scrollTop = list.scrollTop;
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = scrollTop;
+		this.scheduleEnrichVisibleRemoteRows(side);
+	}
+
+	/**
+	 * Kicks off lazy size/date enrichment for the rows currently in view after a names-only remote
+	 * listing. Serialized per side; if more rows scroll in while a batch is running, it re-runs once.
+	 */
+	private scheduleEnrichVisibleRemoteRows(side: 'left' | 'right'): void {
+		const device = this.getPaneDevice(side);
+		if (!device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return;
+		}
+		if (!this.paneStates[side].items.some(item => item.attrsPending)) {
+			return;
+		}
+		if (this.remoteEnrichInFlight[side]) {
+			this.remoteEnrichAgain[side] = true;
+			return;
+		}
+		void this.enrichVisibleRemoteRows(side);
+	}
+
+	private async enrichVisibleRemoteRows(side: 'left' | 'right'): Promise<void> {
+		const device = this.getPaneDevice(side);
+		if (!device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return;
+		}
+		const state = this.paneStates[side];
+		const path = state.path;
+		const range = this.getFileListRange(state);
+		const pending = this.getVisibleFileItems(state)
+			.slice(range.startIndex, range.endIndex)
+			.filter(item => item.attrsPending && !!item.path && !item.parent);
+		if (!pending.length) {
+			return;
+		}
+
+		this.remoteEnrichInFlight[side] = true;
+		try {
+			const options = await this.getSshConnectionOptions(device);
+			const stats = await this.sshService.statRemoteEntries(options, path, pending.map(item => item.name));
+			if (this.paneStates[side].path !== path || this.getPaneDevice(side)?.id !== device.id) {
+				return;
+			}
+			const byName = new Map(stats.map(stat => [stat.name, stat]));
+			let changed = false;
+			for (const item of pending) {
+				const stat = byName.get(item.name);
+				if (!stat) {
+					continue;
+				}
+				item.rawSize = stat.size;
+				item.size = item.directory ? '' : formatSize(stat.size);
+				item.rawModified = stat.modified;
+				item.modified = stat.modified > 0 ? formatDate(stat.modified) : '';
+				item.attrsPending = false;
+				changed = true;
+			}
+			if (changed && this.activePage === 'transfer') {
+				this.render();
+			}
+		} catch {
+			// Enrichment is best-effort; rows keep their blank size/date if it fails.
+		} finally {
+			this.remoteEnrichInFlight[side] = false;
+			if (this.remoteEnrichAgain[side]) {
+				this.remoteEnrichAgain[side] = false;
+				this.scheduleEnrichVisibleRemoteRows(side);
+			}
+		}
 	}
 
 	private resetPaneScroll(side: 'left' | 'right'): void {
@@ -6507,14 +6586,31 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
-			const listing = device.id === LOCAL_WINDOWS_DEVICE_ID
-				? await this.sshService.listLocalDirectory(path, force)
-				: await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force);
+			const isRemote = device.id !== LOCAL_WINDOWS_DEVICE_ID;
+			// Remote directories load names + type only (one round trip, no per-file stat) so even a
+			// directory with hundreds of thousands of files appears instantly; the size and modified
+			// time are filled in lazily for the visible rows by enrichVisibleRemoteRows().
+			const listing = isRemote
+				? await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force)
+				: await this.sshService.listLocalDirectory(path, force);
 			this.setDeviceRuntimeStatus(device, 'online');
+			const items = this.toFileItems(device, listing.path, listing.entries);
+			if (isRemote) {
+				for (const item of items) {
+					// A names-only listing carries no modified time (sentinel 0); blank those rows and
+					// flag them for lazy enrichment. Rows that already have a real time (e.g. served from
+					// a cached full listing) are left intact so their size/date stay visible immediately.
+					if (!item.parent && item.rawModified === 0) {
+						item.attrsPending = true;
+						item.size = '';
+						item.modified = '';
+					}
+				}
+			}
 			const entry = {
 				expiresAt: Date.now() + PANE_DIRECTORY_CACHE_TTL_MS,
 				path: listing.path,
-				items: this.toFileItems(device, listing.path, listing.entries)
+				items
 			};
 			this.paneDirectoryCache.set(this.getPaneDirectoryCacheKey(device, listing.path), entry);
 			if (listing.path === path) {

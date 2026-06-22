@@ -15,7 +15,7 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -565,10 +565,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async listRemoteDirectory(options: ITurboFileSshConnectionOptions, path: string, refresh = false): Promise<ITurboFileDirectoryListing> {
+		return this.listRemoteDirectoryCore(options, path, refresh, false);
+	}
+
+	async listRemoteDirectoryNames(options: ITurboFileSshConnectionOptions, path: string, refresh = false): Promise<ITurboFileDirectoryListing> {
+		return this.listRemoteDirectoryCore(options, path, refresh, true);
+	}
+
+	private async listRemoteDirectoryCore(options: ITurboFileSshConnectionOptions, path: string, refresh: boolean, namesOnly: boolean): Promise<ITurboFileDirectoryListing> {
 		const cacheKey = this.getRemoteDirectoryListingCacheKey(options, path);
 		if (!refresh) {
+			// A full (size+date) cached listing satisfies a names-only request too, but not vice versa:
+			// only reuse a cached entry that has real attributes when the caller asked names-only.
 			const cached = this.getRemoteDirectoryListingCache(cacheKey);
-			if (cached) {
+			if (cached && (namesOnly || this.remoteListingHasAttributes(cached))) {
 				return cached;
 			}
 		}
@@ -580,7 +590,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const session = await this.getDirectorySftpSession(options, configResult.config);
 		try {
-			const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path);
+			const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
 			this.touchDirectorySftpSession(session.key);
 			const result = {
 				path: listing.path,
@@ -589,15 +599,54 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					.map(entry => this.toRemoteEntry(listing.path, entry))
 					.sort(compareFileEntries)
 			};
-			this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
-			if (listing.path === path) {
-				this.setRemoteDirectoryListingCache(cacheKey, result);
+			// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
+			// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
+			if (!namesOnly) {
+				this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+				if (listing.path === path) {
+					this.setRemoteDirectoryListingCache(cacheKey, result);
+				}
 			}
 			return result;
 		} catch (error) {
 			this.remoteDirectoryListingCache.delete(cacheKey);
 			this.disposeDirectorySftpSession(session.key);
 			throw error;
+		}
+	}
+
+	private remoteListingHasAttributes(listing: ITurboFileDirectoryListing): boolean {
+		// A names-only listing zeroes every size and modified time; a real listing almost always has at
+		// least one non-zero. Treat an all-zero listing as attribute-less so a names-only result that
+		// somehow reached the cache never satisfies a request that needs sizes.
+		return listing.entries.some(entry => entry.size > 0 || entry.modified > 0);
+	}
+
+	async statRemoteEntries(options: ITurboFileSshConnectionOptions, directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]> {
+		const uniqueNames = [...new Set(names.filter(name => !!name && name !== '.' && name !== '..'))];
+		if (!uniqueNames.length) {
+			return [];
+		}
+		if (looksLikeWindowsPath(directoryPath)) {
+			return [];
+		}
+
+		const configResult = await this.createConnectConfig(options);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+
+		const session = await this.getDirectorySftpSession(options, configResult.config);
+		try {
+			const output = await this.execRemoteBytes(session.client, buildPosixStatEntriesCommand(directoryPath, uniqueNames), {
+				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
+			});
+			this.touchDirectorySftpSession(session.key);
+			return parseRemoteStatEntries(output.toString('utf8'));
+		} catch {
+			// Enrichment is best-effort: on failure the rows simply keep their placeholder size/date.
+			return [];
 		}
 	}
 
@@ -7242,13 +7291,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return hasParsedMetric ? parsed : undefined;
 	}
 
-	private async readRemoteDirectoryWithFallback(sftp: ISFTPWrapper, client: ISSHClient, options: ITurboFileSshConnectionOptions, remotePath: string): Promise<IRemoteDirectoryReadResult> {
+	private async readRemoteDirectoryWithFallback(sftp: ISFTPWrapper, client: ISSHClient, options: ITurboFileSshConnectionOptions, remotePath: string, namesOnly = false): Promise<IRemoteDirectoryReadResult> {
 		try {
-			return { path: remotePath, entries: await this.readRemoteDirectoryFast(client, sftp, remotePath) };
+			return { path: remotePath, entries: await this.readRemoteDirectoryFast(client, sftp, remotePath, namesOnly) };
 		} catch (firstError) {
 			for (const fallbackPath of getRemoteDirectoryFallbackPaths(options, remotePath)) {
 				try {
-					return { path: fallbackPath, entries: await this.readRemoteDirectoryFast(client, sftp, fallbackPath) };
+					return { path: fallbackPath, entries: await this.readRemoteDirectoryFast(client, sftp, fallbackPath, namesOnly) };
 				} catch {
 					// Try the next SFTP-visible spelling for devices with chrooted home paths.
 				}
@@ -7257,23 +7306,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
+	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string, namesOnly = false): Promise<ISFTPFileEntry[]> {
 		try {
 			// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
 			// of entries streams output for many seconds and must be allowed to finish (this is the path
 			// that loads large directories quickly in one round trip). A generous total cap still guards
 			// against a wedged channel. Only on a genuine error do we drop to the slow SFTP readdir.
-			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), {
+			// `namesOnly` skips the per-file stat entirely so even huge directories list instantly.
+			const command = namesOnly ? buildPosixNamesAndTypesListCommand(remotePath) : buildPosixFastDirectoryListCommand(remotePath);
+			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, command, {
 				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
 				inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
 				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
-			}));
+			}), namesOnly);
 		} catch {
 			return this.readRemoteDirectory(sftp, remotePath);
 		}
 	}
 
-	private parseFastRemoteDirectoryEntries(output: Buffer): ISFTPFileEntry[] {
+	private parseFastRemoteDirectoryEntries(output: Buffer, namesOnly = false): ISFTPFileEntry[] {
 		const text = output.toString('utf8');
 		if (!text) {
 			return [];
@@ -7281,14 +7332,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const parts = text.split('\0');
 		const entries: ISFTPFileEntry[] = [];
-		for (let index = 0; index + 3 < parts.length; index += 4) {
+		const stride = namesOnly ? 2 : 4;
+		for (let index = 0; index + stride - 1 < parts.length; index += stride) {
 			const filename = parts[index];
 			if (!filename || filename === '.' || filename === '..') {
 				continue;
 			}
 			const kind = parts[index + 1];
-			const size = Number(parts[index + 2]);
-			const modifiedSeconds = Number(parts[index + 3]);
+			const size = namesOnly ? 0 : Number(parts[index + 2]);
+			const modifiedSeconds = namesOnly ? 0 : Number(parts[index + 3]);
 			const type: TurboFileFileType = kind === 'd' ? 'directory' : kind === 'f' ? 'file' : kind === 'l' ? 'symlink' : 'unknown';
 			entries.push({
 				filename,
@@ -9401,6 +9453,48 @@ function buildPosixHumanSizeCommand(path: string): string {
 function buildPosixFastDirectoryListCommand(path: string): string {
 	const quotedPath = quotePosixShellArg(path);
 	return `LC_ALL=C find ${quotedPath} -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0%s\\0%T@\\0'`;
+}
+
+// Names + type only. `%y` is resolved from the directory entry's d_type on common filesystems, so
+// this avoids a stat() per file and returns instantly even for directories with hundreds of
+// thousands of entries. Size and modified time are filled in lazily for visible rows afterwards.
+function buildPosixNamesAndTypesListCommand(path: string): string {
+	const quotedPath = quotePosixShellArg(path);
+	return `LC_ALL=C find ${quotedPath} -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0'`;
+}
+
+// Size + modified time for specific entries in one round trip. Names are passed relative to the
+// directory (via `cd`) so `%n` echoes them back exactly, letting the caller map results by name.
+function buildPosixStatEntriesCommand(directoryPath: string, names: readonly string[]): string {
+	const args = names.map(name => quotePosixShellArg(`./${normalizeTarListPath(name)}`)).join(' ');
+	return `cd ${quotePosixShellArg(directoryPath)} && LC_ALL=C stat -c '%n\\0%s\\0%Y\\0' -- ${args}`;
+}
+
+function parseRemoteStatEntries(text: string): ITurboFileEntryStat[] {
+	if (!text) {
+		return [];
+	}
+	const parts = text.split('\0');
+	const stats: ITurboFileEntryStat[] = [];
+	for (let index = 0; index + 2 < parts.length; index += 3) {
+		const rawName = parts[index];
+		if (!rawName) {
+			continue;
+		}
+		// `stat` echoes the argument exactly, i.e. with the leading "./" we passed; strip it back off.
+		const name = rawName.replace(/^\.\//, '').replace(/\r?\n$/, '');
+		if (!name) {
+			continue;
+		}
+		const size = Number(parts[index + 1]);
+		const modifiedSeconds = Number(parts[index + 2]);
+		stats.push({
+			name,
+			size: Number.isFinite(size) ? size : 0,
+			modified: Number.isFinite(modifiedSeconds) ? Math.floor(modifiedSeconds) : 0
+		});
+	}
+	return stats;
 }
 
 function parseSizeCommandOutput(output: string): number {
