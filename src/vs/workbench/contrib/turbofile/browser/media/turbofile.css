@@ -2413,19 +2413,24 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	overflow: visible;
 }
 
+/*
+ * A text <input> clips its glyphs to the content box (padding does NOT give descenders room — only
+ * the content box does). The underscore sits at the very bottom of the line box, so it was getting
+ * cut off whenever the line box nearly filled the content box. Fix: keep the content box much taller
+ * than the line box and center the single line, so "_" (and g/y/p descenders) always have several
+ * pixels of clearance. !important is needed because VS Code's own .input rules set height:100% and
+ * line-height:inherit at the same specificity.
+ */
+.turbofile-inline-rename .monaco-inputbox > .ibwrapper > .input,
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	/* A text <input> always clips its glyphs to the content box regardless of overflow, so the
-	   underscore (which sits at the very bottom of the line box) was being cut off when the line
-	   height equalled the content height. Keep the line box smaller than the content box and center
-	   it so descenders like "_" always have clearance below the baseline. */
-	height: 28px;
-	min-height: 28px;
-	padding: 4px;
-	box-sizing: border-box;
+	height: 28px !important;
+	min-height: 28px !important;
+	padding: 2px 6px !important;
+	box-sizing: border-box !important;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: 18px;
+	line-height: 18px !important;
 	overflow: visible;
 }
 
