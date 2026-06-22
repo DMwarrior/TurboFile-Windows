@@ -3499,6 +3499,48 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	async deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive = true): Promise<ITurboFileFileOperationResult> {
+		const targets = endpoints.filter(endpoint => !!endpoint.path);
+		if (!targets.length) {
+			return { ok: true, message: 'Nothing to delete.' };
+		}
+		if (targets.length === 1) {
+			return this.deletePath(targets[0], recursive);
+		}
+
+		try {
+			const first = targets[0];
+			if (first.kind === 'local') {
+				// Local removals run in parallel; the OS handles each independently.
+				await Promise.all(targets.map(endpoint => fsp.rm(endpoint.path, { recursive, force: true })));
+				for (const endpoint of targets) {
+					this.clearRemoteDirectoryListingCache(endpoint);
+				}
+				return { ok: true, message: 'Paths deleted.' };
+			}
+
+			for (const endpoint of targets) {
+				this.assertSafeDeletePath(endpoint.path);
+			}
+
+			if (looksLikeWindowsPath(first.path)) {
+				// Windows remote: one PowerShell call removes the whole list.
+				await this.withSshClient(first, client => this.execRemote(client, buildWindowsDeleteManyCommand(targets.map(endpoint => endpoint.path), recursive)));
+			} else {
+				// POSIX remote: feed the NUL-delimited paths to `xargs -0 rm` in a single round trip;
+				// xargs batches the actual rm invocations server-side so this scales to any selection
+				// size without ever hitting the shell's argument-length limit.
+				const input = Buffer.from(`${targets.map(endpoint => endpoint.path).join('\0')}\0`, 'utf8');
+				const removeFlag = recursive ? '-rf' : '-f';
+				await this.withSshClient(first, client => this.execRemoteWithInput(client, `LC_ALL=C xargs -0 -r rm ${removeFlag} --`, input, { timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS }));
+			}
+			this.clearRemoteDirectoryListingCache(first);
+			return { ok: true, message: 'Paths deleted.' };
+		} catch (error) {
+			return { ok: false, message: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
 	private async deleteRemotePathNative(endpoint: ITurboFileTransferEndpoint, recursive: boolean): Promise<void> {
 		this.assertSafeDeletePath(endpoint.path);
 		const command = looksLikeWindowsPath(endpoint.path)
@@ -7231,6 +7273,57 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
+	/**
+	 * Runs a remote command, writing `input` to its stdin in one shot. Used to feed a NUL-delimited
+	 * path list to `xargs -0 rm` so deleting any number of files is a single SSH round trip — xargs
+	 * batches the removals server-side, so it never hits the shell argument-length limit.
+	 */
+	private execRemoteWithInput(client: ISSHClient, command: string, input: Buffer, options: IRemoteExecOptions = {}): Promise<Buffer> {
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			const finish = (callback: () => void) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (timeout) {
+					clearTimeout(timeout);
+					timeout = undefined;
+				}
+				callback();
+			};
+			client.exec(command, (error, stream) => {
+				if (error) {
+					finish(() => reject(error));
+					return;
+				}
+				const chunks: Buffer[] = [];
+				let stderr = '';
+				if (options.timeoutMs && options.timeoutMs > 0) {
+					timeout = setTimeout(() => {
+						try {
+							stream.close?.();
+						} catch {
+							// Best-effort cleanup only.
+						}
+						finish(() => reject(new Error(`Remote command timed out after ${options.timeoutMs} ms.`)));
+					}, options.timeoutMs);
+				}
+				stream.on('data', data => chunks.push(typeof data === 'string' ? Buffer.from(data) : data));
+				stream.stderr.on('data', data => { stderr += data.toString(); });
+				stream.on('close', code => {
+					if (code === 0) {
+						finish(() => resolve(Buffer.concat(chunks)));
+						return;
+					}
+					finish(() => reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`)));
+				});
+				stream.end(input);
+			});
+		});
+	}
+
 	private parseRsyncProgressSnapshot(chunk: string): IRsyncProgressSnapshot | undefined {
 		let parsed: IRsyncProgressSnapshot | undefined;
 		const progressPattern = /(?:^|[\r\n])\s*([0-9][0-9., ]*)\s+([0-9]{1,3})%/g;
@@ -9428,6 +9521,12 @@ function buildWindowsDeleteCommand(path: string, recursive: boolean): string {
 	const literalPath = path.replace(/'/g, "''");
 	const recurseFlag = recursive ? ' -Recurse' : '';
 	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $path='${literalPath}'; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force${recurseFlag} }"`;
+}
+
+function buildWindowsDeleteManyCommand(paths: readonly string[], recursive: boolean): string {
+	const list = paths.map(path => `'${path.replace(/'/g, "''")}'`).join(',');
+	const recurseFlag = recursive ? ' -Recurse' : '';
+	return `powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; foreach ($p in @(${list})) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force${recurseFlag} } }"`;
 }
 
 function buildWindowsSizeCommand(path: string): string {

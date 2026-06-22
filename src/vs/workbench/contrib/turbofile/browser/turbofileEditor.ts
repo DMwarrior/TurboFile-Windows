@@ -8384,24 +8384,18 @@ export class TurboFileEditor extends EditorPane {
 		this.removePaneItems(side, items);
 		const task = this.beginTask('delete', batch ? `删除 ${items.length} 项` : `删除 ${items[0].name}`, device.name);
 		try {
-			let deleted = 0;
-			const failures: string[] = [];
-			for (const [index, item] of items.entries()) {
-				this.updateTask(task, batch ? `正在删除 ${index + 1}/${items.length}：${item.name}` : `正在删除：${item.name}`, Math.min(88, 15 + Math.round((index / items.length) * 70)));
-				const result = await this.sshService.deletePath(await this.toTransferEndpoint(device, item.path!), true);
-				if (result.ok) {
-					deleted++;
-				} else {
-					failures.push(`${item.name}: ${result.message}`);
-				}
-			}
+			this.updateTask(task, batch ? `正在删除 ${items.length} 项…` : `正在删除：${items[0].name}`, 40);
+			// Delete the whole selection in one batch round trip instead of one request per item, so
+			// removing a large multi-selection is near-instant rather than N sequential SSH calls.
+			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!)));
+			const result = await this.sshService.deletePaths(endpoints, true);
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			await this.refreshPane(side, { force: true });
-			if (failures.length) {
-				this.finishTask(task, 'error', `删除完成 ${deleted} 项，失败 ${failures.length} 项。`, { error: failures[0] });
+			if (!result.ok) {
+				this.finishTask(task, 'error', `删除失败：${result.message}`, { error: result.message });
 				return;
 			}
-			this.finishTask(task, 'success', batch ? `已删除：${deleted} 项` : `已删除：${items[0].name}`);
+			this.finishTask(task, 'success', batch ? `已删除：${items.length} 项` : `已删除：${items[0].name}`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `删除失败：${message}`, { error: message });
@@ -9169,24 +9163,17 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		try {
-			let deleted = 0;
-			const failures: string[] = [];
-			for (const [index, item] of items.entries()) {
-				this.updateTask(task, batch ? `\u6b63\u5728\u5220\u9664 ${index + 1}/${items.length}\uff1a${item.name}` : `\u6b63\u5728\u5220\u9664\uff1a${item.name}`, Math.min(88, 15 + Math.round((index / items.length) * 70)));
-				const result = await this.sshService.deletePath(await this.toTransferEndpoint(device, item.path!), true);
-				if (result.ok) {
-					deleted++;
-				} else {
-					failures.push(`${item.name}: ${result.message}`);
-				}
-			}
-			this.updateTask(task, `\u6b63\u5728\u5237\u65b0\u76ee\u5f55\uff1a${device.name}`, 90);
+			this.updateTask(task, batch ? `正在删除 ${items.length} 张图片…` : `正在删除：${items[0].name}`, 40);
+			// One batch round trip for the whole selection instead of one request per image.
+			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!)));
+			const result = await this.sshService.deletePaths(endpoints, true);
+			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			await this.refreshPane(state.side, { force: true });
-			if (failures.length) {
-				this.finishTask(task, 'error', `\u5220\u9664\u5b8c\u6210 ${deleted} \u5f20\uff0c\u5931\u8d25 ${failures.length} \u5f20\u3002`, { error: failures[0] });
+			if (!result.ok) {
+				this.finishTask(task, 'error', `删除失败：${result.message}`, { error: result.message });
 				return;
 			}
-			this.finishTask(task, 'success', batch ? `\u5df2\u5220\u9664\uff1a${deleted} \u5f20\u56fe\u7247` : `\u5df2\u5220\u9664\uff1a${items[0].name}`);
+			this.finishTask(task, 'success', batch ? `已删除：${items.length} 张图片` : `已删除：${items[0].name}`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `\u5220\u9664\u5931\u8d25\uff1a${message}`, { error: message });

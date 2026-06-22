@@ -34,6 +34,11 @@ export interface ITurboFileSshService {
 	cancelTransfer(progressId: string): Promise<ITurboFileFileOperationResult>;
 	createDirectory(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult>;
 	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
+	/**
+	 * Deletes many paths in as few round trips as possible (POSIX remote: a single `xargs -0 rm`).
+	 * All endpoints must target the same device/connection.
+	 */
+	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
 	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
