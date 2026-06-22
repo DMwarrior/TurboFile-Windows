@@ -3462,7 +3462,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await fsp.mkdir(endpoint.path, { recursive: true });
 			} else {
-				await this.withSftp(endpoint, sftp => this.ensureRemoteDirectory(sftp, endpoint.path));
+				// Reuse the already-open directory session instead of withSftp, which opens a fresh SSH
+				// connection every call — that handshake is the bulk of "new folder is slow", especially
+				// on a high-latency remote host.
+				await this.withDirectorySftp(endpoint, sftp => this.ensureRemoteDirectory(sftp, endpoint.path));
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			return { ok: true, message: 'Directory created.' };
@@ -4047,7 +4050,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				try {
 					await fsp.mkdir(tempRoot, { recursive: true });
 					await fsp.writeFile(tempPath, buffer);
-					await this.withSftp(endpoint, async sftp => {
+					// Reuse the open directory session rather than opening a fresh SSH connection per call,
+					// so creating/saving a file on a high-latency remote host is not gated on a handshake.
+					await this.withDirectorySftp(endpoint, async sftp => {
 						await this.ensureRemoteDirectory(sftp, getRemoteParentPath(endpoint.path));
 						await this.fastPut(sftp, tempPath, endpoint.path, this.createSftpTransferOptions());
 					});

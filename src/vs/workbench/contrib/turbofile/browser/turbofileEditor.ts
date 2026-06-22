@@ -53,6 +53,7 @@ import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWor
 import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
+import { ILabelService } from '../../../../platform/label/common/label.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -699,6 +700,7 @@ export class TurboFileEditor extends EditorPane {
 	private currentInput: TurboFileEditorInput | undefined;
 	private isEditorVisible = false;
 	private aboutDialogElement: HTMLElement | undefined;
+	private remoteDocumentLabelFormatterRegistered = false;
 
 	constructor(
 		group: IEditorGroup,
@@ -723,7 +725,8 @@ export class TurboFileEditor extends EditorPane {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
 		@IUpdateService private readonly updateService: IUpdateService,
-		@IProductService private readonly productService: IProductService
+		@IProductService private readonly productService: IProductService,
+		@ILabelService private readonly labelService: ILabelService
 	) {
 		super((new.target as typeof TurboFileEditor).ID, group, telemetryService, workbenchThemeService, storageService);
 
@@ -8329,6 +8332,39 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	/**
+	 * Inserts a just-created item into the pane immediately instead of re-listing the whole directory.
+	 * A forced re-list after every "new folder/file" was the slow part — on a large or high-latency
+	 * remote directory it could take many seconds or even time out. The server already confirmed the
+	 * create, so showing the row optimistically is both instant and accurate.
+	 */
+	private insertOptimisticPaneItem(side: 'left' | 'right', item: TurboFileFileItem): void {
+		const state = this.paneStates[side];
+		if (item.path && state.items.some(existing => existing.path === item.path)) {
+			return;
+		}
+		const parents = state.items.filter(existing => existing.parent);
+		const entries = state.items.filter(existing => !existing.parent);
+		entries.push(item);
+		entries.sort((a, b) => {
+			if (!!a.directory !== !!b.directory) {
+				return a.directory ? -1 : 1;
+			}
+			return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+		});
+		state.items = [...parents, ...entries];
+		const device = this.getPaneDevice(side);
+		if (device) {
+			const cacheKey = this.getPaneDirectoryCacheKey(device, state.path);
+			const cached = this.paneDirectoryCache.get(cacheKey);
+			if (cached) {
+				this.paneDirectoryCache.set(cacheKey, { ...cached, items: state.items });
+			}
+		}
+		this.fileListRenderedRange[side] = undefined;
+		this.render();
+	}
+
 	private async createFolder(side: 'left' | 'right'): Promise<void> {
 		const state = this.paneStates[side];
 		const device = this.getPaneDevice(side);
@@ -8341,21 +8377,30 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const targetPath = joinPanePath(state.path, name.trim(), this.isWindowsDevice(device));
-		const task = this.beginTask('mkdir', `新建文件夹 ${name.trim()}`, device.name);
+		const folderName = name.trim();
+		const targetPath = joinPanePath(state.path, folderName, this.isWindowsDevice(device));
+		const task = this.beginTask('mkdir', `新建文件夹 ${folderName}`, device.name);
 		try {
 			const result = await this.sshService.createDirectory(await this.toTransferEndpoint(device, targetPath));
 			if (result.ok) {
-				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				this.finishTask(task, 'success', `已创建文件夹：${name.trim()}`);
+				this.insertOptimisticPaneItem(side, {
+					name: folderName,
+					path: targetPath,
+					size: '',
+					rawSize: 0,
+					modified: formatDate(Date.now()),
+					rawModified: Date.now(),
+					type: 'directory',
+					directory: true
+				});
+				this.finishTask(task, 'success', `已创建文件夹：${folderName}`);
 			} else {
 				this.finishTask(task, 'error', `新建文件夹失败：${result.message}`, { error: result.message });
+				await this.refreshPane(side, { force: true });
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `新建文件夹失败：${message}`, { error: message });
-		} finally {
-			await this.refreshPane(side, { force: true });
 		}
 	}
 
@@ -8371,20 +8416,29 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const targetPath = joinPanePath(state.path, name.trim(), this.isWindowsDevice(device));
-		const task = this.beginTask('create-file', `新建文件 ${name.trim()}`, device.name);
+		const fileName = name.trim();
+		const targetPath = joinPanePath(state.path, fileName, this.isWindowsDevice(device));
+		const task = this.beginTask('create-file', `新建文件 ${fileName}`, device.name);
 		try {
 			const result = await this.sshService.writeFile(await this.toTransferEndpoint(device, targetPath), '', 'utf8');
 			if (result.ok) {
-				this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-				this.finishTask(task, 'success', `已创建文件：${name.trim()}`);
+				this.insertOptimisticPaneItem(side, {
+					name: fileName,
+					path: targetPath,
+					size: formatSize(0),
+					rawSize: 0,
+					modified: formatDate(Date.now()),
+					rawModified: Date.now(),
+					type: 'file'
+				});
+				this.finishTask(task, 'success', `已创建文件：${fileName}`);
 			} else {
 				this.finishTask(task, 'error', `新建文件失败：${result.message}`, { error: result.message });
+				await this.refreshPane(side, { force: true });
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `新建文件失败：${message}`, { error: message });
-		} finally {
 			await this.refreshPane(side, { force: true });
 		}
 	}
@@ -10355,7 +10409,30 @@ export class TurboFileEditor extends EditorPane {
 				this._register(this.fileService.registerProvider(TURBOFILE_REMOTE_DOCUMENT_SCHEME, this.remoteFileSystemProvider));
 			}
 		}
+		this.ensureRemoteDocumentLabelFormatter();
 		return this.remoteFileSystemProvider;
+	}
+
+	/**
+	 * Without a label formatter, VS Code derives the editor/tab label for our custom remote scheme
+	 * from the full URI (authority included), so a document opened from an SSH device shows up as
+	 * "<device>: name" instead of just the file name. Registering a formatter that uses only the path
+	 * makes the tab show exactly the file name, e.g. "readme.md".
+	 */
+	private ensureRemoteDocumentLabelFormatter(): void {
+		if (this.remoteDocumentLabelFormatterRegistered) {
+			return;
+		}
+		this.remoteDocumentLabelFormatterRegistered = true;
+		this._register(this.labelService.registerFormatter({
+			scheme: TURBOFILE_REMOTE_DOCUMENT_SCHEME,
+			formatting: {
+				label: '${path}',
+				separator: '/',
+				tildify: false,
+				normalizeDriveLetter: false
+			}
+		}));
 	}
 
 	/**
