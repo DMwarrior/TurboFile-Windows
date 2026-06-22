@@ -3283,6 +3283,28 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	/**
+	 * Re-renders just the visible slice on the existing file-list element (preserving the scroll
+	 * container and its scrollTop), so an in-place data update — e.g. lazily filled size/date — never
+	 * goes through the heavy full render that would interrupt an active scrollbar drag.
+	 */
+	private rerenderFileListSliceInPlace(side: 'left' | 'right'): void {
+		if (this.activePage !== 'transfer' || this.isTaskLogVisible) {
+			return;
+		}
+		const list = this.container?.querySelector<HTMLElement>(`.turbofile-pane[data-turbofile-side="${side}"] .turbofile-file-list`);
+		if (!list) {
+			return;
+		}
+		const state = this.paneStates[side];
+		if (state.loading || state.error) {
+			return;
+		}
+		const scrollTop = list.scrollTop;
+		this.renderFileListSlice(side, list, this.getFileListRange(state));
+		list.scrollTop = scrollTop;
+	}
+
+	/**
 	 * Kicks off lazy size/date enrichment for the rows currently in view after a names-only remote
 	 * listing. Serialized per side; if more rows scroll in while a batch is running, it re-runs once.
 	 */
@@ -3337,8 +3359,12 @@ export class TurboFileEditor extends EditorPane {
 				item.attrsPending = false;
 				changed = true;
 			}
-			if (changed && this.activePage === 'transfer') {
-				this.render();
+			if (changed) {
+				// Update only the visible rows in place — never this.render(). A full render rebuilds the
+				// scroll-container element, which mid-drag destroys the element the browser is tracking and
+				// drops the scrollbar drag (the thumb jumps back and you must re-grab). Re-rendering just
+				// the slice on the existing list element keeps scrollTop/scrollHeight and the drag intact.
+				this.rerenderFileListSliceInPlace(side);
 			}
 		} catch {
 			// Enrichment is best-effort; rows keep their blank size/date if it fails.

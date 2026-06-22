@@ -9494,7 +9494,9 @@ function parseRemoteStatEntries(text: string): ITurboFileEntryStat[] {
 		stats.push({
 			name,
 			size: Number.isFinite(size) ? size : 0,
-			modified: Number.isFinite(modifiedSeconds) ? Math.floor(modifiedSeconds) : 0
+			// `%Y` is epoch seconds; the rest of the app (see toRemoteEntry) carries modified time in
+			// milliseconds and formatDate expects ms, so convert here — otherwise every row renders 1970.
+			modified: Number.isFinite(modifiedSeconds) ? Math.floor(modifiedSeconds) * 1000 : 0
 		});
 	}
 	return stats;
