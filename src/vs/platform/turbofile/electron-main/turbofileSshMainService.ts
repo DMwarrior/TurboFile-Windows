@@ -36,6 +36,10 @@ const REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS = 25000;
 // directory/SFTP work) while still loading several images in parallel.
 const SSH_IMAGE_READ_MAX_CONCURRENCY = 6;
 const REMOTE_DIRECTORY_READ_TIMEOUT_MS = 8000;
+// Fast `find`-based listing is bounded by silence (no output) rather than total duration so large
+// directories that legitimately take many seconds to enumerate still load instead of being killed.
+const REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS = 12000;
+const REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS = 120000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
@@ -1347,16 +1351,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.markTransferDataStarted(request.progressId);
 			await this.runLocalDirectoryTarUpload(request.source.path, request.target, request.progressId, onArchiveDelta);
 			this.throwIfTransferCanceled(request.progressId);
-			if (sizePromise) {
-				bytes = Math.max(bytes, await sizePromise);
-			}
-			// The tar pipe already fails loudly (non-zero exit on either side) if the archive is
-			// truncated, so once the byte total is known we trust it and skip the post-transfer remote
-			// `du`. That verification walked every file and was brutally slow on a cold cache (tens of
-			// seconds for a 30k-file tree), which is why the first transfer used to sit at 100% for a
-			// long time while a delete + retransfer — with the cache warm — finished immediately. We
-			// only fall back to a remote size scan when the total is genuinely unknown.
-			const resultBytes = bytes > 0 ? bytes : await this.getRemotePathContentSizeByCommand(request.target).catch(() => 0);
+			// Do NOT block completion on the size computation. The tar pipe already fails loudly
+			// (non-zero exit on either side) on a truncated archive, so the streamed archive byte count
+			// is an accurate completion size. Awaiting the local-size walk here (only needed for the live
+			// denominator) can add seconds on a cold cache while it contends with tar's own reads, which
+			// showed up as the bar sitting at 100% before the task finally ended. We only fall back to a
+			// remote size scan when neither the known total nor the streamed bytes are available.
+			const resultBytes = bytes > 0 ? bytes : (archiveBytes > 0 ? archiveBytes : await this.getRemotePathContentSizeByCommand(request.target).catch(() => 0));
 			this.fireTransferProgress(request, resultBytes, resultBytes, 'complete', 'Tar upload completed.', true, { strategy: 'tar-upload' });
 			return this.createTransferResult(true, 'tar-upload', resultBytes, 'Tar upload completed.', startedAt, request.progressId);
 		} catch (error) {
@@ -7101,45 +7102,73 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private execRemoteBytes(client: ISSHClient, command: string, options: IRemoteExecOptions = {}): Promise<Buffer> {
 		return new Promise((resolve, reject) => {
 			let settled = false;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
+			let totalTimeout: ReturnType<typeof setTimeout> | undefined;
+			let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+			let activeStream: ISSHExecStream | undefined;
+			const clearTimers = () => {
+				if (totalTimeout) {
+					clearTimeout(totalTimeout);
+					totalTimeout = undefined;
+				}
+				if (inactivityTimer) {
+					clearTimeout(inactivityTimer);
+					inactivityTimer = undefined;
+				}
+			};
 			const finish = (callback: () => void) => {
 				if (settled) {
 					return;
 				}
 				settled = true;
-				if (timeout) {
-					clearTimeout(timeout);
-					timeout = undefined;
-				}
+				clearTimers();
 				callback();
+			};
+			const abort = (message: string) => {
+				const stream = activeStream;
+				try {
+					stream?.close?.();
+				} catch {
+					// Best-effort: older ssh2 channel typings may not expose close.
+				}
+				try {
+					stream?.destroy?.();
+				} catch {
+					// Best-effort cleanup only.
+				}
+				finish(() => reject(new Error(message)));
+			};
+			// An inactivity timeout (reset on every chunk) keeps a long but actively-streaming command
+			// alive — a `find` listing a directory of tens of thousands of files streams output the whole
+			// time and must not be killed by a fixed total-duration cap, which previously forced a fall
+			// back to the much slower per-batch SFTP readdir and ultimately a "read timed out" failure.
+			const armInactivity = () => {
+				if (!options.inactivityTimeoutMs || options.inactivityTimeoutMs <= 0) {
+					return;
+				}
+				if (inactivityTimer) {
+					clearTimeout(inactivityTimer);
+				}
+				inactivityTimer = setTimeout(() => abort(options.inactivityMessage ?? `Remote command produced no output for ${options.inactivityTimeoutMs} ms.`), options.inactivityTimeoutMs);
 			};
 			client.exec(command, (error, stream) => {
 				if (error) {
 					finish(() => reject(error));
 					return;
 				}
+				activeStream = stream;
 
 				const chunks: Buffer[] = [];
 				let stderr = '';
 				if (options.timeoutMs && options.timeoutMs > 0) {
-					timeout = setTimeout(() => {
-						try {
-							stream.close?.();
-						} catch {
-							// Best-effort: older ssh2 channel typings may not expose close.
-						}
-						try {
-							stream.destroy?.();
-						} catch {
-							// Best-effort cleanup only.
-						}
-						finish(() => reject(new Error(`Remote command timed out after ${options.timeoutMs} ms.`)));
-					}, options.timeoutMs);
+					totalTimeout = setTimeout(() => abort(`Remote command timed out after ${options.timeoutMs} ms.`), options.timeoutMs);
 				}
+				armInactivity();
 				stream.on('data', data => {
+					armInactivity();
 					chunks.push(typeof data === 'string' ? Buffer.from(data) : data);
 				});
 				stream.stderr.on('data', data => {
+					armInactivity();
 					stderr += data.toString();
 				});
 				stream.on('close', code => {
@@ -7230,7 +7259,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string): Promise<ISFTPFileEntry[]> {
 		try {
-			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), { timeoutMs: REMOTE_DIRECTORY_READ_TIMEOUT_MS }));
+			// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
+			// of entries streams output for many seconds and must be allowed to finish (this is the path
+			// that loads large directories quickly in one round trip). A generous total cap still guards
+			// against a wedged channel. Only on a genuine error do we drop to the slow SFTP readdir.
+			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, buildPosixFastDirectoryListCommand(remotePath), {
+				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+				inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
+				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
+			}));
 		} catch {
 			return this.readRemoteDirectory(sftp, remotePath);
 		}
