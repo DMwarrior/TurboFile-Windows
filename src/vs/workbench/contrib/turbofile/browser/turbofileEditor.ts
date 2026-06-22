@@ -52,6 +52,7 @@ import { ColorThemeData } from '../../../services/themes/common/colorThemeData.j
 import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWorkbenchColorTheme, IWorkbenchThemeService, ThemeSettings, ThemeSettingDefaults } from '../../../services/themes/common/workbenchThemeService.js';
 import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -10378,14 +10379,37 @@ export class TurboFileEditor extends EditorPane {
 				forceFile: true
 			};
 			const fileEditor = await this.textEditorService.resolveTextEditor(editorInput);
-			await this.editorService.openEditor(fileEditor, {
+			const pane = await this.editorService.openEditor(fileEditor, {
 				pinned: true,
 				revealIfOpened: true,
 				override: DEFAULT_EDITOR_ASSOCIATION.id,
 				index: this.getDocumentEditorTargetIndex()
 			});
+			// The `index` above is only a hint and is unreliable when the document opens into a group
+			// other than the transfer page's (e.g. focus was in an already-open document). Enforce the
+			// invariant afterwards: a document tab must never sit to the left of a transfer page.
+			this.ensureDocumentTabRightOfTransfer(pane?.group, pane?.input);
 		} catch (error) {
 			reportOpenError(error);
+		}
+	}
+
+	/**
+	 * Guarantees the "transfer pages on the left, documents on the right" tab order: if the opened
+	 * document ended up to the left of any TurboFile transfer page in its group, move it to the end.
+	 */
+	private ensureDocumentTabRightOfTransfer(group: IEditorGroup | undefined, input: EditorInput | undefined): void {
+		if (!group || !input) {
+			return;
+		}
+		const editors = group.editors;
+		const currentIndex = editors.indexOf(input);
+		if (currentIndex < 0) {
+			return;
+		}
+		const hasTransferToRight = editors.slice(currentIndex + 1).some(editor => editor instanceof TurboFileEditorInput);
+		if (hasTransferToRight) {
+			group.moveEditor(input, group, { index: editors.length - 1 });
 		}
 	}
 
