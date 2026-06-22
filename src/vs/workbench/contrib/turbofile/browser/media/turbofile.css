@@ -2409,19 +2409,23 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper {
-	min-height: 26px;
+	min-height: 28px;
 	overflow: visible;
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	height: 26px;
-	min-height: 26px;
-	padding: 1px 4px 4px;
+	/* A text <input> always clips its glyphs to the content box regardless of overflow, so the
+	   underscore (which sits at the very bottom of the line box) was being cut off when the line
+	   height equalled the content height. Keep the line box smaller than the content box and center
+	   it so descenders like "_" always have clearance below the baseline. */
+	height: 28px;
+	min-height: 28px;
+	padding: 4px;
 	box-sizing: border-box;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: 21px;
+	line-height: 18px;
 	overflow: visible;
 }
 

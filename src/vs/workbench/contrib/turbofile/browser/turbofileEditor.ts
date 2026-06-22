@@ -12762,7 +12762,7 @@ function sortImageGridImages(images: TurboFileImageGridImage[], key: TurboFileIm
 }
 
 function isArchiveFile(name: string): boolean {
-	return /\.(zip|tar|tgz|tar\.gz|tar\.bz2|tbz2|tar\.xz|txz)$/i.test(name);
+	return /\.(zip|rar|7z|tar|tgz|tar\.gz|tar\.bz2|tbz2|tar\.xz|txz|tar\.zst|tzst|gz|bz2|xz)$/i.test(name);
 }
 
 function getMimeType(name: string): string {
