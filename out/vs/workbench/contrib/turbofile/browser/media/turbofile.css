@@ -5980,6 +5980,19 @@ body.turbofile-shell .turbofile-theme-toggle {
 	cursor: crosshair;
 }
 
+/* Interim thumbnail shown instantly while the full-resolution original loads/decodes. */
+.turbofile-image-preview-interim {
+	position: absolute;
+	inset: 0;
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	user-select: none;
+	-webkit-user-drag: none;
+	pointer-events: none;
+}
+
 .vs .turbofile-workbench .turbofile-image-preview-canvas,
 .vs-dark .turbofile-workbench .turbofile-image-preview-canvas,
 .hc-black .turbofile-workbench .turbofile-image-preview-canvas,

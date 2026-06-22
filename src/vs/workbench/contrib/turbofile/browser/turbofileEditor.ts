@@ -5380,6 +5380,24 @@ export class TurboFileEditor extends EditorPane {
 			this.renderImagePreviewCanvas();
 			return;
 		}
+		// While the full-resolution original is still loading/decoding, show the grid thumbnail (already
+		// in memory) immediately so the preview feels instant — the sharp original swaps in on a later
+		// re-render once decoded. This mirrors how the web gallery shows a thumbnail then sharpens.
+		const interimSrc = selected && !selected.previewError ? this.getImagePreviewThumbnailSource(selected) : '';
+		if (selected && interimSrc) {
+			const figure = $('.turbofile-image-preview-figure.is-preview-interim');
+			figure.setAttribute('role', 'img');
+			figure.setAttribute('aria-label', selected.item.name);
+			const interim = document.createElement('img');
+			interim.className = 'turbofile-image-preview-interim';
+			interim.src = interimSrc;
+			interim.alt = selected.item.name;
+			interim.draggable = false;
+			figure.appendChild(interim);
+			stage.appendChild(figure);
+			return;
+		}
+
 		const placeholder = $('.turbofile-image-preview-placeholder');
 		placeholder.appendChild(renderIcon(Codicon.fileMedia));
 		placeholder.append(selected?.previewError ?? (selected?.previewLoading || previewSrc ? 'Loading image...' : 'Preparing image...'));
