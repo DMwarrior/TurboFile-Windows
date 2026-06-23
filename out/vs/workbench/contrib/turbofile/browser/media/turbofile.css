@@ -2372,6 +2372,8 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-file-row.is-renaming {
+	--turbofile-inline-rename-height: max(34px, calc(var(--turbofile-browser-font-size, 14px) + 20px));
+	height: var(--turbofile-inline-rename-height);
 	grid-template-columns: minmax(220px, 1fr);
 }
 
@@ -2403,36 +2405,32 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-inline-rename .monaco-inputbox {
 	width: 100%;
-	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
-	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
+	height: var(--turbofile-inline-rename-height);
+	min-height: var(--turbofile-inline-rename-height);
 	box-sizing: border-box;
 	overflow: visible;
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper {
-	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
-	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
+	height: var(--turbofile-inline-rename-height);
+	min-height: var(--turbofile-inline-rename-height);
 	overflow: visible;
 }
 
 /*
- * A text <input> clips its glyphs to the content box (padding does NOT give descenders room — only
- * the content box does). The underscore sits at the very bottom of the line box, so it was getting
- * cut off whenever the line box nearly filled the content box. Fix: keep the content box much taller
- * than the line box and center the single line, so "_" (and g/y/p descenders) always have several
- * pixels of clearance. !important is needed because VS Code's own .input rules set height:100% and
- * line-height:inherit at the same specificity.
+ * Chromium text inputs can clip selected underscore glyphs when the text line fills the whole box.
+ * Use a taller rename row, normal line height, and extra bottom padding so "_" has paint room.
  */
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > .input,
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px)) !important;
-	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px)) !important;
-	padding: 0 6px !important;
+	height: var(--turbofile-inline-rename-height) !important;
+	min-height: var(--turbofile-inline-rename-height) !important;
+	padding: 3px 6px 7px !important;
 	box-sizing: border-box !important;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: calc(var(--turbofile-browser-font-size, 14px) + 16px) !important;
+	line-height: normal !important;
 	overflow: visible;
 }
 
