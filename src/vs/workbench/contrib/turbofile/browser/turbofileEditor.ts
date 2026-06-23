@@ -22,7 +22,7 @@ import { IAction, Separator, toAction } from '../../../../base/common/actions.js
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { ITurboFileFileEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileFileEntry, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
 import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
 import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
@@ -469,6 +469,9 @@ const IMAGE_GRID_THUMB_QUALITY = 72;
 const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
 const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
 const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
+// Max images pulled in a single batched SSH read. Caps the one-shot buffer/IPC payload while still
+// covering a typical visible page in one round trip.
+const IMAGE_GRID_BATCH_REQUEST_LIMIT = 48;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -9487,6 +9490,14 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		// SSH grids load the whole visible batch in a single round trip (raw bytes, server does no image
+		// processing), so the entire page appears together instead of trickling in one card at a time.
+		const device = this.getPaneDevice(state.side);
+		if (device && this.isRemoteSshImageDevice(device)) {
+			void this.loadImageGridThumbnailsBatch(state, device, indexes);
+			return;
+		}
+
 		const requests: TurboFileImageGridThumbnailRequest[] = [];
 		for (const index of [...new Set(indexes)]) {
 			const image = state.images[index];
@@ -9512,6 +9523,117 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.trimImageGridThumbnailQueue(state);
 		this.processImageGridThumbnailQueue();
+	}
+
+	/**
+	 * Loads all not-yet-loaded visible SSH thumbnails for the given indexes in one batched round trip
+	 * (see ITurboFileSshService.readImageBatch). Decoding happens on the client; oversized files fall
+	 * back to the per-image path. Nothing is cached — bytes become a blob URL and are released as soon
+	 * as the card scrolls away.
+	 */
+	private async loadImageGridThumbnailsBatch(state: TurboFileImageGridState, device: TurboFileDevice, indexes: number[]): Promise<void> {
+		const pending: { index: number; image: TurboFileImageGridImage; path: string }[] = [];
+		for (const index of [...new Set(indexes)]) {
+			const image = state.images[index];
+			if (!image?.item.path) {
+				continue;
+			}
+			if (image.thumbnailUrl || image.thumbnailContent || image.thumbnailLoading || image.thumbnailError) {
+				continue;
+			}
+			if (!this.isImageGridIndexNearViewport(state, index)) {
+				continue;
+			}
+			image.thumbnailLoading = true;
+			pending.push({ index, image, path: image.item.path });
+		}
+		if (!pending.length) {
+			return;
+		}
+
+		const chunkSize = IMAGE_GRID_BATCH_REQUEST_LIMIT;
+		for (let offset = 0; offset < pending.length; offset += chunkSize) {
+			const chunk = pending.slice(offset, offset + chunkSize);
+			if (this.imageGridState !== state) {
+				for (const target of chunk) {
+					target.image.thumbnailLoading = false;
+				}
+				return;
+			}
+			let entries: ITurboFileImageBatchEntry[] = [];
+			try {
+				const endpoint = await this.toTransferEndpoint(device, state.path ?? '/');
+				entries = await this.sshService.readImageBatch(endpoint, chunk.map(target => target.path));
+			} catch {
+				entries = [];
+			}
+			if (this.imageGridState !== state) {
+				for (const target of chunk) {
+					target.image.thumbnailLoading = false;
+				}
+				return;
+			}
+			const byPath = new Map(entries.map(entry => [entry.path, entry]));
+			for (const target of chunk) {
+				target.image.thumbnailLoading = false;
+				const entry = byPath.get(target.path);
+				if (entry?.ok && entry.content) {
+					if (!this.isImageGridIndexNearViewport(state, target.index)) {
+						continue;
+					}
+					this.releaseImageBlobUrl(target.image.thumbnailUrl);
+					target.image.thumbnailContent = '';
+					target.image.thumbnailUrl = this.createBlobUrlFromBase64(entry.content, entry.mime ?? getMimeType(target.image.item.name));
+					target.image.thumbnailMime = entry.mime ?? getMimeType(target.image.item.name);
+					target.image.thumbnailError = undefined;
+					this.imageGridLoadedThumbnailIndexes.add(target.index);
+					this.updateImageGridCard(target.index);
+				} else if (entry?.oversized) {
+					// Big originals stream individually (and may be server-downscaled) so the batch buffer
+					// stays small; this is rare for thumbnail-sized datasets.
+					void this.applySshThumbnailViaProtocol(state, device, target.index);
+				} else {
+					target.image.thumbnailError = entry?.message ?? '加载失败';
+					this.updateImageGridCard(target.index);
+				}
+			}
+		}
+	}
+
+	private createBlobUrlFromBase64(content: string, mime: string): string | undefined {
+		try {
+			const bytes = decodeBase64(content).buffer;
+			const blobBytes = new Uint8Array(bytes.byteLength);
+			blobBytes.set(bytes);
+			const blob = new Blob([blobBytes.buffer as ArrayBuffer], { type: mime || 'application/octet-stream' });
+			return URL.createObjectURL(blob);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async applySshThumbnailViaProtocol(state: TurboFileImageGridState, device: TurboFileDevice, index: number): Promise<void> {
+		const image = state.images[index];
+		if (!image?.item.path || this.imageGridState !== state) {
+			return;
+		}
+		const requestWidth = this.getImageGridThumbnailRequestWidth(state);
+		const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImageGridResourceOptions(requestWidth, image.item.rawSize, image.item.rawModified));
+		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+			if (result.url) {
+				this.releaseImageBlobUrl(result.url);
+			}
+			return;
+		}
+		this.releaseImageBlobUrl(image.thumbnailUrl);
+		image.thumbnailContent = '';
+		image.thumbnailUrl = result.ok ? result.url : undefined;
+		image.thumbnailMime = result.mime || getMimeType(image.item.name);
+		image.thumbnailError = result.ok ? undefined : result.message;
+		if (result.ok) {
+			this.imageGridLoadedThumbnailIndexes.add(index);
+		}
+		this.updateImageGridCard(index);
 	}
 
 	private processImageGridThumbnailQueue(): void {

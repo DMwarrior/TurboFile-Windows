@@ -45,6 +45,14 @@ export interface ITurboFileSshService {
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
+	/**
+	 * Reads the raw bytes of many files belonging to the same device in a single round trip (SSH: one
+	 * `cat` stream, no per-file processing). Used to load a whole visible page of image-grid
+	 * thumbnails at once instead of one fetch per card. The endpoint provides the connection; `paths`
+	 * are absolute remote paths. Files larger than the batch limit come back with `oversized: true` so
+	 * the caller can fall back to the per-image path.
+	 */
+	readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[]): Promise<ITurboFileImageBatchEntry[]>;
 	createImageResource(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileImageResourceOptions): Promise<ITurboFileImageResourceResult>;
 	releaseImageResource(url: string): Promise<void>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
@@ -99,6 +107,17 @@ export interface ITurboFileEntryStat {
 	readonly name: string;
 	readonly size: number;
 	readonly modified: number;
+}
+
+export interface ITurboFileImageBatchEntry {
+	readonly path: string;
+	readonly ok: boolean;
+	/** Base64-encoded raw file bytes when `ok`. */
+	readonly content?: string;
+	readonly mime?: string;
+	/** True when the file exceeded the batch size limit; the caller should load it individually. */
+	readonly oversized?: boolean;
+	readonly message?: string;
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';

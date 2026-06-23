@@ -15,7 +15,7 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -42,6 +42,9 @@ const REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS = 12000;
 const REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS = 120000;
 const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
+// Per-file cap for the one-shot image batch read. Files above this stream their bytes individually
+// (and may be server-downscaled) so a single huge image cannot blow up the batched buffer.
+const IMAGE_BATCH_MAX_FILE_BYTES = 3 * 1024 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const WINDOWS_DRAG_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
@@ -3900,6 +3903,47 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				mime: getMimeType(endpoint.path),
 				size: 0
 			};
+		}
+	}
+
+	async readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[]): Promise<ITurboFileImageBatchEntry[]> {
+		const targets = [...new Set(paths.filter(path => !!path))];
+		if (!targets.length) {
+			return [];
+		}
+
+		if (endpoint.kind !== 'ssh' || !endpoint.connection) {
+			return Promise.all(targets.map(async path => {
+				try {
+					const stat = await fsp.stat(path);
+					if (stat.size > IMAGE_BATCH_MAX_FILE_BYTES) {
+						return { path, ok: false, oversized: true };
+					}
+					const buffer = await fsp.readFile(path);
+					return { path, ok: true, content: buffer.toString('base64'), mime: getMimeType(path) };
+				} catch (error) {
+					return { path, ok: false, message: error instanceof Error ? error.message : String(error) };
+				}
+			}));
+		}
+
+		// One SSH round trip streams every file's raw bytes back, length-framed. The remote side only
+		// runs `wc -c` + `cat` (no image processing at all), so this is just as fast on a weak edge
+		// board (RK3588, Qualcomm, etc.) as on a server — the decoding happens on the powerful client.
+		await this.acquireImageReadSlot();
+		try {
+			const command = buildPosixReadFilesBatchCommand(targets, IMAGE_BATCH_MAX_FILE_BYTES);
+			const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, {
+				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+				inactivityMessage: 'Image batch read produced no output.',
+				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
+			}));
+			return parseImageBatchOutput(output);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return targets.map(path => ({ path, ok: false, message }));
+		} finally {
+			this.releaseImageReadSlot();
 		}
 	}
 
@@ -9619,6 +9663,47 @@ function parseSizeCommandOutput(output: string): number {
 		throw new Error(`Invalid path size: ${match[0]}`);
 	}
 	return size;
+}
+
+// Streams each file as: "<path>\n<size>\n<rawbytes>". Pure I/O (wc + cat), no image processing, so
+// it runs identically fast on weak edge boards. Files over `maxBytes` emit size -1 with no bytes.
+function buildPosixReadFilesBatchCommand(paths: readonly string[], maxBytes: number): string {
+	const list = paths.map(path => quotePosixShellArg(path)).join(' ');
+	return `for f in ${list}; do if [ -f "$f" ]; then s=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$s" ] && [ "$s" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$f" "$s"; cat "$f"; else printf '%s\\n-1\\n' "$f"; fi; fi; done`;
+}
+
+function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
+	const entries: ITurboFileImageBatchEntry[] = [];
+	let position = 0;
+	while (position < buffer.length) {
+		const pathEnd = buffer.indexOf(0x0a, position);
+		if (pathEnd < 0) {
+			break;
+		}
+		const path = buffer.toString('utf8', position, pathEnd);
+		position = pathEnd + 1;
+		const sizeEnd = buffer.indexOf(0x0a, position);
+		if (sizeEnd < 0) {
+			break;
+		}
+		const size = parseInt(buffer.toString('utf8', position, sizeEnd), 10);
+		position = sizeEnd + 1;
+		if (!path) {
+			break;
+		}
+		if (!Number.isFinite(size) || size < 0) {
+			entries.push({ path, ok: false, oversized: true });
+			continue;
+		}
+		if (position + size > buffer.length) {
+			entries.push({ path, ok: false, message: 'Truncated image batch stream.' });
+			break;
+		}
+		const bytes = buffer.subarray(position, position + size);
+		position += size;
+		entries.push({ path, ok: true, content: bytes.toString('base64'), mime: getMimeType(path) });
+	}
+	return entries;
 }
 
 function buildPosixDeleteCommand(path: string, recursive: boolean): string {
