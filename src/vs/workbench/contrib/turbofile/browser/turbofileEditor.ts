@@ -469,9 +469,15 @@ const IMAGE_GRID_THUMB_QUALITY = 72;
 const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
 const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
 const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
-// Max images pulled in a single batched SSH read. Caps the one-shot buffer/IPC payload while still
-// covering a typical visible page in one round trip.
-const IMAGE_GRID_BATCH_REQUEST_LIMIT = 48;
+// Each batched SSH read is bounded by total bytes (and a hard count cap) so no single IPC message
+// carries the whole page of large images at once — that giant base64 payload was what froze the
+// whole app. Several small chunks stream + render progressively instead.
+const IMAGE_GRID_BATCH_CHUNK_BYTES = 1.5 * 1024 * 1024;
+const IMAGE_GRID_BATCH_CHUNK_COUNT = 24;
+// Images whose original is at or below this size are shown as-is (decode is cheap). Larger originals
+// are decoded + downscaled off the main thread via createImageBitmap so the card never holds a
+// full-resolution bitmap — that decode/raster was the per-image jank for big images.
+const IMAGE_GRID_DIRECT_DECODE_BYTES = 256 * 1024;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -9532,7 +9538,7 @@ export class TurboFileEditor extends EditorPane {
 	 * as the card scrolls away.
 	 */
 	private async loadImageGridThumbnailsBatch(state: TurboFileImageGridState, device: TurboFileDevice, indexes: number[]): Promise<void> {
-		const pending: { index: number; image: TurboFileImageGridImage; path: string }[] = [];
+		const pending: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[] = [];
 		for (const index of [...new Set(indexes)]) {
 			const image = state.images[index];
 			if (!image?.item.path) {
@@ -9545,15 +9551,30 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 			image.thumbnailLoading = true;
-			pending.push({ index, image, path: image.item.path });
+			pending.push({ index, image, path: image.item.path, rawSize: Math.max(0, image.item.rawSize) });
 		}
 		if (!pending.length) {
 			return;
 		}
 
-		const chunkSize = IMAGE_GRID_BATCH_REQUEST_LIMIT;
-		for (let offset = 0; offset < pending.length; offset += chunkSize) {
-			const chunk = pending.slice(offset, offset + chunkSize);
+		const targetWidth = this.getImageGridThumbnailRequestWidth(state);
+		// Split into byte-bounded chunks so each round trip + IPC message stays small and the page
+		// fills in progressively instead of freezing on one giant payload.
+		let chunkStart = 0;
+		while (chunkStart < pending.length) {
+			let chunkBytes = 0;
+			let chunkEnd = chunkStart;
+			while (chunkEnd < pending.length && chunkEnd - chunkStart < IMAGE_GRID_BATCH_CHUNK_COUNT) {
+				const size = pending[chunkEnd].rawSize || IMAGE_GRID_DIRECT_DECODE_BYTES;
+				if (chunkEnd > chunkStart && chunkBytes + size > IMAGE_GRID_BATCH_CHUNK_BYTES) {
+					break;
+				}
+				chunkBytes += size;
+				chunkEnd++;
+			}
+			const chunk = pending.slice(chunkStart, chunkEnd);
+			chunkStart = chunkEnd;
+
 			if (this.imageGridState !== state) {
 				for (const target of chunk) {
 					target.image.thumbnailLoading = false;
@@ -9574,41 +9595,97 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			const byPath = new Map(entries.map(entry => [entry.path, entry]));
-			for (const target of chunk) {
-				target.image.thumbnailLoading = false;
-				const entry = byPath.get(target.path);
-				if (entry?.ok && entry.content) {
-					if (!this.isImageGridIndexNearViewport(state, target.index)) {
-						continue;
-					}
-					this.releaseImageBlobUrl(target.image.thumbnailUrl);
-					target.image.thumbnailContent = '';
-					target.image.thumbnailUrl = this.createBlobUrlFromBase64(entry.content, entry.mime ?? getMimeType(target.image.item.name));
-					target.image.thumbnailMime = entry.mime ?? getMimeType(target.image.item.name);
-					target.image.thumbnailError = undefined;
-					this.imageGridLoadedThumbnailIndexes.add(target.index);
-					this.updateImageGridCard(target.index);
-				} else if (entry?.oversized) {
-					// Big originals stream individually (and may be server-downscaled) so the batch buffer
-					// stays small; this is rare for thumbnail-sized datasets.
-					void this.applySshThumbnailViaProtocol(state, device, target.index);
-				} else {
-					target.image.thumbnailError = entry?.message ?? '加载失败';
-					this.updateImageGridCard(target.index);
-				}
-			}
+			await Promise.all(chunk.map(target => this.applyBatchedImageGridThumbnail(state, device, target, byPath.get(target.path), targetWidth)));
 		}
 	}
 
-	private createBlobUrlFromBase64(content: string, mime: string): string | undefined {
+	private async applyBatchedImageGridThumbnail(
+		state: TurboFileImageGridState,
+		device: TurboFileDevice,
+		target: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number },
+		entry: ITurboFileImageBatchEntry | undefined,
+		targetWidth: number
+	): Promise<void> {
+		target.image.thumbnailLoading = false;
+		if (entry?.oversized) {
+			// Big originals stream/scale individually so the batch buffer stays small.
+			void this.applySshThumbnailViaProtocol(state, device, target.index);
+			return;
+		}
+		if (!entry?.ok || !entry.content) {
+			target.image.thumbnailError = entry?.message ?? '加载失败';
+			this.updateImageGridCard(target.index);
+			return;
+		}
+		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
+			return;
+		}
+
+		const mime = entry.mime ?? getMimeType(target.image.item.name);
+		const bytes = decodeBase64(entry.content).buffer;
+		// Small originals are shown directly (decode is cheap). Larger ones are decoded + downscaled
+		// off the main thread so the card holds only a tiny thumbnail, not a full-resolution bitmap.
+		const url = target.rawSize > 0 && target.rawSize <= IMAGE_GRID_DIRECT_DECODE_BYTES
+			? this.createBlobUrlFromBytes(bytes, mime)
+			: (await this.createDownscaledThumbnailUrl(bytes, mime, targetWidth)) ?? this.createBlobUrlFromBytes(bytes, mime);
+
+		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
+			this.releaseImageBlobUrl(url);
+			return;
+		}
+		this.releaseImageBlobUrl(target.image.thumbnailUrl);
+		target.image.thumbnailContent = '';
+		target.image.thumbnailUrl = url;
+		target.image.thumbnailMime = url ? 'image/jpeg' : mime;
+		target.image.thumbnailError = url ? undefined : '加载失败';
+		if (url) {
+			this.imageGridLoadedThumbnailIndexes.add(target.index);
+		}
+		this.updateImageGridCard(target.index);
+	}
+
+	private createBlobUrlFromBytes(bytes: Uint8Array, mime: string): string | undefined {
 		try {
-			const bytes = decodeBase64(content).buffer;
 			const blobBytes = new Uint8Array(bytes.byteLength);
 			blobBytes.set(bytes);
 			const blob = new Blob([blobBytes.buffer as ArrayBuffer], { type: mime || 'application/octet-stream' });
 			return URL.createObjectURL(blob);
 		} catch {
 			return undefined;
+		}
+	}
+
+	/**
+	 * Decodes the image and downscales it to a small JPEG entirely off the main thread (createImageBitmap
+	 * with resizeWidth keeps aspect ratio), returning a blob URL for the tiny thumbnail. Keeps memory and
+	 * main-thread decode cost low even for large originals — the source bitmap is released immediately.
+	 */
+	private async createDownscaledThumbnailUrl(bytes: Uint8Array, mime: string, targetWidth: number): Promise<string | undefined> {
+		const ownerWindow = this.container ? getWindow(this.container) : undefined;
+		if (!ownerWindow || typeof ownerWindow.createImageBitmap !== 'function') {
+			return undefined;
+		}
+		const blobBytes = new Uint8Array(bytes.byteLength);
+		blobBytes.set(bytes);
+		const sourceBlob = new Blob([blobBytes.buffer as ArrayBuffer], { type: mime || 'application/octet-stream' });
+		let bitmap: ImageBitmap | undefined;
+		try {
+			bitmap = await ownerWindow.createImageBitmap(sourceBlob, { resizeWidth: Math.max(64, Math.round(targetWidth)), resizeQuality: 'medium' });
+			const canvas = ownerWindow.document.createElement('canvas');
+			canvas.width = bitmap.width;
+			canvas.height = bitmap.height;
+			const context = canvas.getContext('2d');
+			if (!context) {
+				return undefined;
+			}
+			context.drawImage(bitmap, 0, 0);
+			return await new Promise<string | undefined>(resolve => {
+				canvas.toBlob(blob => resolve(blob ? URL.createObjectURL(blob) : undefined), 'image/jpeg', 0.82);
+			});
+		} catch {
+			return undefined;
+		} finally {
+			bitmap?.close();
 		}
 	}
 
