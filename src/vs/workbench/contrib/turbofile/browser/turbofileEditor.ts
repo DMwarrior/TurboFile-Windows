@@ -475,6 +475,9 @@ const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
 // Concurrency stays under the SSH MaxSessions ceiling so channels are never exhausted.
 const IMAGE_GRID_BATCH_CHUNK_COUNT = 8;
 const IMAGE_GRID_BATCH_CONCURRENCY = 5;
+// Wait this long after the last scroll movement before loading the visible page, so a fast drag/jump
+// through many pages doesn't fire (and then have to abandon) a load for every page it passes.
+const IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS = 110;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -631,6 +634,10 @@ export class TurboFileEditor extends EditorPane {
 	private liveTransferTicker: number | undefined;
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	private imageGridScrollRaf = 0;
+	// Thumbnails load only after scrolling settles, and only for the page in view; bumping the token
+	// invalidates any batch still loading a page the user has scrolled away from (fast jumps).
+	private imageGridVisibleLoadTimer: ReturnType<typeof setTimeout> | undefined;
+	private imageGridThumbnailLoadToken = 0;
 	private readonly imageGridThumbnailQueue: TurboFileImageGridThumbnailRequest[] = [];
 	private readonly imageGridThumbnailQueued = new Set<string>();
 	private imageGridThumbnailLoadingCount = 0;
@@ -5073,11 +5080,34 @@ export class TurboFileEditor extends EditorPane {
 			columns: this.getImageGridEffectiveColumns(state),
 			total: state.images.length
 		};
-		const indexes: number[] = [];
-		for (let index = range.startIndex; index < range.endIndex; index++) {
-			indexes.push(index);
+		this.scheduleImageGridVisibleLoad(state);
+	}
+
+	/**
+	 * Loads thumbnails for only the page currently in view, after scrolling settles. A fast drag or a
+	 * big jump renders many slices in quick succession; debouncing here means we load just the page the
+	 * user lands on (the previous in-flight batch is invalidated via the load token), so the landing
+	 * page fills in fast instead of waiting behind loads for pages that were merely scrolled past.
+	 */
+	private scheduleImageGridVisibleLoad(state: TurboFileImageGridState): void {
+		if (this.imageGridVisibleLoadTimer) {
+			clearTimeout(this.imageGridVisibleLoadTimer);
 		}
-		this.queueImageGridThumbnailLoads(state, indexes, true);
+		this.imageGridVisibleLoadTimer = setTimeout(() => {
+			this.imageGridVisibleLoadTimer = undefined;
+			if (this.imageGridState !== state || this.activePage !== 'images') {
+				return;
+			}
+			this.imageGridThumbnailLoadToken++;
+			const range = this.getImageGridVirtualRange(state);
+			const indexes: number[] = [];
+			for (let index = range.startIndex; index < range.endIndex; index++) {
+				indexes.push(index);
+			}
+			if (indexes.length) {
+				this.queueImageGridThumbnailLoads(state, indexes, true);
+			}
+		}, IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS);
 	}
 
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
@@ -9480,14 +9510,6 @@ export class TurboFileEditor extends EditorPane {
 		}, IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS);
 	}
 
-	private async ensureImageGridThumbnailsLoaded(indexes: number[]): Promise<void> {
-		const state = this.imageGridState;
-		if (!state) {
-			return;
-		}
-		this.queueImageGridThumbnailLoads(state, indexes, true);
-	}
-
 	private queueImageGridThumbnailLoads(state: TurboFileImageGridState, indexes: number[], priority: boolean): void {
 		if (this.imageGridState !== state || this.activePage !== 'images') {
 			return;
@@ -9554,6 +9576,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const token = this.imageGridThumbnailLoadToken;
 		const targetWidth = this.getImageGridThumbnailRequestWidth(state);
 		const chunks: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[][] = [];
 		for (let offset = 0; offset < pending.length; offset += IMAGE_GRID_BATCH_CHUNK_COUNT) {
@@ -9561,16 +9584,17 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		// Process chunks in parallel (bounded) so the remote device thumbnails several streams at once.
+		// A stale token (user scrolled to a different page) stops the loop so the new page gets priority.
 		let cursor = 0;
 		const worker = async (): Promise<void> => {
-			while (cursor < chunks.length && this.imageGridState === state) {
+			while (cursor < chunks.length && this.imageGridState === state && this.imageGridThumbnailLoadToken === token) {
 				const chunk = chunks[cursor++];
-				await this.loadImageGridThumbnailChunk(state, device, chunk, targetWidth);
+				await this.loadImageGridThumbnailChunk(state, device, chunk, targetWidth, token);
 			}
 		};
 		const workers = Array.from({ length: Math.min(IMAGE_GRID_BATCH_CONCURRENCY, chunks.length) }, () => worker());
 		await Promise.all(workers);
-		// Clear the loading flag on anything left unprocessed (e.g. the grid changed mid-flight).
+		// Clear the loading flag on anything left unprocessed (grid changed, or this load was superseded).
 		for (const chunk of chunks) {
 			for (const target of chunk) {
 				if (target.image.thumbnailLoading && !target.image.thumbnailUrl) {
@@ -9584,9 +9608,10 @@ export class TurboFileEditor extends EditorPane {
 		state: TurboFileImageGridState,
 		device: TurboFileDevice,
 		chunk: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[],
-		targetWidth: number
+		targetWidth: number,
+		token: number
 	): Promise<void> {
-		if (this.imageGridState !== state) {
+		if (this.imageGridState !== state || this.imageGridThumbnailLoadToken !== token) {
 			for (const target of chunk) {
 				target.image.thumbnailLoading = false;
 			}
@@ -10021,19 +10046,20 @@ export class TurboFileEditor extends EditorPane {
 			if (!state) {
 				return;
 			}
-			const visibleIndexes: number[] = [];
+			let sawVisible = false;
 			for (const entry of entries) {
 				if (!entry.isIntersecting) {
 					continue;
 				}
 				const value = Number((entry.target as HTMLElement).dataset.imageIndex);
 				if (Number.isFinite(value)) {
-					visibleIndexes.push(value);
+					sawVisible = true;
 					this.imageGridObserver?.unobserve(entry.target);
 				}
 			}
-			if (visibleIndexes.length) {
-				void this.ensureImageGridThumbnailsLoaded(visibleIndexes);
+			if (sawVisible) {
+				// Load only the settled visible page, not every card that flickers past during a fast scroll.
+				this.scheduleImageGridVisibleLoad(state);
 			}
 		}, {
 			root: body,
@@ -10041,16 +10067,13 @@ export class TurboFileEditor extends EditorPane {
 			threshold: 0.01
 		});
 
-		const visibleIndexes: number[] = [];
+		let hasCards = false;
 		for (const card of Array.from(this.container.querySelectorAll('.turbofile-image-page-card[data-image-index]'))) {
 			this.imageGridObserver.observe(card);
-			const value = Number((card as HTMLElement).dataset.imageIndex);
-			if (Number.isFinite(value)) {
-				visibleIndexes.push(value);
-			}
+			hasCards = true;
 		}
-		if (visibleIndexes.length) {
-			this.scheduleImageGridThumbnailsLoaded(visibleIndexes);
+		if (hasCards) {
+			this.scheduleImageGridVisibleLoad(this.imageGridState);
 		}
 	}
 
