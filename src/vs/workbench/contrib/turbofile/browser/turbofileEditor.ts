@@ -475,6 +475,10 @@ const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
 // Concurrency stays under the SSH MaxSessions ceiling so channels are never exhausted.
 const IMAGE_GRID_BATCH_CHUNK_COUNT = 8;
 const IMAGE_GRID_BATCH_CONCURRENCY = 5;
+// If a batched thumbnail comes back larger than this, the remote did not downscale it (no image tool;
+// it streamed the raw original), so the client downscales it before showing — keeps tool-less boards
+// (e.g. uncompressed .bmp) fast and low-memory. Smaller payloads render via a native <img> directly.
+const IMAGE_GRID_CLIENT_DOWNSCALE_BYTES = 320 * 1024;
 // Wait this long after the last scroll movement before loading the visible page, so a fast drag/jump
 // through many pages doesn't fire (and then have to abandon) a load for every page it passes.
 const IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS = 110;
@@ -9656,10 +9660,28 @@ export class TurboFileEditor extends EditorPane {
 		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
 			return;
 		}
-		// The bytes are already a small thumbnail (server-downscaled for large originals, raw for small
-		// ones), so the native <img> decode is cheap — no client re-encoding needed.
 		const mime = entry.mime ?? getMimeType(target.image.item.name);
-		const url = this.createBlobUrlFromBytes(decodeBase64(entry.content).buffer, mime);
+		const bytes = decodeBase64(entry.content).buffer;
+		// If the remote already downscaled (or the original was small) the bytes are tiny — show them via
+		// a native <img> directly. If they came back large (a device with no image tool streamed the raw
+		// original, e.g. an uncompressed .bmp), downscale on the client so the card holds only a small
+		// thumbnail. This keeps both fast paths and full compatibility with tool-less boards.
+		void this.assignBatchedThumbnail(state, target, bytes, mime);
+	}
+
+	private async assignBatchedThumbnail(
+		state: TurboFileImageGridState,
+		target: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number },
+		bytes: Uint8Array,
+		mime: string
+	): Promise<void> {
+		const url = bytes.byteLength > IMAGE_GRID_CLIENT_DOWNSCALE_BYTES
+			? (await this.createDownscaledThumbnailUrl(bytes, mime, this.getImageGridThumbnailRequestWidth(state))) ?? this.createBlobUrlFromBytes(bytes, mime)
+			: this.createBlobUrlFromBytes(bytes, mime);
+		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
+			this.releaseImageBlobUrl(url);
+			return;
+		}
 		this.releaseImageBlobUrl(target.image.thumbnailUrl);
 		target.image.thumbnailContent = '';
 		target.image.thumbnailUrl = url;
@@ -9669,6 +9691,36 @@ export class TurboFileEditor extends EditorPane {
 			this.imageGridLoadedThumbnailIndexes.add(target.index);
 		}
 		this.updateImageGridCard(target.index);
+	}
+
+	private async createDownscaledThumbnailUrl(bytes: Uint8Array, mime: string, targetWidth: number): Promise<string | undefined> {
+		const ownerWindow = this.container ? getWindow(this.container) : undefined;
+		if (!ownerWindow || typeof ownerWindow.createImageBitmap !== 'function') {
+			return undefined;
+		}
+		const blobBytes = new Uint8Array(bytes.byteLength);
+		blobBytes.set(bytes);
+		const sourceBlob = new Blob([blobBytes.buffer as ArrayBuffer], { type: mime || 'application/octet-stream' });
+		let bitmap: ImageBitmap | undefined;
+		try {
+			// resizeWidth keeps aspect ratio; the decode + resize run off the main thread.
+			bitmap = await ownerWindow.createImageBitmap(sourceBlob, { resizeWidth: Math.max(64, Math.round(targetWidth)), resizeQuality: 'medium' });
+			const canvas = ownerWindow.document.createElement('canvas');
+			canvas.width = bitmap.width;
+			canvas.height = bitmap.height;
+			const context = canvas.getContext('2d');
+			if (!context) {
+				return undefined;
+			}
+			context.drawImage(bitmap, 0, 0);
+			return await new Promise<string | undefined>(resolve => {
+				canvas.toBlob(blob => resolve(blob ? URL.createObjectURL(blob) : undefined), 'image/jpeg', 0.82);
+			});
+		} catch {
+			return undefined;
+		} finally {
+			bitmap?.close();
+		}
 	}
 
 	private createBlobUrlFromBytes(bytes: Uint8Array, mime: string): string | undefined {
@@ -9958,6 +10010,35 @@ export class TurboFileEditor extends EditorPane {
 		}
 		try {
 			if (this.isRemoteSshImageDevice(device)) {
+				// Read the original via the same cat-based batch path the grid uses: it works where SFTP
+				// is flaky/restricted (some NAS) and needs no remote image tool, which is exactly where the
+				// old resource/protocol preview path was failing.
+				const endpoint = await this.toTransferEndpoint(device, image.item.path);
+				let entries: ITurboFileImageBatchEntry[] = [];
+				try {
+					entries = await this.sshService.readImageBatch(endpoint, [image.item.path], 0);
+				} catch {
+					entries = [];
+				}
+				if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
+					return;
+				}
+				const entry = entries.find(candidate => candidate.path === image.item.path) ?? entries[0];
+				if (entry?.ok && entry.content) {
+					const mime = entry.mime ?? getMimeType(image.item.name);
+					this.releaseImageBlobUrl(image.previewUrl);
+					image.previewContent = '';
+					image.previewUrl = this.createBlobUrlFromBytes(decodeBase64(entry.content).buffer, mime);
+					image.previewMime = mime;
+					image.previewError = image.previewUrl ? undefined : '加载失败';
+					if (image.previewUrl) {
+						this.imageGridLoadedPreviewIndexes.add(index);
+						await this.ensureImagePreviewElementLoaded(state, index);
+					}
+					return;
+				}
+				// Oversized/unavailable (or a Windows remote): fall back to the resource path, which can
+				// downscale a very large original remotely.
 				const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImagePreviewResourceOptions(this.isWindowsDevice(device), request, image.item.rawSize, image.item.rawModified));
 				if (this.imageGridState !== state || !this.shouldKeepImageGridPreview(state, index)) {
 					if (result.url) {

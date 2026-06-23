@@ -44,7 +44,7 @@ const REMOTE_DIRECT_READ_MAX_BYTES = 2 * 1024 * 1024;
 const REMOTE_DIRECT_READ_CHUNK_BYTES = 256 * 1024;
 // Per-file cap for the one-shot image batch read. Files above this stream their bytes individually
 // (and may be server-downscaled) so a single huge image cannot blow up the batched buffer.
-const IMAGE_BATCH_MAX_FILE_BYTES = 3 * 1024 * 1024;
+const IMAGE_BATCH_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const SMALL_IMAGE_DIM_LIMIT = 100;
 const WINDOWS_DRAG_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const RAW_BMP_FAST_PATH_BYTES = 2 * 1024 * 1024;
@@ -3925,6 +3925,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					return { path, ok: false, message: error instanceof Error ? error.message : String(error) };
 				}
 			}));
+		}
+
+		// The batch command is POSIX shell; a Windows SSH host can't run it. Report oversized so the
+		// caller transparently falls back to the per-image resource path that handles Windows remotes.
+		if (looksLikeWindowsPath(targets[0])) {
+			return targets.map(path => ({ path, ok: false, oversized: true }));
 		}
 
 		// One SSH round trip streams the whole page back, length-framed. Small originals stream raw
@@ -9675,27 +9681,41 @@ function parseSizeCommandOutput(output: string): number {
 // All of this is pure shell + an optional resize; nothing depends on the client.
 function buildPosixReadImagesBatchCommand(paths: readonly string[], maxBytes: number, maxWidth: number): string {
 	const list = paths.map(path => quotePosixShellArg(path)).join(' ');
+	// maxWidth <= 0 means "raw original, no downscale" (used by the single-image preview). Otherwise we
+	// downscale large originals to a thumbnail when a remote tool exists. Everything is pure shell +
+	// `cat` (and an optional resize), so it works on minimal busybox shells and never depends on SFTP —
+	// boards/NAS where SFTP is flaky or no image tool exists still stream the raw bytes for the client
+	// to decode. A trailing `:` guarantees a zero exit so a single unreadable file never fails the batch.
+	const forceRaw = !maxWidth || maxWidth <= 0;
 	const width = Math.max(96, Math.floor(maxWidth) || 480);
-	// On a LAN, streaming the original and decoding it on the powerful client is faster than making a
-	// weak board run ImageMagick/vips, so only genuinely large originals are downscaled remotely; the
-	// common case (sub-MB crop images) streams raw and is decoded natively by the client.
 	const rawPassthrough = 768 * 1024;
-	return [
-		`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`,
-		`elif command -v magick >/dev/null 2>&1; then T=magick`,
-		`elif command -v convert >/dev/null 2>&1; then T=convert`,
-		`else T=; fi`,
-		`raw(){ if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$2"; cat "$1"; else printf '%s\\n-1\\n' "$1"; fi; }`,
-		`mkthumb(){ case "$T" in vips) vipsthumbnail "$1" --size ${width}x -o "$2[Q=80,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1" -resize ${width}x -strip -quality 80 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac }`,
-		`for f in ${list}; do`,
-		`[ -f "$f" ] || continue`,
-		`sz=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); [ -n "$sz" ] || continue`,
-		`if [ "$sz" -le ${rawPassthrough} ] || [ -z "$T" ]; then raw "$f" "$sz"; continue; fi`,
-		`o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"`,
-		`if mkthumb "$f" "$oj"; then ts=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$ts" ] && [ "$ts" -gt 0 ]; then printf '%s\\n%s\\n' "$f" "$ts"; cat "$oj"; else raw "$f" "$sz"; fi; else raw "$f" "$sz"; fi`,
-		`rm -f "$o" "$oj" 2>/dev/null`,
-		`done`
-	].join('\n');
+	const lines: string[] = [];
+	if (forceRaw) {
+		lines.push('T=');
+	} else {
+		lines.push(`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`);
+		lines.push(`elif command -v magick >/dev/null 2>&1; then T=magick`);
+		lines.push(`elif command -v convert >/dev/null 2>&1; then T=convert`);
+		lines.push(`else T=; fi`);
+	}
+	lines.push(`emit(){ if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$2"; cat "$1"; else printf '%s\\n-1\\n' "$1"; fi; }`);
+	if (!forceRaw) {
+		lines.push(`mk(){ case "$T" in vips) vipsthumbnail "$1" --size ${width}x -o "$2[Q=80,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1" -resize ${width}x -strip -quality 80 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac }`);
+	}
+	lines.push(`for f in ${list}; do`);
+	lines.push(`[ -f "$f" ] || continue`);
+	lines.push(`sz=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); [ -n "$sz" ] || continue`);
+	if (forceRaw) {
+		lines.push(`emit "$f" "$sz"`);
+	} else {
+		lines.push(`if [ "$sz" -le ${rawPassthrough} ] || [ -z "$T" ]; then emit "$f" "$sz"; continue; fi`);
+		lines.push(`o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"`);
+		lines.push(`if mk "$f" "$oj" && [ -s "$oj" ]; then tz=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); printf '%s\\n%s\\n' "$f" "$tz"; cat "$oj"; else emit "$f" "$sz"; fi`);
+		lines.push(`rm -f "$o" "$oj" 2>/dev/null`);
+	}
+	lines.push(`done`);
+	lines.push(`:`);
+	return lines.join('\n');
 }
 
 function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
