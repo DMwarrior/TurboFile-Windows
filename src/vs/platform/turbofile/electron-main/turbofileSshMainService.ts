@@ -3906,7 +3906,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	async readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[]): Promise<ITurboFileImageBatchEntry[]> {
+	async readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[], maxWidth = 0): Promise<ITurboFileImageBatchEntry[]> {
 		const targets = [...new Set(paths.filter(path => !!path))];
 		if (!targets.length) {
 			return [];
@@ -3927,12 +3927,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}));
 		}
 
-		// One SSH round trip streams every file's raw bytes back, length-framed. The remote side only
-		// runs `wc -c` + `cat` (no image processing at all), so this is just as fast on a weak edge
-		// board (RK3588, Qualcomm, etc.) as on a server — the decoding happens on the powerful client.
+		// One SSH round trip streams the whole page back, length-framed. Small originals stream raw
+		// (instant, zero processing — works on any weak board). Larger originals are downscaled to a
+		// small JPEG by a remote tool when one is available (vipsthumbnail preferred, then ImageMagick),
+		// so the transfer shrinks by ~10-50x and big images load nearly as fast as small ones; boards
+		// with no image tool simply stream the original bytes. The client does no re-encoding.
 		await this.acquireImageReadSlot();
 		try {
-			const command = buildPosixReadFilesBatchCommand(targets, IMAGE_BATCH_MAX_FILE_BYTES);
+			const command = buildPosixReadImagesBatchCommand(targets, IMAGE_BATCH_MAX_FILE_BYTES, maxWidth);
 			const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, {
 				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
 				inactivityMessage: 'Image batch read produced no output.',
@@ -9665,11 +9667,32 @@ function parseSizeCommandOutput(output: string): number {
 	return size;
 }
 
-// Streams each file as: "<path>\n<size>\n<rawbytes>". Pure I/O (wc + cat), no image processing, so
-// it runs identically fast on weak edge boards. Files over `maxBytes` emit size -1 with no bytes.
-function buildPosixReadFilesBatchCommand(paths: readonly string[], maxBytes: number): string {
+// Streams each file as "<path>\n<size>\n<bytes>" in one round trip. Small originals (<= the raw
+// passthrough size) stream as-is. Larger ones are downscaled to a small JPEG by a remote tool when
+// present (vipsthumbnail — very fast and light on ARM boards — else ImageMagick magick/convert); this
+// shrinks the transfer dramatically so big images load almost as fast as small ones. With no tool,
+// files within `maxBytes` stream raw and larger ones report size -1 (caller falls back per-image).
+// All of this is pure shell + an optional resize; nothing depends on the client.
+function buildPosixReadImagesBatchCommand(paths: readonly string[], maxBytes: number, maxWidth: number): string {
 	const list = paths.map(path => quotePosixShellArg(path)).join(' ');
-	return `for f in ${list}; do if [ -f "$f" ]; then s=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$s" ] && [ "$s" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$f" "$s"; cat "$f"; else printf '%s\\n-1\\n' "$f"; fi; fi; done`;
+	const width = Math.max(96, Math.floor(maxWidth) || 480);
+	const rawPassthrough = 200 * 1024;
+	return [
+		`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`,
+		`elif command -v magick >/dev/null 2>&1; then T=magick`,
+		`elif command -v convert >/dev/null 2>&1; then T=convert`,
+		`else T=; fi`,
+		`raw(){ if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$2"; cat "$1"; else printf '%s\\n-1\\n' "$1"; fi; }`,
+		`mkthumb(){ case "$T" in vips) vipsthumbnail "$1" --size ${width}x -o "$2[Q=80,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1" -resize ${width}x -strip -quality 80 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac }`,
+		`for f in ${list}; do`,
+		`[ -f "$f" ] || continue`,
+		`sz=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); [ -n "$sz" ] || continue`,
+		`if [ "$sz" -le ${rawPassthrough} ] || [ -z "$T" ]; then raw "$f" "$sz"; continue; fi`,
+		`o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"`,
+		`if mkthumb "$f" "$oj"; then ts=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$ts" ] && [ "$ts" -gt 0 ]; then printf '%s\\n%s\\n' "$f" "$ts"; cat "$oj"; else raw "$f" "$sz"; fi; else raw "$f" "$sz"; fi`,
+		`rm -f "$o" "$oj" 2>/dev/null`,
+		`done`
+	].join('\n');
 }
 
 function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {

@@ -52,7 +52,7 @@ export interface ITurboFileSshService {
 	 * are absolute remote paths. Files larger than the batch limit come back with `oversized: true` so
 	 * the caller can fall back to the per-image path.
 	 */
-	readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[]): Promise<ITurboFileImageBatchEntry[]>;
+	readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[], maxWidth?: number): Promise<ITurboFileImageBatchEntry[]>;
 	createImageResource(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileImageResourceOptions): Promise<ITurboFileImageResourceResult>;
 	releaseImageResource(url: string): Promise<void>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
