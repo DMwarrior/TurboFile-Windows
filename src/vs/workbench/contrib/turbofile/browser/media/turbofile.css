@@ -2342,7 +2342,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-file-row {
-	height: 30px;
+	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
 	display: grid;
 	grid-template-columns: minmax(120px, 1fr) 92px 136px;
 	align-items: center;
@@ -2403,13 +2403,15 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-inline-rename .monaco-inputbox {
 	width: 100%;
-	min-height: 28px;
+	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
+	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
 	box-sizing: border-box;
 	overflow: visible;
 }
 
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper {
-	min-height: 28px;
+	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
+	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px));
 	overflow: visible;
 }
 
@@ -2424,13 +2426,13 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > .input,
 .turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
 .turbofile-inline-rename .monaco-inputbox > input {
-	height: 28px !important;
-	min-height: 28px !important;
-	padding: 2px 6px !important;
+	height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px)) !important;
+	min-height: max(30px, calc(var(--turbofile-browser-font-size, 14px) + 16px)) !important;
+	padding: 0 6px !important;
 	box-sizing: border-box !important;
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: 18px !important;
+	line-height: calc(var(--turbofile-browser-font-size, 14px) + 16px) !important;
 	overflow: visible;
 }
 
