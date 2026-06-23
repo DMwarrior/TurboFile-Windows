@@ -9676,7 +9676,10 @@ function parseSizeCommandOutput(output: string): number {
 function buildPosixReadImagesBatchCommand(paths: readonly string[], maxBytes: number, maxWidth: number): string {
 	const list = paths.map(path => quotePosixShellArg(path)).join(' ');
 	const width = Math.max(96, Math.floor(maxWidth) || 480);
-	const rawPassthrough = 200 * 1024;
+	// On a LAN, streaming the original and decoding it on the powerful client is faster than making a
+	// weak board run ImageMagick/vips, so only genuinely large originals are downscaled remotely; the
+	// common case (sub-MB crop images) streams raw and is decoded natively by the client.
+	const rawPassthrough = 768 * 1024;
 	return [
 		`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`,
 		`elif command -v magick >/dev/null 2>&1; then T=magick`,
