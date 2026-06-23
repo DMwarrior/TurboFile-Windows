@@ -469,10 +469,12 @@ const IMAGE_GRID_THUMB_QUALITY = 72;
 const IMAGE_GRID_LOCAL_PARALLEL_LIMIT = 16;
 const IMAGE_GRID_REMOTE_PARALLEL_LIMIT = 8;
 const IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT = 6;
-// Images are pulled in small count-bounded chunks so each round trip returns quickly and the page
-// fills in progressively (instead of freezing on one giant payload). The remote side downscales
-// large images, so each chunk's response stays small regardless of the originals' size.
-const IMAGE_GRID_BATCH_CHUNK_COUNT = 16;
+// The visible page is split into small chunks that are fetched in parallel (each chunk is one SSH
+// exec). Running several at once lets the remote device downscale multiple images on different cores
+// simultaneously instead of one sequential queue — the main reason large-image pages were slow.
+// Concurrency stays under the SSH MaxSessions ceiling so channels are never exhausted.
+const IMAGE_GRID_BATCH_CHUNK_COUNT = 8;
+const IMAGE_GRID_BATCH_CONCURRENCY = 5;
 const IMAGE_GRID_PREVIEW_NEIGHBOR_COUNT = 2;
 const IMAGE_GRID_PREVIEW_PREFETCH_DELAY_MS = 80;
 const IMAGE_DPR_CAP = 2;
@@ -9553,33 +9555,59 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const targetWidth = this.getImageGridThumbnailRequestWidth(state);
-		// Small count-bounded chunks: each round trip returns a few thumbnails fast and renders right
-		// away, so the page fills progressively instead of waiting on the whole set.
+		const chunks: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[][] = [];
 		for (let offset = 0; offset < pending.length; offset += IMAGE_GRID_BATCH_CHUNK_COUNT) {
-			const chunk = pending.slice(offset, offset + IMAGE_GRID_BATCH_CHUNK_COUNT);
-			if (this.imageGridState !== state) {
-				for (const target of chunk) {
-					target.image.thumbnailLoading = false;
-				}
-				return;
+			chunks.push(pending.slice(offset, offset + IMAGE_GRID_BATCH_CHUNK_COUNT));
+		}
+
+		// Process chunks in parallel (bounded) so the remote device thumbnails several streams at once.
+		let cursor = 0;
+		const worker = async (): Promise<void> => {
+			while (cursor < chunks.length && this.imageGridState === state) {
+				const chunk = chunks[cursor++];
+				await this.loadImageGridThumbnailChunk(state, device, chunk, targetWidth);
 			}
-			let entries: ITurboFileImageBatchEntry[] = [];
-			try {
-				const endpoint = await this.toTransferEndpoint(device, state.path ?? '/');
-				entries = await this.sshService.readImageBatch(endpoint, chunk.map(target => target.path), targetWidth);
-			} catch {
-				entries = [];
-			}
-			if (this.imageGridState !== state) {
-				for (const target of chunk) {
-					target.image.thumbnailLoading = false;
-				}
-				return;
-			}
-			const byPath = new Map(entries.map(entry => [entry.path, entry]));
+		};
+		const workers = Array.from({ length: Math.min(IMAGE_GRID_BATCH_CONCURRENCY, chunks.length) }, () => worker());
+		await Promise.all(workers);
+		// Clear the loading flag on anything left unprocessed (e.g. the grid changed mid-flight).
+		for (const chunk of chunks) {
 			for (const target of chunk) {
-				this.applyBatchedImageGridThumbnail(state, device, target, byPath.get(target.path));
+				if (target.image.thumbnailLoading && !target.image.thumbnailUrl) {
+					target.image.thumbnailLoading = false;
+				}
 			}
+		}
+	}
+
+	private async loadImageGridThumbnailChunk(
+		state: TurboFileImageGridState,
+		device: TurboFileDevice,
+		chunk: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[],
+		targetWidth: number
+	): Promise<void> {
+		if (this.imageGridState !== state) {
+			for (const target of chunk) {
+				target.image.thumbnailLoading = false;
+			}
+			return;
+		}
+		let entries: ITurboFileImageBatchEntry[] = [];
+		try {
+			const endpoint = await this.toTransferEndpoint(device, state.path ?? '/');
+			entries = await this.sshService.readImageBatch(endpoint, chunk.map(target => target.path), targetWidth);
+		} catch {
+			entries = [];
+		}
+		if (this.imageGridState !== state) {
+			for (const target of chunk) {
+				target.image.thumbnailLoading = false;
+			}
+			return;
+		}
+		const byPath = new Map(entries.map(entry => [entry.path, entry]));
+		for (const target of chunk) {
+			this.applyBatchedImageGridThumbnail(state, device, target, byPath.get(target.path));
 		}
 	}
 
