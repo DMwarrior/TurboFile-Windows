@@ -451,7 +451,7 @@ const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, s
 const IMAGE_GRID_COLUMN_MIN = 4;
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
-const IMAGE_GRID_CARD_GAP = 16;
+const IMAGE_GRID_CARD_GAP = 10;
 const IMAGE_GRID_CARD_VERTICAL_CHROME = 58;
 const IMAGE_GRID_CARD_INLINE_CHROME = 16;
 const IMAGE_GRID_THUMB_MIN = 96;
@@ -5183,8 +5183,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private applyImageGridCardImageSize(image: HTMLImageElement, size: ITurboFileImageGridCardSize): void {
-		image.style.width = `${size.imageWidth}px`;
-		image.style.height = `${size.imageHeight}px`;
+		// Fill the preview box (object-fit: cover handles the crop); the box itself is already sized to
+		// the card's aspect-clamped dimensions, so we don't pin the image to its raw pixel size — that is
+		// what turned extreme-aspect images into slivers.
+		void size;
+		image.style.width = '100%';
+		image.style.height = '100%';
 	}
 
 	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number): void {

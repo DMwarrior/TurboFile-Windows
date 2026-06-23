@@ -15,14 +15,31 @@ export interface ITurboFileImageGridCardSize {
 	readonly rowHeight: number;
 }
 
+// Clamp the aspect ratio used for laying out a card. Without this, an extreme-aspect image (e.g. a
+// 1024x32 crop) makes its card either freakishly wide — which inflates the grid's column width and
+// leaves big gaps between every other card — or, fitted into the square preview, a ~4px sliver that
+// looks like a stray dot. Clamping keeps the card a sane shape; the image itself fills it via CSS
+// object-fit: cover, so a very wide/tall picture shows a centered crop instead of a sliver.
+const MAX_GRID_CARD_ASPECT = 2.2;
+
 export function getTurboFileImageGridCardSize(source: ITurboFileImageGridSourceSize, scale: number, baseCardWidth: number, basePreviewHeight: number, cardVerticalChrome: number, cardInlineChrome: number): ITurboFileImageGridCardSize {
 	const normalizedScale = normalizePositiveNumber(scale, 1);
 	const baseWidth = Math.max(1, Math.round(baseCardWidth));
 	const previewWidth = Math.max(1, baseWidth - Math.max(0, Math.round(cardInlineChrome)));
 	const previewHeight = Math.max(1, Math.round(basePreviewHeight));
-	const sourceWidth = normalizePositiveNumber(source.width, 0);
-	const sourceHeight = normalizePositiveNumber(source.height, 0);
-	const hasSourceSize = sourceWidth > 0 && sourceHeight > 0;
+	const rawWidth = normalizePositiveNumber(source.width, 0);
+	const rawHeight = normalizePositiveNumber(source.height, 0);
+	const hasSourceSize = rawWidth > 0 && rawHeight > 0;
+	let sourceWidth = rawWidth;
+	let sourceHeight = rawHeight;
+	if (hasSourceSize) {
+		const ratio = rawWidth / rawHeight;
+		if (ratio > MAX_GRID_CARD_ASPECT) {
+			sourceHeight = rawWidth / MAX_GRID_CARD_ASPECT;
+		} else if (ratio < 1 / MAX_GRID_CARD_ASPECT) {
+			sourceWidth = rawHeight / MAX_GRID_CARD_ASPECT;
+		}
+	}
 	const baseImageScale = hasSourceSize ? Math.min(previewWidth / sourceWidth, previewHeight / sourceHeight, 1) : 1;
 	const baseImageWidth = hasSourceSize ? Math.max(1, Math.round(sourceWidth * baseImageScale)) : previewWidth;
 	const baseImageHeight = hasSourceSize ? Math.max(1, Math.round(sourceHeight * baseImageScale)) : previewHeight;

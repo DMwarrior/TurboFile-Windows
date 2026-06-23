@@ -3760,11 +3760,13 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-card-preview img {
-	width: auto;
-	height: auto;
+	width: 100%;
+	height: 100%;
 	max-width: none;
 	max-height: none;
-	object-fit: contain;
+	/* Fill the (aspect-clamped) preview box; a very wide/tall image shows a centered crop instead of
+	   shrinking to a sliver. */
+	object-fit: cover;
 	display: block;
 }
 
