@@ -2372,7 +2372,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-file-row.is-renaming {
-	--turbofile-inline-rename-height: max(34px, calc(var(--turbofile-browser-font-size, 14px) + 20px));
+	--turbofile-inline-rename-height: max(36px, calc(var(--turbofile-browser-font-size, 14px) + 22px));
 	height: var(--turbofile-inline-rename-height);
 	grid-template-columns: minmax(220px, 1fr);
 }
@@ -2437,14 +2437,18 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	height: var(--turbofile-inline-rename-height);
 	min-height: var(--turbofile-inline-rename-height);
 	box-sizing: border-box;
-	padding: 4px 6px 6px;
+	/* Center the single editable line by making line-height fill the content box (height minus the 2px
+	   border, no vertical padding). This vertically centers the text AND gives descenders like "_"/g/y
+	   plenty of half-leading below the baseline, so they are never clipped — while keeping a plain block
+	   layout so the caret still scrolls horizontally for long names. */
+	padding: 0 6px;
 	border: 1px solid var(--vscode-input-border, var(--vscode-focusBorder));
 	border-radius: 3px;
 	background: var(--vscode-input-background);
 	color: var(--vscode-input-foreground);
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: calc(var(--turbofile-browser-font-size, 14px) + 8px);
+	line-height: calc(var(--turbofile-inline-rename-height) - 2px);
 	white-space: pre;
 	overflow: hidden;
 	outline: none;
