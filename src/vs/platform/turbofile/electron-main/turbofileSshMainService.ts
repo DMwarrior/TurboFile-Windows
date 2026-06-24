@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { ConnectConfig } from 'ssh2';
-import { appendFileSync, createReadStream, createWriteStream, existsSync, promises as fsp } from 'fs';
+import { createReadStream, createWriteStream, existsSync, promises as fsp } from 'fs';
 import { basename, dirname, join } from 'node:path';
 import { networkInterfaces, platform, tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -6775,7 +6775,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		const size = getImageSize(buffer);
-		logImageDebug(`original path=${endpoint.path} bytes=${buffer.byteLength} decoded=${size ? `${size.width}x${size.height}` : 'NONE'} mime=${getMimeType(endpoint.path)}`);
 		return {
 			buffer,
 			mime: getMimeType(endpoint.path),
@@ -6790,7 +6789,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const shouldTryRemoteTransform = endpoint.kind === 'ssh'
 			&& !looksLikeWindowsPath(endpoint.path)
 			&& (!sourceFingerprint || sourceFingerprint.size > REMOTE_DIRECT_READ_MAX_BYTES);
-		logImageDebug(`scaled path=${endpoint.path} fpSize=${sourceFingerprint?.size ?? 'n/a'} target=${targetWidth}x${targetHeight} fmt=${format} tryRemote=${shouldTryRemoteTransform}`);
 		if (shouldTryRemoteTransform) {
 			const thumbnail = await this.tryReadRemoteThumbnailViaImageMagick(endpoint, targetWidth, targetHeight, quality, format, interpolation);
 			if (thumbnail) {
@@ -6798,13 +6796,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 
-		logImageDebug(`scaled-fallback-download path=${endpoint.path} maxBytes=${sourceMaxBytes}`);
 		const sourceBuffer = endpoint.kind === 'local'
 			? await this.readLocalFileBuffer(endpoint.path, sourceMaxBytes)
 			: await this.readRemoteFileBuffer(endpoint, sourceMaxBytes);
 		const sourceSize = getImageSize(sourceBuffer);
 		const sourceMime = getMimeType(endpoint.path);
-		logImageDebug(`scaled-fallback-decoded path=${endpoint.path} bytes=${sourceBuffer.byteLength} decoded=${sourceSize ? `${sourceSize.width}x${sourceSize.height}` : 'NONE'} mime=${sourceMime}`);
 		if (sourceMime === 'image/bmp') {
 			const bmp = tryCreateBmpPngVariant(sourceBuffer, targetWidth, targetHeight);
 			if (bmp) {
@@ -6833,10 +6829,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		try {
 			const transformed = this.transformImageBuffer(sourceBuffer, endpoint.path, targetWidth, targetHeight, quality, format);
-			logImageDebug(`scaled-local-transform-ok path=${endpoint.path} outBytes=${transformed.buffer.byteLength} outMime=${transformed.mime}`);
 			return transformed;
 		} catch (error) {
-			logImageDebug(`scaled-local-transform-FAIL path=${endpoint.path} err=${error instanceof Error ? error.message : String(error)} -> returning RAW ${sourceMime} bytes=${sourceBuffer.byteLength}`);
 			if (sourceMime.startsWith('image/')) {
 				return {
 					buffer: sourceBuffer,
@@ -7072,7 +7066,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const buffer = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_IMAGE_THUMBNAIL_TIMEOUT_MS }));
 			assertImageBuffer(buffer, mime);
 			const size = getImageSize(buffer);
-			logImageDebug(`remote-thumb path=${endpoint.path} tool=${tool} geom=${geometry} bytes=${buffer.byteLength} decoded=${size ? `${size.width}x${size.height}` : 'NONE'}`);
 			if (!size) {
 				// The header looked valid but nativeImage (same decoder family as the renderer's <img>)
 				// could not actually decode the bytes — truncated output, a timeout cutting the stream
@@ -7088,7 +7081,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				height: size.height
 			};
 		} catch (error) {
-			logImageDebug(`remote-thumb-FAIL path=${endpoint.path} tool=${tool} geom=${geometry} err=${error instanceof Error ? error.message : String(error)}`);
 			// A single corrupt/unsupported image should not disable thumbnail acceleration for
 			// the entire SSH device; keep the tool cache intact and fall back for this image only.
 			return undefined;
@@ -10118,16 +10110,6 @@ function getPngCrcTable(): Uint32Array {
 	}
 	pngCrcTable = table;
 	return table;
-}
-
-// TEMP DIAGNOSTIC: trace the SSH image read path to find why large super-resolution images fail to
-// load. Writes to <tmpdir>/turbofile-image-debug.log. Remove once the root cause is fixed.
-function logImageDebug(message: string): void {
-	try {
-		appendFileSync(join(tmpdir(), 'turbofile-image-debug.log'), `${new Date().toISOString()} ${message}\n`);
-	} catch {
-		// Diagnostics must never break image loading.
-	}
 }
 
 function assertImageBuffer(buffer: Buffer, mime: string): void {
