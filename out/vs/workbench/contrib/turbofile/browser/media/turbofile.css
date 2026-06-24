@@ -2394,6 +2394,35 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	text-overflow: ellipsis;
 }
 
+.turbofile-file-icon-slot {
+	flex: 0 0 18px;
+	width: 18px;
+	height: 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
+}
+
+.turbofile-file-icon-slot .turbofile-bi-icon {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 16px;
+}
+
+.turbofile-file-icon-slot .monaco-icon-label {
+	width: 18px;
+	height: 22px;
+	flex: 0 0 18px;
+	overflow: visible;
+}
+
+.turbofile-file-icon-slot .monaco-icon-label::before {
+	width: 16px;
+	height: 22px;
+	padding-right: 0;
+}
+
 .turbofile-file-name.is-renaming {
 	overflow: visible;
 }
@@ -2403,35 +2432,33 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	flex: 1 1 auto;
 }
 
-.turbofile-inline-rename .monaco-inputbox {
+.turbofile-inline-rename-editor {
 	width: 100%;
 	height: var(--turbofile-inline-rename-height);
 	min-height: var(--turbofile-inline-rename-height);
 	box-sizing: border-box;
-	overflow: visible;
-}
-
-.turbofile-inline-rename .monaco-inputbox > .ibwrapper {
-	height: var(--turbofile-inline-rename-height);
-	min-height: var(--turbofile-inline-rename-height);
-	overflow: visible;
-}
-
-/*
- * Chromium text inputs can clip selected underscore glyphs when the text line fills the whole box.
- * Use a taller rename row, normal line height, and extra bottom padding so "_" has paint room.
- */
-.turbofile-inline-rename .monaco-inputbox > .ibwrapper > .input,
-.turbofile-inline-rename .monaco-inputbox > .ibwrapper > input,
-.turbofile-inline-rename .monaco-inputbox > input {
-	height: var(--turbofile-inline-rename-height) !important;
-	min-height: var(--turbofile-inline-rename-height) !important;
-	padding: 3px 6px 7px !important;
-	box-sizing: border-box !important;
+	padding: 4px 6px 6px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-focusBorder));
+	border-radius: 3px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
 	font-family: var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif);
 	font-size: var(--turbofile-browser-font-size, 14px);
-	line-height: normal !important;
-	overflow: visible;
+	line-height: calc(var(--turbofile-browser-font-size, 14px) + 8px);
+	white-space: pre;
+	overflow: hidden;
+	outline: none;
+	cursor: text;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.turbofile-inline-rename-editor:focus {
+	border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder));
+}
+
+.turbofile-inline-rename-editor.is-invalid {
+	border-color: var(--vscode-inputValidation-errorBorder, #be1100);
 }
 
 .turbofile-file-meta {

@@ -8,7 +8,6 @@ import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { $, clearNode, Dimension, getWindow, IDomPosition } from '../../../../base/browser/dom.js';
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
-import { InputBox, MessageType } from '../../../../base/browser/ui/inputbox/inputBox.js';
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
@@ -24,7 +23,7 @@ import { ILanguageService } from '../../../../editor/common/languages/language.j
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITurboFileFileEntry, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
 import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
-import { IContextMenuService, IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
@@ -50,7 +49,6 @@ import { BasePty } from '../../terminal/common/basePty.js';
 import { ITerminalProfileService } from '../../terminal/common/terminal.js';
 import { ColorThemeData } from '../../../services/themes/common/colorThemeData.js';
 import { COLOR_THEME_DARK_INITIAL_COLORS, COLOR_THEME_LIGHT_INITIAL_COLORS, IWorkbenchColorTheme, IWorkbenchThemeService, ThemeSettings, ThemeSettingDefaults } from '../../../services/themes/common/workbenchThemeService.js';
-import { defaultInputBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ILabelService } from '../../../../platform/label/common/label.js';
@@ -727,7 +725,6 @@ export class TurboFileEditor extends EditorPane {
 		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService,
 		@ITurboFileSshService private readonly sshService: ITurboFileSshService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
-		@IContextViewService private readonly contextViewService: IContextViewService,
 		@IFileService private readonly fileService: IFileService,
 		@IModelService private readonly modelService: IModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
@@ -3607,36 +3604,77 @@ export class TurboFileEditor extends EditorPane {
 		const inputHost = $('span.turbofile-inline-rename');
 		container.appendChild(inputHost);
 
-		const inputBox = new InputBox(inputHost, this.contextViewService, {
-			ariaLabel: '输入文件名。按 Enter 确认或 Escape 取消。',
-			inputBoxStyles: defaultInputBoxStyles,
-			validationOptions: {
-				validation: value => {
-					const message = this.validateRenameName(side, item, value);
-					return message ? { content: message, type: MessageType.ERROR } : null;
-				}
-			}
-		});
+		const editor = $('.turbofile-inline-rename-editor');
+		editor.contentEditable = 'plaintext-only';
+		editor.spellcheck = false;
+		editor.setAttribute('role', 'textbox');
+		editor.setAttribute('aria-label', '输入文件名。按 Enter 确认或 Escape 取消。');
+		editor.textContent = item.name;
+		inputHost.appendChild(editor);
 
 		const disposables = new DisposableStore();
-		disposables.add(inputBox);
 		this.renderDisposables.add(disposables);
 
 		let currentSelectionState: 'prefix' | 'all' | 'suffix' = 'prefix';
 		let finished = false;
+		const getValue = () => (editor.textContent ?? '').replace(/[\r\n]/g, '');
+		const setValue = (value: string) => {
+			editor.textContent = value;
+		};
+		const ensureSingleTextNode = (): Text => {
+			const value = getValue();
+			if (editor.childNodes.length !== 1 || editor.firstChild?.nodeType !== Node.TEXT_NODE) {
+				editor.textContent = value;
+			}
+			if (!editor.firstChild) {
+				editor.appendChild(editor.ownerDocument.createTextNode(''));
+			}
+			return editor.firstChild as Text;
+		};
+		const selectRange = (start: number, end: number) => {
+			const textNode = ensureSingleTextNode();
+			const length = textNode.data.length;
+			const range = editor.ownerDocument.createRange();
+			range.setStart(textNode, Math.max(0, Math.min(start, length)));
+			range.setEnd(textNode, Math.max(0, Math.min(end, length)));
+			const selection = editor.ownerDocument.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+		};
+		const updateValidationState = (): string | undefined => {
+			const message = this.validateRenameName(side, item, getValue());
+			editor.classList.toggle('is-invalid', !!message);
+			editor.toggleAttribute('aria-invalid', !!message);
+			editor.title = message ?? '';
+			return message;
+		};
+		const updatePreviewState = () => {
+			const value = getValue();
+			if (editor.textContent !== value) {
+				setValue(value);
+				selectRange(value.length, value.length);
+			}
+			const targetName = value || ' ';
+			const targetPath = item.path ? joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(this.getPaneDevice(side) ?? this.localWindowsDevice)) : undefined;
+			const nextIcon = this.renderFileBrowserIcon({ ...item, name: targetName, path: targetPath });
+			icon.replaceWith(nextIcon);
+			icon = nextIcon;
+			updateValidationState();
+		};
 		const selectByState = () => {
-			const value = inputBox.value;
+			editor.focus();
+			const value = getValue();
 			const dotIndex = value.lastIndexOf('.');
 			if (item.directory || dotIndex <= 0) {
-				inputBox.select({ start: 0, end: value.length });
+				selectRange(0, value.length);
 				return;
 			}
 			if (currentSelectionState === 'prefix') {
-				inputBox.select({ start: 0, end: dotIndex });
+				selectRange(0, dotIndex);
 			} else if (currentSelectionState === 'all') {
-				inputBox.select({ start: 0, end: value.length });
+				selectRange(0, value.length);
 			} else {
-				inputBox.select({ start: dotIndex + 1, end: value.length });
+				selectRange(dotIndex + 1, value.length);
 			}
 		};
 
@@ -3645,7 +3683,7 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			finished = true;
-			const nextName = inputBox.value;
+			const nextName = getValue();
 			disposables.dispose();
 			if (!this.isInlineRenameTarget(side, item)) {
 				return;
@@ -3657,17 +3695,11 @@ export class TurboFileEditor extends EditorPane {
 			}
 		};
 
-		inputBox.value = item.name;
-		inputBox.validate();
+		updateValidationState();
 
-		disposables.add(inputBox.onDidChange(value => {
-			const targetName = value || ' ';
-			const targetPath = item.path ? joinPanePath(this.paneStates[side].path, targetName, this.isWindowsDevice(this.getPaneDevice(side) ?? this.localWindowsDevice)) : undefined;
-			const nextIcon = this.renderFileBrowserIcon({ ...item, name: targetName, path: targetPath });
-			icon.replaceWith(nextIcon);
-			icon = nextIcon;
-			inputBox.validate();
-		}));
+		const handleInput = () => updatePreviewState();
+		editor.addEventListener('input', handleInput);
+		disposables.add({ dispose: () => editor.removeEventListener('input', handleInput) });
 
 		const handleKeydown = (event: KeyboardEvent) => {
 			if ((event.ctrlKey || event.metaKey) && !event.altKey) {
@@ -3680,7 +3712,7 @@ export class TurboFileEditor extends EditorPane {
 			if (event.key === 'Enter') {
 				event.preventDefault();
 				event.stopPropagation();
-				if (!inputBox.validate()) {
+				if (!updateValidationState()) {
 					finish(true);
 				}
 				return;
@@ -3704,31 +3736,49 @@ export class TurboFileEditor extends EditorPane {
 				selectByState();
 			}
 		};
-		inputBox.inputElement.addEventListener('keydown', handleKeydown);
-		disposables.add({ dispose: () => inputBox.inputElement.removeEventListener('keydown', handleKeydown) });
+		editor.addEventListener('keydown', handleKeydown);
+		disposables.add({ dispose: () => editor.removeEventListener('keydown', handleKeydown) });
 
-		const stopClipboardEventPropagation = (event: ClipboardEvent) => event.stopPropagation();
+		const handleBeforeInput = (event: InputEvent) => {
+			if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+				event.preventDefault();
+			}
+		};
+		editor.addEventListener('beforeinput', handleBeforeInput);
+		disposables.add({ dispose: () => editor.removeEventListener('beforeinput', handleBeforeInput) });
+
+		const stopClipboardEventPropagation = (event: ClipboardEvent) => {
+			event.stopPropagation();
+			if (event.type === 'paste') {
+				const text = event.clipboardData?.getData('text/plain')?.replace(/[\r\n]/g, '') ?? '';
+				if (text) {
+					event.preventDefault();
+					editor.ownerDocument.execCommand('insertText', false, text);
+					updatePreviewState();
+				}
+			}
+		};
 		for (const eventType of ['copy', 'cut', 'paste'] as const) {
-			inputBox.inputElement.addEventListener(eventType, stopClipboardEventPropagation);
-			disposables.add({ dispose: () => inputBox.inputElement.removeEventListener(eventType, stopClipboardEventPropagation) });
+			editor.addEventListener(eventType, stopClipboardEventPropagation);
+			disposables.add({ dispose: () => editor.removeEventListener(eventType, stopClipboardEventPropagation) });
 		}
 
 		const handleBlur = () => {
-			const window = getWindow(inputBox.inputElement);
+			const window = getWindow(editor);
 			window.setTimeout(() => {
-				if (finished || window.document.activeElement === inputBox.inputElement) {
+				if (finished || window.document.activeElement === editor) {
 					return;
 				}
-				finish(inputBox.isInputValid());
+				finish(!updateValidationState());
 			}, 0);
 		};
-		inputBox.inputElement.addEventListener('blur', handleBlur);
-		disposables.add({ dispose: () => inputBox.inputElement.removeEventListener('blur', handleBlur) });
+		editor.addEventListener('blur', handleBlur);
+		disposables.add({ dispose: () => editor.removeEventListener('blur', handleBlur) });
 
 		const window = getWindow(inputHost);
 		const frame = window.requestAnimationFrame(() => {
 			if (!finished && this.isInlineRenameTarget(side, item)) {
-				inputBox.focus();
+				editor.focus();
 				currentSelectionState = 'prefix';
 				selectByState();
 			}
@@ -11907,17 +11957,24 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderFileBrowserIcon(item: TurboFileFileItem): Element {
 		if (item.parent) {
-			return renderTurboFileIcon('arrow-up-circle', 'primary');
+			const icon = $('span.turbofile-file-icon-slot.turbofile-file-parent-icon');
+			icon.setAttribute('aria-hidden', 'true');
+			icon.appendChild(renderTurboFileIcon('arrow-up-circle', 'primary'));
+			return icon;
 		}
 		if (item.directory) {
-			return renderTurboFileIcon('folder-fill', 'warning');
+			const icon = $('span.turbofile-file-icon-slot.turbofile-file-folder-icon');
+			icon.setAttribute('aria-hidden', 'true');
+			icon.appendChild(renderTurboFileIcon('folder-fill', 'warning'));
+			return icon;
 		}
-
+		const slot = $('span.turbofile-file-icon-slot.turbofile-file-theme-icon-slot');
+		slot.setAttribute('aria-hidden', 'true');
 		const icon = $('span.turbofile-file-theme-icon.monaco-icon-label') as HTMLSpanElement;
 		const resource = item.path ? URI.file(item.path) : undefined;
 		icon.classList.add(...getIconClasses(this.modelService, this.languageService, resource, FileKind.FILE));
-		icon.setAttribute('aria-hidden', 'true');
-		return icon;
+		slot.appendChild(icon);
+		return slot;
 	}
 
 	private getDeviceDisplayLabel(device: TurboFileDevice): string {
