@@ -18,7 +18,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
-import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
+import { createLocalBatchTarPlans, createTarNullListBuffer, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
 import { shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -253,6 +253,7 @@ interface ITarBatchPlan {
 	readonly parentPath: string;
 	readonly names: readonly string[];
 	readonly targetNames: readonly string[];
+	readonly requiresSafeParentPath?: boolean;
 }
 
 interface ITransferProgressSnapshot {
@@ -1514,32 +1515,37 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (target.kind !== 'ssh' || !target.connection) {
 			throw new Error('Missing SSH target.');
 		}
+		const localTarRoot = await this.createLocalTarRootAliasIfNeeded(localDirectory);
 		try {
-			await this.runParallelLocalDirectoryTarUpload(localDirectory, target.connection, buildPrepareTarExtractToExactDirectoryCommand(target.path), buildTarExtractStreamToDirectoryCommand(target.path), progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.runParallelLocalDirectoryTarUpload(localTarRoot.path, target.connection, buildPrepareTarExtractToExactDirectoryCommand(target.path), buildTarExtractStreamToDirectoryCommand(target.path), progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				// Parallel raw tar|ssh has no remote zstd dependency and is the stable default fast path.
 			}
-			// Parallel raw tar|ssh has no remote zstd dependency and is the stable default fast path.
-		}
-		try {
-			await this.runParallelLocalDirectoryTarZstdUpload(localDirectory, target.connection, buildPrepareTarZstdExtractToExactDirectoryCommand(target.path), buildTarZstdExtractToDirectoryCommand(target.path), progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.runParallelLocalDirectoryTarZstdUpload(localTarRoot.path, target.connection, buildPrepareTarZstdExtractToExactDirectoryCommand(target.path), buildTarZstdExtractToDirectoryCommand(target.path), progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
 			}
-			// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
-		}
-		try {
-			await this.runNativeLocalTarUpload(['-cf', '-', '-C', localDirectory, '.'], target.connection, buildTarExtractToExactDirectoryCommand(target.path), progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.runNativeLocalTarUpload(['-cf', '-', '-C', localTarRoot.path, '.'], target.connection, buildTarExtractToExactDirectoryCommand(target.path), progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				throw new Error(`Native tar upload failed: ${formatTransferError(error)}`);
 			}
-			throw new Error(`Native tar upload failed: ${formatTransferError(error)}`);
+		} finally {
+			await localTarRoot.dispose();
 		}
 	}
 
@@ -1583,6 +1589,34 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			unregisterCancel();
 			client?.end();
 		}
+	}
+
+	private async createLocalTarRootAliasIfNeeded(localRoot: string, force = false): Promise<{ readonly path: string; readonly dispose: () => Promise<void> }> {
+		if (platform() !== 'win32' || !(force || requiresLocalTarSafeRootAlias(localRoot))) {
+			return {
+				path: localRoot,
+				dispose: async () => undefined
+			};
+		}
+
+		const tempRoot = join(tmpdir(), `turbofile-tar-root-${randomUUID()}`);
+		const aliasPath = join(tempRoot, 'root');
+		try {
+			await fsp.mkdir(tempRoot, { recursive: true });
+			await fsp.symlink(localRoot, aliasPath, 'junction');
+		} catch (error) {
+			await fsp.rmdir(aliasPath).catch(() => undefined);
+			await fsp.rmdir(tempRoot).catch(() => undefined);
+			throw error;
+		}
+
+		return {
+			path: aliasPath,
+			dispose: async () => {
+				await fsp.rmdir(aliasPath).catch(() => undefined);
+				await fsp.rmdir(tempRoot).catch(() => undefined);
+			}
+		};
 	}
 
 	private async runNativeLocalTarUpload(tarArgs: string[], connection: ITurboFileSshConnectionOptions, remoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
@@ -3155,33 +3189,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (targetDirectory.kind !== 'ssh' || !targetDirectory.connection) {
 			throw new Error('Missing SSH target.');
 		}
+		const localTarRoot = await this.createLocalTarRootAliasIfNeeded(plan.parentPath, plan.requiresSafeParentPath === true);
+		const tarPlan = localTarRoot.path === plan.parentPath
+			? plan
+			: { ...plan, parentPath: localTarRoot.path };
 		try {
-			await this.runParallelLocalBatchTarUpload(plan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.runParallelLocalBatchTarUpload(tarPlan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				// Parallel raw tar|ssh is the stable default for local multi-file/folder uploads.
 			}
-			// Parallel raw tar|ssh is the stable default for local multi-file/folder uploads.
-		}
-		try {
-			await this.runParallelLocalBatchTarZstdUpload(plan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.runParallelLocalBatchTarZstdUpload(tarPlan, targetDirectory.connection, targetDirectory.path, progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
 			}
-			// Parallel tar+zstd+ssh is the measured fast path. If unavailable, try single native tar|ssh.
-		}
-		try {
-			await this.prepareRemoteBatchTarTarget(targetDirectory.connection, targetDirectory.path, plan.targetNames, progressId, false);
-			await this.runNativeLocalBatchTarUploadFromList(plan, targetDirectory.connection, buildTarExtractStreamToDirectoryCommand(targetDirectory.path), progressId, onArchiveDelta);
-			return;
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
-				throw new TurboFileTransferCanceledError();
+			try {
+				await this.prepareRemoteBatchTarTarget(targetDirectory.connection, targetDirectory.path, tarPlan.targetNames, progressId, false);
+				await this.runNativeLocalBatchTarUploadFromList(tarPlan, targetDirectory.connection, buildTarExtractStreamToDirectoryCommand(targetDirectory.path), progressId, onArchiveDelta);
+				return;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				throw new Error(`Native batch tar upload failed: ${formatTransferError(error)}`);
 			}
-			throw new Error(`Native batch tar upload failed: ${formatTransferError(error)}`);
+		} finally {
+			await localTarRoot.dispose();
 		}
 	}
 

@@ -62,6 +62,22 @@ suite('TurboFileBatchTarPlan', function () {
 		]);
 	});
 
+	test('marks non-ascii Windows parents for a safe tar root alias', () => {
+		const plans = createLocalBatchTarPlans([
+			{ sourcePath: 'D:\\Download\\测试目录\\a.png', targetName: 'a.png', sourceType: 'file' },
+			{ sourcePath: 'D:\\Download\\测试目录\\b.png', targetName: 'b.png', sourceType: 'file' }
+		]);
+
+		assert.deepStrictEqual(plans, [
+			{
+				parentPath: 'D:\\Download\\测试目录',
+				names: ['a.png', 'b.png'],
+				targetNames: ['a.png', 'b.png'],
+				requiresSafeParentPath: true
+			}
+		]);
+	});
+
 	test('rejects duplicate flattened target names', () => {
 		assert.throws(() => createLocalBatchTarPlans([
 			{ sourcePath: 'D:\\Work\\test\\images\\same.png', targetName: 'same.png', sourceType: 'file' },

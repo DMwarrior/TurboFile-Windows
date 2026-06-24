@@ -10,6 +10,7 @@ export interface ITurboFileBatchTarPlan {
 	readonly parentPath: string;
 	readonly names: readonly string[];
 	readonly targetNames: readonly string[];
+	readonly requiresSafeParentPath?: boolean;
 }
 
 export function createLocalBatchTarPlans(items: readonly ITurboFileBatchTransferItem[]): readonly ITurboFileBatchTarPlan[] | undefined {
@@ -34,7 +35,12 @@ export function createLocalBatchTarPlans(items: readonly ITurboFileBatchTransfer
 		const parentPath = dirname(sourcePath);
 		let plan = plans.get(parentPath);
 		if (!plan) {
-			plan = { parentPath, names: [], targetNames: [] };
+			plan = {
+				parentPath,
+				names: [],
+				targetNames: [],
+				...(requiresLocalTarSafeRootAlias(parentPath) ? { requiresSafeParentPath: true } : undefined)
+			};
 			plans.set(parentPath, plan);
 		}
 		plan.names.push(sourceName);
@@ -46,6 +52,10 @@ export function createLocalBatchTarPlans(items: readonly ITurboFileBatchTransfer
 
 export function createTarNullListBuffer(entries: readonly string[]): Buffer {
 	return Buffer.from(`${entries.join('\0')}\0`, 'utf8');
+}
+
+export function requiresLocalTarSafeRootAlias(path: string): boolean {
+	return /[^\x20-\x7E]/.test(path);
 }
 
 function trimTrailingPathSeparators(path: string): string {
