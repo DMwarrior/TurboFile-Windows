@@ -56,6 +56,7 @@ import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
+import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
@@ -403,6 +404,7 @@ const FILE_LIST_DEFAULT_VIEWPORT_HEIGHT = 720;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
 const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
+const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 1;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
@@ -670,6 +672,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly remoteEnrichAgain: Record<'left' | 'right', boolean> = { left: false, right: false };
 	private readonly paneDirectoryCache = new Map<string, TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryInflight = new TurboFileDirectoryInflightTracker<TurboFileDirectoryCacheEntry>();
+	private readonly paneDirectoryPrefetchQueue = new TurboFileDirectoryPrefetchQueue(PANE_DIRECTORY_PREFETCH_CONCURRENCY);
 	private readonly paneDeviceSnapshots = new Map<string, TurboFilePaneDeviceSnapshot>();
 	private activePage: TurboFileWorkbenchPage = 'transfer';
 	private activeFilePaneSide: 'left' | 'right' = 'left';
@@ -6861,14 +6864,10 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		const device = this.getPaneDevice(side);
-		if (!device || this.getCachedPaneDirectory(device, path)) {
+		if (!device) {
 			return;
 		}
-		const cacheKey = this.getPaneDirectoryCacheKey(device, path);
-		if (this.paneDirectoryInflight.has(cacheKey)) {
-			return;
-		}
-		void this.loadPaneDirectory(device, path, false, 'prefetch').catch(() => undefined);
+		this.enqueuePaneDirectoryPrefetch(device, path);
 	}
 
 	private prefetchNeighborDirectories(device: TurboFileDevice, currentPath: string, items: TurboFileFileItem[]): void {
@@ -6877,13 +6876,24 @@ export class TurboFileEditor extends EditorPane {
 			...items.filter(item => item.directory && !item.parent && item.path).slice(0, PANE_DIRECTORY_PREFETCH_LIMIT).map(item => item.path)
 		].filter((path): path is string => !!path);
 		for (const path of candidates) {
-			const cacheKey = this.getPaneDirectoryCacheKey(device, path);
-			const cached = this.paneDirectoryCache.get(cacheKey);
-			if ((cached && cached.expiresAt > Date.now()) || this.paneDirectoryInflight.has(cacheKey)) {
-				continue;
-			}
-			void this.loadPaneDirectory(device, path, false, 'prefetch').catch(() => undefined);
+			this.enqueuePaneDirectoryPrefetch(device, path);
 		}
+	}
+
+	private enqueuePaneDirectoryPrefetch(device: TurboFileDevice, path: string): void {
+		if (this.getCachedPaneDirectory(device, path)) {
+			return;
+		}
+		const cacheKey = this.getPaneDirectoryCacheKey(device, path);
+		if (this.paneDirectoryInflight.has(cacheKey)) {
+			return;
+		}
+		this.paneDirectoryPrefetchQueue.enqueue(cacheKey, async () => {
+			if (this.getCachedPaneDirectory(device, path) || this.paneDirectoryInflight.has(cacheKey)) {
+				return;
+			}
+			await this.loadPaneDirectory(device, path, false, 'prefetch').catch(() => undefined);
+		});
 	}
 
 	private getPaneDirectoryCacheKey(device: TurboFileDevice, path: string): string {

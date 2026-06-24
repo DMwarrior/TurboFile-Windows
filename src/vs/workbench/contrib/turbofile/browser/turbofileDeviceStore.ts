@@ -75,6 +75,72 @@ function normalizeDefaultPath(path: string | undefined, platform: TurboFileDevic
 }
 
 const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
+	{
+		id: 'turbofile-default-61',
+		name: '61服务器',
+		host: '192.168.9.61',
+		port: 22,
+		username: 'th',
+		authType: 'password',
+		defaultPath: '/home/th',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-57',
+		name: '57服务器',
+		host: '192.168.9.57',
+		port: 22,
+		username: 'thgd',
+		authType: 'password',
+		defaultPath: '/home/thgd',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-60',
+		name: '60服务器',
+		host: '192.168.9.60',
+		port: 22,
+		username: 'th',
+		authType: 'password',
+		defaultPath: '/home/th',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-64',
+		name: '64服务器',
+		host: '192.168.9.64',
+		port: 22,
+		username: 'ubuntu',
+		authType: 'password',
+		defaultPath: '/home/ubuntu',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-62',
+		name: '62服务器',
+		host: '192.168.9.62',
+		port: 22,
+		username: 'th',
+		authType: 'password',
+		defaultPath: '/home/th',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-nas',
+		name: 'NAS',
+		host: '10.190.21.253',
+		port: 8000,
+		username: 'Algorithm',
+		authType: 'password',
+		defaultPath: '/var/services/homes/Algorithm',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
+	}
 ];
 
 const TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX = 'turbofile-default-';
