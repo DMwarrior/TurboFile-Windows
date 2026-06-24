@@ -37,11 +37,12 @@ function buildRemoteZipExtractCommand(quotedArchive: string, bsdtar: string, tar
 	].join('\n');
 	const pythonExtract = `python3 -c ${quotePosixShellArg(pythonScript)} ${quotedArchive} "$out"`;
 	return [
-		`if command -v unzip >/dev/null 2>&1 && unzip -O GBK -o ${quotedArchive} -d "$out"; then :`,
-		`elif command -v python3 >/dev/null 2>&1 && ${pythonExtract}; then :`,
-		`elif command -v bsdtar >/dev/null 2>&1; then ${bsdtar}`,
-		`elif command -v unzip >/dev/null 2>&1; then unzip -o ${quotedArchive} -d "$out"`,
-		`else ${tar}; fi`
+		`if command -v unzip >/dev/null 2>&1 && unzip -O GBK -o ${quotedArchive} -d "$out"; then :;`,
+		`elif command -v python3 >/dev/null 2>&1 && ${pythonExtract}; then :;`,
+		`elif command -v bsdtar >/dev/null 2>&1; then ${bsdtar};`,
+		`elif command -v unzip >/dev/null 2>&1; then unzip -o ${quotedArchive} -d "$out";`,
+		`else ${tar};`,
+		'fi'
 	].join(' ');
 }
 

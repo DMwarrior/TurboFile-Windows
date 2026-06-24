@@ -12,12 +12,14 @@ suite('TurboFileArchiveExtract', function () {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('extracts zip with GBK-aware tools before generic bsdtar fallback', () => {
-		const command = buildTurboFileRemoteExtractCommand('/tmp/中文.zip', '\'/tmp/中文.zip\'');
+		const command = buildTurboFileRemoteExtractCommand('/tmp/archive.zip', '\'/tmp/archive.zip\'');
 
 		assert.ok(command.includes('unzip -O GBK'), command);
 		assert.ok(command.includes('metadata_encoding="gbk"'), command);
 		assert.ok(command.indexOf('unzip -O GBK') < command.indexOf('bsdtar -xf'), command);
 		assert.ok(command.indexOf('python3 -c') < command.indexOf('bsdtar -xf'), command);
+		assert.ok(!command.includes('then : elif'), command);
+		assert.ok(!command.includes('"$out" elif'), command);
 	});
 
 	test('keeps tar-family archives on tar first', () => {
