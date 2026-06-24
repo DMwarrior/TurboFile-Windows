@@ -479,6 +479,10 @@ const IMAGE_GRID_BATCH_CONCURRENCY = 5;
 // it streamed the raw original), so the client downscales it before showing — keeps tool-less boards
 // (e.g. uncompressed .bmp) fast and low-memory. Smaller payloads render via a native <img> directly.
 const IMAGE_GRID_CLIENT_DOWNSCALE_BYTES = 320 * 1024;
+// Preview reads the true original (cat, no SFTP/tool) up to this size; larger originals are decoded
+// to a display-sized JPEG remotely instead, so a huge file never spikes client memory or fails to
+// decode in the <img>.
+const IMAGE_PREVIEW_RAW_MAX_BYTES = 10 * 1024 * 1024;
 // Wait this long after the last scroll movement before loading the visible page, so a fast drag/jump
 // through many pages doesn't fire (and then have to abandon) a load for every page it passes.
 const IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS = 110;
@@ -9670,6 +9674,12 @@ export class TurboFileEditor extends EditorPane {
 				}
 			}
 		}
+		// If a newer load superseded this one, some now-visible images we had marked as loading were
+		// skipped by that newer load (it saw thumbnailLoading=true) and have just been reset here. Run
+		// one more pass for the current page so those never get orphaned as blank placeholders.
+		if (this.imageGridState === state && this.activePage === 'images' && this.imageGridThumbnailLoadToken !== token) {
+			this.scheduleImageGridVisibleLoad(state);
+		}
 	}
 
 	private async loadImageGridThumbnailChunk(
@@ -10073,10 +10083,14 @@ export class TurboFileEditor extends EditorPane {
 			this.updateImagePreviewOverlay();
 		}
 		try {
-			if (this.isRemoteSshImageDevice(device)) {
-				// Read the original via the same cat-based batch path the grid uses: it works where SFTP
-				// is flaky/restricted (some NAS) and needs no remote image tool, which is exactly where the
-				// old resource/protocol preview path was failing.
+			// Read the original via the same cat-based batch path the grid uses: it works where SFTP is
+			// flaky/restricted (some NAS) and needs no remote image tool, which is exactly where the old
+			// resource/protocol preview path was failing. Skip this fast path for very large originals —
+			// reading + decoding a huge file raw would spike memory; those use the resource path, which can
+			// downscale on the remote.
+			const previewRawSize = Math.max(0, image.item.rawSize);
+			const canReadOriginalRaw = previewRawSize === 0 || previewRawSize <= IMAGE_PREVIEW_RAW_MAX_BYTES;
+			if (this.isRemoteSshImageDevice(device) && canReadOriginalRaw) {
 				const endpoint = await this.toTransferEndpoint(device, image.item.path);
 				let entries: ITurboFileImageBatchEntry[] = [];
 				try {
