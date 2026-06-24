@@ -18,6 +18,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
+import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
@@ -646,11 +647,27 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
 			});
 			this.touchDirectorySftpSession(session.key);
-			return parseRemoteStatEntries(output.toString('utf8'));
+			const stats = parseRemoteStatEntries(output.toString('utf8'));
+			return stats.length ? stats : await this.statRemoteEntriesWithSftpFallback(session.sftp, directoryPath, uniqueNames);
 		} catch {
-			// Enrichment is best-effort: on failure the rows simply keep their placeholder size/date.
-			return [];
+			return this.statRemoteEntriesWithSftpFallback(session.sftp, directoryPath, uniqueNames);
 		}
+	}
+
+	private async statRemoteEntriesWithSftpFallback(sftp: ISFTPWrapper, directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]> {
+		const stats = await mapLimit(names, SFTP_DIRECTORY_ENTRY_CONCURRENCY, async name => {
+			try {
+				const stat = await this.remoteStat(sftp, joinRemotePath(directoryPath, name));
+				return {
+					name,
+					size: stat.size,
+					modified: stat.mtime * 1000
+				};
+			} catch {
+				return undefined;
+			}
+		});
+		return stats.filter((stat): stat is ITurboFileEntryStat => !!stat);
 	}
 
 	async listLocalDirectory(path: string, _refresh = false): Promise<ITurboFileDirectoryListing> {
@@ -9625,11 +9642,7 @@ function buildPosixNamesAndTypesListCommand(path: string): string {
 // Size + modified time for specific entries in one round trip. Names are passed relative to the
 // directory (via `cd`) so `%n` echoes them back exactly, letting the caller map results by name.
 function buildPosixStatEntriesCommand(directoryPath: string, names: readonly string[]): string {
-	const args = names.map(name => quotePosixShellArg(`./${normalizeTarListPath(name)}`)).join(' ');
-	// Must be --printf, not -c: GNU stat only interprets backslash escapes (so `\0` becomes a real NUL
-	// separator) with --printf; `-c` would emit the literal two characters "\0" and the output would
-	// never parse, leaving size/date blank.
-	return `cd ${quotePosixShellArg(directoryPath)} && LC_ALL=C stat --printf='%n\\0%s\\0%Y\\0' -- ${args}`;
+	return buildRemotePosixStatEntriesCommand(directoryPath, names);
 }
 
 function parseRemoteStatEntries(text: string): ITurboFileEntryStat[] {
