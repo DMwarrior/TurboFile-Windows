@@ -10495,6 +10495,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private clearImageGridScrollTimer(): void {
+		if (this.imageGridVisibleLoadTimer) {
+			clearTimeout(this.imageGridVisibleLoadTimer);
+			this.imageGridVisibleLoadTimer = undefined;
+		}
 		if (!this.imageGridScrollRenderTimer) {
 			return;
 		}
