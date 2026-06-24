@@ -140,6 +140,18 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		defaultPath: '/var/services/homes/Algorithm',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
+	},
+	{
+		id: 'turbofile-default-5336',
+		name: '5336板子',
+		host: '192.168.211.4',
+		port: 22,
+		username: 'root',
+		authType: 'password',
+		password: 'depstek',
+		defaultPath: '/',
+		platform: 'linux',
+		preferredTransferProtocol: 'auto-fast'
 	}
 ];
 

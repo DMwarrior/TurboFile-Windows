@@ -19,6 +19,7 @@ import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFile
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
+import { shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
@@ -593,31 +594,39 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error(configResult.message);
 		}
 
-		const session = await this.getDirectorySftpSession(options, configResult.config);
-		try {
-			const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
-			this.touchDirectorySftpSession(session.key);
-			const result = {
-				path: listing.path,
-				entries: listing.entries
-					.filter(entry => entry.filename !== '.' && entry.filename !== '..')
-					.map(entry => this.toRemoteEntry(listing.path, entry))
-					.sort(compareFileEntries)
-			};
-			// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
-			// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
-			if (!namesOnly) {
-				this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
-				if (listing.path === path) {
-					this.setRemoteDirectoryListingCache(cacheKey, result);
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const session = await this.getDirectorySftpSession(options, configResult.config);
+			try {
+				const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
+				this.touchDirectorySftpSession(session.key);
+				const result = {
+					path: listing.path,
+					entries: listing.entries
+						.filter(entry => entry.filename !== '.' && entry.filename !== '..')
+						.map(entry => this.toRemoteEntry(listing.path, entry))
+						.sort(compareFileEntries)
+				};
+				// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
+				// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
+				if (!namesOnly) {
+					this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+					if (listing.path === path) {
+						this.setRemoteDirectoryListingCache(cacheKey, result);
+					}
 				}
+				return result;
+			} catch (error) {
+				lastError = error;
+				this.remoteDirectoryListingCache.delete(cacheKey);
+				this.disposeDirectorySftpSession(session.key);
+				if (attempt === 0 && shouldRetryRemoteDirectoryRead(error)) {
+					continue;
+				}
+				throw error;
 			}
-			return result;
-		} catch (error) {
-			this.remoteDirectoryListingCache.delete(cacheKey);
-			this.disposeDirectorySftpSession(session.key);
-			throw error;
 		}
+		throw lastError;
 	}
 
 	private remoteListingHasAttributes(listing: ITurboFileDirectoryListing): boolean {
