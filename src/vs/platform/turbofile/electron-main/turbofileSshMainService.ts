@@ -17,6 +17,7 @@ import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
+import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer } from '../common/turbofileBatchTarPlan.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -4160,12 +4161,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				// bsdtar (Windows tar.exe / libarchive) extracts tar*, zip, 7z and rar. Force UTF-8 only
 				// for tar-family archives; zip/rar/7z carry their own encoding (zip UTF-8 flag, otherwise
 				// the creator's code page) and libarchive must auto-detect it to avoid garbling names.
-				const charsetArgs = isTarFamilyArchivePath(endpoint.path) ? await this.getLocalTarCharsetArgs() : [];
+				const charsetArgs = isTurboFileTarFamilyArchivePath(endpoint.path) ? await this.getLocalTarCharsetArgs() : [];
 				await runLocalCommand('tar.exe', [...charsetArgs, '-xf', endpoint.path, '-C', outputDirectory]);
 			} else {
 				const quotedArchive = quotePosixShellArg(endpoint.path);
 				const outputSetup = `out=${quotePosixShellArg(outputDirectory)}; if [ -e "$out" ] && [ ! -d "$out" ]; then out="$out"_extracted; fi; mkdir -p "$out"`;
-				const command = `${outputSetup} && ${buildRemoteExtractCommand(endpoint.path, quotedArchive)}`;
+				const command = `${outputSetup} && ${buildTurboFileRemoteExtractCommand(endpoint.path, quotedArchive)}`;
 				await this.withSshClient(endpoint, client => this.execRemote(client, command));
 			}
 			this.clearRemoteDirectoryListingCache(endpoint, outputDirectory);
@@ -10121,52 +10122,6 @@ function stripArchiveExtension(path: string): string {
 		}
 	}
 	return path;
-}
-
-function isZipPath(path: string): boolean {
-	return path.toLowerCase().endsWith('.zip');
-}
-
-// tar-family archives are typically produced on Linux/macOS with raw UTF-8 member names, so on
-// Windows they must be extracted with hdrcharset=UTF-8. zip/rar/7z instead carry their own encoding
-// (zip has a UTF-8 flag; otherwise entries are in the creator's code page), so libarchive must be
-// left to auto-detect rather than forced to UTF-8.
-function isTarFamilyArchivePath(path: string): boolean {
-	const lower = path.toLowerCase();
-	return ['.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.tar.zst', '.tzst'].some(extension => lower.endsWith(extension));
-}
-
-function isRarPath(path: string): boolean {
-	return path.toLowerCase().endsWith('.rar');
-}
-
-function is7zPath(path: string): boolean {
-	return path.toLowerCase().endsWith('.7z');
-}
-
-/**
- * Builds a remote (POSIX) extraction command that picks the right tool for the archive type and
- * falls back to whatever is installed, so zip/rar/7z/tar* all work without the caller knowing what
- * the server has. `bsdtar` (if present) is preferred for zip/rar/7z because it both handles those
- * formats and honors the zip UTF-8 flag, keeping non-ASCII names intact. `$out` is set by the caller.
- */
-function buildRemoteExtractCommand(path: string, quotedArchive: string): string {
-	const bsdtar = `bsdtar -xf ${quotedArchive} -C "$out"`;
-	const tar = `tar -xf ${quotedArchive} -C "$out"`;
-	if (isRarPath(path)) {
-		// Prefer dedicated rar tools; fall back to bsdtar/7z which can also read rar.
-		return `if command -v unrar >/dev/null 2>&1; then unrar x -o+ ${quotedArchive} "$out"/; elif command -v unar >/dev/null 2>&1; then unar -force-overwrite -output-directory "$out" ${quotedArchive}; elif command -v 7z >/dev/null 2>&1; then 7z x -y -o"$out" ${quotedArchive}; elif command -v bsdtar >/dev/null 2>&1; then ${bsdtar}; else echo 'No rar extractor (need unrar/unar/7z/bsdtar).' >&2; exit 2; fi`;
-	}
-	if (is7zPath(path)) {
-		return `if command -v 7z >/dev/null 2>&1; then 7z x -y -o"$out" ${quotedArchive}; elif command -v 7za >/dev/null 2>&1; then 7za x -y -o"$out" ${quotedArchive}; elif command -v bsdtar >/dev/null 2>&1; then ${bsdtar}; else echo 'No 7z extractor (need 7z/7za/bsdtar).' >&2; exit 2; fi`;
-	}
-	if (isZipPath(path)) {
-		// bsdtar honors the zip UTF-8 flag; unzip is the common fallback. `-O` would force a code page
-		// but is not portable, so leave unzip to its default to avoid breaking UTF-8 zips.
-		return `if command -v bsdtar >/dev/null 2>&1; then ${bsdtar}; elif command -v unzip >/dev/null 2>&1; then unzip -o ${quotedArchive} -d "$out"; else ${tar}; fi`;
-	}
-	// tar family (and anything else libarchive understands): GNU tar auto-detects the compressor.
-	return `if command -v tar >/dev/null 2>&1; then ${tar}; elif command -v bsdtar >/dev/null 2>&1; then ${bsdtar}; else echo 'No tar extractor available.' >&2; exit 2; fi`;
 }
 
 function formatBytes(size: number): string {
