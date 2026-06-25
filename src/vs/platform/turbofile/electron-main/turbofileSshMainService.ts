@@ -3824,6 +3824,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	/**
+	 * Resolves the real Desktop directory for the "桌面" quick-nav shortcut. `app.getPath('desktop')`
+	 * follows a Desktop relocated to another drive (e.g. D:\Desktop), so clicking 桌面 lands on the
+	 * folder the OS actually uses — which is also where Explorer drops dragged files.
+	 */
+	async getLocalDesktopPath(): Promise<string> {
+		try {
+			const desktop = app.getPath('desktop');
+			if (desktop) {
+				return desktop;
+			}
+		} catch {
+			// Electron could not resolve the desktop; fall back to the profile path below.
+		}
+		if (process.env.USERPROFILE) {
+			return join(process.env.USERPROFILE, 'Desktop');
+		}
+		return '';
+	}
+
+	/**
 	 * Candidate Desktop directories used to recover a drop the Directory CopyHook never saw (see
 	 * {@link waitForWindowsDragCopyHookTarget}). `app.getPath('desktop')` honors a relocated Desktop
 	 * (e.g. moved to D:\), and the raw profile Desktop is added as a defensive secondary.

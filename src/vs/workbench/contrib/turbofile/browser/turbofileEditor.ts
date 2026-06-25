@@ -723,6 +723,7 @@ export class TurboFileEditor extends EditorPane {
 	private inlineRename: TurboFileInlineRenameState | undefined;
 	private readonly windowsClipboardPasteInFlight = new Set<string>();
 	private availableWindowsDriveRoots: string[] = [];
+	private resolvedWindowsDesktopPath: string | undefined;
 	private statusMessage = '极速传已启动：双栏浏览、设备管理、传输、预览和终端入口已接入。';
 	private taskSequence = 1;
 	private readonly tasks: TurboFileTask[] = [];
@@ -812,6 +813,7 @@ export class TurboFileEditor extends EditorPane {
 		void this.syncNativeEditorDisplaySettings();
 		void this.loadColorThemes();
 		void this.refreshWindowsDriveRoots();
+		void this.refreshWindowsDesktopPath();
 		this.ensureTitlebarChrome();
 		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
 		this.render();
@@ -11887,6 +11889,30 @@ export class TurboFileEditor extends EditorPane {
 		return this.environmentService.userHome.fsPath || LOCAL_WINDOWS_FALLBACK_PATH;
 	}
 
+	/**
+	 * The real Desktop directory used by the "桌面" shortcut. Defaults to the profile Desktop and is
+	 * upgraded to the OS known-folder location once {@link refreshWindowsDesktopPath} resolves it, so
+	 * a Desktop relocated to another drive (e.g. D:\Desktop) is navigated to — and dropped into —
+	 * correctly.
+	 */
+	private getWindowsDesktopPath(): string {
+		return this.resolvedWindowsDesktopPath || joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
+	}
+
+	private async refreshWindowsDesktopPath(): Promise<void> {
+		try {
+			const desktop = (await this.sshService.getLocalDesktopPath())?.trim();
+			if (desktop && !isSameWindowsPath(desktop, this.resolvedWindowsDesktopPath ?? '')) {
+				this.resolvedWindowsDesktopPath = desktop;
+				if (this.activePage === 'transfer') {
+					this.render();
+				}
+			}
+		} catch {
+			// Keep the profile-based Desktop fallback if the real path cannot be resolved.
+		}
+	}
+
 	private async refreshWindowsDriveRoots(): Promise<void> {
 		const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 		const probes = await Promise.all(letters.map(async letter => {
@@ -11908,7 +11934,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getWindowsLocationLabel(path: string): string {
-		const desktopPath = joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
+		const desktopPath = this.getWindowsDesktopPath();
 		if (isSameWindowsPath(path, desktopPath)) {
 			return '桌面';
 		}
@@ -11927,7 +11953,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getWindowsLocationIconClass(path: string): string {
-		const desktopPath = joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
+		const desktopPath = this.getWindowsDesktopPath();
 		if (isSameWindowsPath(path, desktopPath)) {
 			return 'turbofile-location-icon-windows';
 		}
@@ -11961,8 +11987,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getWindowsLocationActions(side: 'left' | 'right'): IAction[] {
 		const state = this.paneStates[side];
-		const homePath = this.getLocalWindowsDefaultPath();
-		const desktopPath = joinPanePath(homePath, 'Desktop', true);
+		const desktopPath = this.getWindowsDesktopPath();
 		const actions: IAction[] = [
 			this.menuAction(`turbofile.windowsLocation.${side}.desktop`, '桌面', this.getWindowsLocationMenuIconClass(desktopPath), () => this.openWindowsLocalPath(side, desktopPath, '桌面'), true, isSameWindowsPath(state.path, desktopPath)),
 			new Separator()
