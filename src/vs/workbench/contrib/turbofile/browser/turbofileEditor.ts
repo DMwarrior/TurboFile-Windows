@@ -62,6 +62,7 @@ import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, I
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 
 interface TurboFileFileItem {
 	readonly name: string;
@@ -11896,20 +11897,44 @@ export class TurboFileEditor extends EditorPane {
 	 * correctly.
 	 */
 	private getWindowsDesktopPath(): string {
-		return this.resolvedWindowsDesktopPath || joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
+		return this.resolvedWindowsDesktopPath || this.getWindowsDesktopFallbackPath();
+	}
+
+	private getWindowsDesktopFallbackPath(): string {
+		return joinPanePath(this.getLocalWindowsDefaultPath(), 'Desktop', true);
 	}
 
 	private async refreshWindowsDesktopPath(): Promise<void> {
 		try {
+			const previousDesktopPath = this.getWindowsDesktopPath();
+			const profileDesktopPath = this.getWindowsDesktopFallbackPath();
 			const desktop = (await this.sshService.getLocalDesktopPath())?.trim();
 			if (desktop && !isSameWindowsPath(desktop, this.resolvedWindowsDesktopPath ?? '')) {
 				this.resolvedWindowsDesktopPath = desktop;
+				this.retargetWindowsDesktopPanes(previousDesktopPath, profileDesktopPath, desktop);
 				if (this.activePage === 'transfer') {
 					this.render();
 				}
 			}
 		} catch {
 			// Keep the profile-based Desktop fallback if the real path cannot be resolved.
+		}
+	}
+
+	private retargetWindowsDesktopPanes(previousDesktopPath: string, profileDesktopPath: string, nextDesktopPath: string): void {
+		for (const side of ['left', 'right'] as const) {
+			const state = this.paneStates[side];
+			if (state.deviceId !== LOCAL_WINDOWS_DEVICE_ID || !shouldRetargetWindowsDesktopPane(state.path, previousDesktopPath, profileDesktopPath)) {
+				continue;
+			}
+
+			state.path = nextDesktopPath;
+			state.items = [];
+			state.error = undefined;
+			this.resetPaneScroll(side);
+			this.clearPaneSelection(side);
+			this.rememberPaneDevicePath(side, this.localWindowsDevice, nextDesktopPath);
+			void this.refreshPane(side, { path: nextDesktopPath, force: true, silent: true });
 		}
 	}
 
@@ -11989,7 +12014,7 @@ export class TurboFileEditor extends EditorPane {
 		const state = this.paneStates[side];
 		const desktopPath = this.getWindowsDesktopPath();
 		const actions: IAction[] = [
-			this.menuAction(`turbofile.windowsLocation.${side}.desktop`, '桌面', this.getWindowsLocationMenuIconClass(desktopPath), () => this.openWindowsLocalPath(side, desktopPath, '桌面'), true, isSameWindowsPath(state.path, desktopPath)),
+			this.menuAction(`turbofile.windowsLocation.${side}.desktop`, '桌面', this.getWindowsLocationMenuIconClass(desktopPath), () => void this.openWindowsDesktopPath(side), true, isSameWindowsPath(state.path, desktopPath)),
 			new Separator()
 		];
 
@@ -12020,6 +12045,13 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 		return Array.from(roots).sort((left, right) => left.localeCompare(right));
+	}
+
+	private async openWindowsDesktopPath(side: 'left' | 'right'): Promise<void> {
+		if (!this.resolvedWindowsDesktopPath) {
+			await this.refreshWindowsDesktopPath();
+		}
+		this.openWindowsLocalPath(side, this.getWindowsDesktopPath(), '桌面');
 	}
 
 	private openWindowsLocalPath(side: 'left' | 'right', path: string, label: string): void {
