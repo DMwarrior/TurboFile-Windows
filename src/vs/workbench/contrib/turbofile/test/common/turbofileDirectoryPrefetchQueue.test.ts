@@ -54,6 +54,35 @@ suite('TurboFileDirectoryPrefetchQueue', () => {
 
 		assert.strictEqual(runs, 1);
 	});
+
+	test('prioritize runs the hovered directory next, ahead of the queued backlog', async () => {
+		const queue = new TurboFileDirectoryPrefetchQueue(1);
+		const order: string[] = [];
+		const releases: Array<() => void> = [];
+
+		const createTask = (key: string) => async () => {
+			order.push(key);
+			await new Promise<void>(resolve => releases.push(resolve));
+		};
+
+		// 'a' starts immediately (concurrency 1); 'b' and 'c' wait in the queue.
+		queue.enqueue('a', createTask('a'));
+		queue.enqueue('b', createTask('b'));
+		queue.enqueue('c', createTask('c'));
+		await tick();
+
+		// The user hovers 'c' while 'a' is still running: it should jump ahead of 'b'.
+		queue.prioritize('c');
+
+		releases.shift()?.(); // finish 'a'
+		await tick();
+		releases.shift()?.(); // finish 'c'
+		await tick();
+		releases.shift()?.(); // finish 'b'
+		await queue.whenIdle();
+
+		assert.deepStrictEqual(order, ['a', 'c', 'b']);
+	});
 });
 
 async function tick(): Promise<void> {

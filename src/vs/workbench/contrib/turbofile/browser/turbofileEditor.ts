@@ -404,8 +404,16 @@ const FILE_LIST_DEFAULT_VIEWPORT_HEIGHT = 720;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
 const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
-const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 1;
+// Directory name listings are cheap (a single `find -printf` round trip), so a few can run in
+// parallel even on weak SSH boards. Draining the neighbour-prefetch backlog faster makes the
+// directory the user is about to open far more likely to be cached by double-click time.
+const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
+// Grace period before showing the "正在加载目录" placeholder on a cache miss. A directory the user
+// navigates into is usually already in flight from hover/pointerdown prefetch and resolves within a
+// frame or two, so deferring the placeholder keeps navigation feeling instant; the placeholder only
+// appears if the load genuinely takes longer.
+const NAV_LOADING_PLACEHOLDER_DELAY_MS = 140;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
@@ -3148,7 +3156,16 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		state.items = [];
-		this.render();
+		// Defer the "正在加载目录" placeholder: the directory is usually already in flight from
+		// hover/pointerdown prefetch and resolves within a frame or two, so showing the old rows for
+		// a moment and then swapping straight to the loaded directory keeps navigation feeling
+		// instant. The placeholder only renders if the load genuinely takes longer than the grace
+		// period.
+		const placeholderTimer = setTimeout(() => {
+			if (this.paneRequestSeq[side] === requestId && this.paneStates[side].loading) {
+				this.render();
+			}
+		}, NAV_LOADING_PLACEHOLDER_DELAY_MS);
 		try {
 			const listing = await this.loadPaneDirectory(device, path, false);
 			if (this.paneRequestSeq[side] !== requestId || this.paneStates[side].path !== path) {
@@ -3163,6 +3180,7 @@ export class TurboFileEditor extends EditorPane {
 				this.statusMessage = `${device.name} 目录刷新失败：${message}`;
 			}
 		} finally {
+			clearTimeout(placeholderTimer);
 			if (this.paneRequestSeq[side] === requestId) {
 				state.loading = false;
 				this.render();
@@ -3497,9 +3515,9 @@ export class TurboFileEditor extends EditorPane {
 			this.updateRenderedSelection(side);
 		});
 		if ((item.directory || item.parent) && item.path) {
-			row.addEventListener('pointerenter', () => this.prefetchPaneDirectory(side, item.path));
+			row.addEventListener('pointerenter', () => this.prefetchPaneDirectory(side, item.path, 'hover'));
 			row.addEventListener('pointerdown', event => {
-				this.prefetchPaneDirectory(side, item.path);
+				this.prefetchPaneDirectory(side, item.path, 'commit');
 				this.maybeOpenPaneDirectoryOnFastDoubleClick(side, item, event, renaming);
 			});
 			// Drop a same-pane selection onto a folder row (or the ".." row) to move those items
@@ -6863,7 +6881,7 @@ export class TurboFileEditor extends EditorPane {
 		this.statusMessage = `${device.name} 已加载 ${state.items.filter(item => !item.parent).length} 项。`;
 	}
 
-	private prefetchPaneDirectory(side: 'left' | 'right', path: string | undefined): void {
+	private prefetchPaneDirectory(side: 'left' | 'right', path: string | undefined, intent: 'idle' | 'hover' | 'commit' = 'idle'): void {
 		if (!path) {
 			return;
 		}
@@ -6871,7 +6889,24 @@ export class TurboFileEditor extends EditorPane {
 		if (!device) {
 			return;
 		}
-		this.enqueuePaneDirectoryPrefetch(device, path);
+		if (intent === 'commit') {
+			// The user is clicking this directory: start loading it right away, bypassing the serial
+			// prefetch queue, so the data is in flight before the double-click fires.
+			this.prefetchPaneDirectoryNow(device, path);
+			return;
+		}
+		this.enqueuePaneDirectoryPrefetch(device, path, intent === 'hover');
+	}
+
+	private prefetchPaneDirectoryNow(device: TurboFileDevice, path: string): void {
+		if (this.getCachedPaneDirectory(device, path)) {
+			return;
+		}
+		const cacheKey = this.getPaneDirectoryCacheKey(device, path);
+		if (this.paneDirectoryInflight.has(cacheKey)) {
+			return;
+		}
+		void this.loadPaneDirectory(device, path, false, 'prefetch').catch(() => undefined);
 	}
 
 	private prefetchNeighborDirectories(device: TurboFileDevice, currentPath: string, items: TurboFileFileItem[]): void {
@@ -6884,7 +6919,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private enqueuePaneDirectoryPrefetch(device: TurboFileDevice, path: string): void {
+	private enqueuePaneDirectoryPrefetch(device: TurboFileDevice, path: string, prioritize = false): void {
 		if (this.getCachedPaneDirectory(device, path)) {
 			return;
 		}
@@ -6898,6 +6933,11 @@ export class TurboFileEditor extends EditorPane {
 			}
 			await this.loadPaneDirectory(device, path, false, 'prefetch').catch(() => undefined);
 		});
+		if (prioritize) {
+			// The mouse is hovering this directory: move it ahead of queued neighbour prefetches so
+			// it is the next one loaded.
+			this.paneDirectoryPrefetchQueue.prioritize(cacheKey);
+		}
 	}
 
 	private getPaneDirectoryCacheKey(device: TurboFileDevice, path: string): string {

@@ -27,6 +27,22 @@ export class TurboFileDirectoryPrefetchQueue {
 		this.drain();
 	}
 
+	/**
+	 * Move an already-queued key to the front so the directory the user is about to open is loaded
+	 * next, instead of waiting behind a backlog of neighbour prefetches. No-op if the key is not
+	 * currently queued (e.g. it is already running or finished).
+	 */
+	prioritize(key: string): void {
+		if (!key || !this.queuedKeys.has(key)) {
+			return;
+		}
+		const index = this.queue.findIndex(entry => entry.key === key);
+		if (index > 0) {
+			const [entry] = this.queue.splice(index, 1);
+			this.queue.unshift(entry);
+		}
+	}
+
 	whenIdle(): Promise<void> {
 		if (!this.active && !this.queue.length) {
 			return Promise.resolve();
