@@ -60,6 +60,7 @@ import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPre
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
+import { sortTurboFileItems, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
@@ -91,6 +92,8 @@ interface TurboFilePaneState {
 	selectionAnchorPath?: string;
 	scrollTop: number;
 	viewportHeight: number;
+	sortKey: TurboFileSortKey;
+	sortDirection: TurboFileSortDirection;
 }
 
 interface TurboFileRefreshPaneOptions {
@@ -448,6 +451,16 @@ interface TurboFileIconPath {
 	readonly d: string;
 	readonly fillRule?: 'evenodd';
 }
+const PANE_SORT_OPTIONS: readonly { readonly key: TurboFileSortKey; readonly label: string }[] = [
+	{ key: 'name', label: '名称' },
+	{ key: 'modified', label: '修改日期' },
+	{ key: 'type', label: '类型' },
+	{ key: 'size', label: '大小' }
+];
+const PANE_SORT_DIRECTION_OPTIONS: readonly { readonly direction: TurboFileSortDirection; readonly label: string }[] = [
+	{ direction: 'ascending', label: '递增' },
+	{ direction: 'descending', label: '递减' }
+];
 const IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
 const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKey; readonly label: string }[] = [
 	{ key: 'name', label: '名称' },
@@ -771,7 +784,9 @@ export class TurboFileEditor extends EditorPane {
 				loading: false,
 				selectedPaths: new Set(),
 				scrollTop: 0,
-				viewportHeight: 0
+				viewportHeight: 0,
+				sortKey: 'name',
+				sortDirection: 'ascending'
 			},
 			right: {
 				deviceId: LOCAL_WINDOWS_DEVICE_ID,
@@ -780,7 +795,9 @@ export class TurboFileEditor extends EditorPane {
 				loading: false,
 				selectedPaths: new Set(),
 				scrollTop: 0,
-				viewportHeight: 0
+				viewportHeight: 0,
+				sortKey: 'name',
+				sortDirection: 'ascending'
 			}
 		};
 	}
@@ -2698,6 +2715,7 @@ export class TurboFileEditor extends EditorPane {
 		toolbar.appendChild(toolbarTitle);
 		const toolbarAccent: TurboFileIconColor = side === 'left' ? 'primary' : 'success';
 		const gridAccent: TurboFileIconColor = side === 'left' ? 'info' : 'success';
+		this.appendPaneSortButton(toolbar, side, toolbarAccent);
 		this.appendToolbarButton(toolbar, Codicon.refresh, '刷新', () => this.refreshPane(side, { force: true }), 'arrow-clockwise', toolbarAccent);
 		this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', toolbarAccent);
 		this.appendToolbarButton(toolbar, Codicon.trash, '删除选中项', () => this.deleteSelected(side), 'trash', 'danger');
@@ -3297,6 +3315,27 @@ export class TurboFileEditor extends EditorPane {
 		return state.items;
 	}
 
+	private sortPaneItems(side: 'left' | 'right', items: readonly TurboFileFileItem[]): TurboFileFileItem[] {
+		const state = this.paneStates[side];
+		return sortTurboFileItems(items, state.sortKey, state.sortDirection);
+	}
+
+	private resortPaneItems(side: 'left' | 'right'): void {
+		const state = this.paneStates[side];
+		state.items = this.sortPaneItems(side, state.items);
+		this.fileListRenderedRange[side] = undefined;
+		this.rememberPaneDeviceSnapshot(side);
+		this.render();
+	}
+
+	private getPaneSortLabel(key: TurboFileSortKey): string {
+		return PANE_SORT_OPTIONS.find(option => option.key === key)?.label ?? '名称';
+	}
+
+	private getPaneSortDirectionLabel(direction: TurboFileSortDirection): string {
+		return PANE_SORT_DIRECTION_OPTIONS.find(option => option.direction === direction)?.label ?? '递增';
+	}
+
 	private handleFileListScroll(side: 'left' | 'right', list: HTMLElement): void {
 		const state = this.paneStates[side];
 		state.scrollTop = list.scrollTop;
@@ -3407,6 +3446,10 @@ export class TurboFileEditor extends EditorPane {
 				changed = true;
 			}
 			if (changed) {
+				if (state.sortKey === 'modified' || state.sortKey === 'size') {
+					state.items = this.sortPaneItems(side, state.items);
+					this.fileListRenderedRange[side] = undefined;
+				}
 				// Update only the visible rows in place — never this.render(). A full render rebuilds the
 				// scroll-container element, which mid-drag destroys the element the browser is tracking and
 				// drops the scrollbar drag (the thumb jumps back and you must re-grab). Re-rendering just
@@ -6434,6 +6477,16 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
+	private appendPaneSortButton(parent: HTMLElement, side: 'left' | 'right', iconColor: TurboFileIconColor): void {
+		const state = this.paneStates[side];
+		const button = document.createElement('button');
+		button.className = 'turbofile-toolbar-button turbofile-sort-button';
+		button.title = `排序：${this.getPaneSortLabel(state.sortKey)}，${this.getPaneSortDirectionLabel(state.sortDirection)}`;
+		button.appendChild(renderTurboFileSortIcon(iconColor));
+		button.addEventListener('click', event => this.showPaneSortMenu(side, event));
+		parent.appendChild(button);
+	}
+
 	private appendToolbarButton(parent: HTMLElement, icon: ThemeIcon, title: string, handler?: () => void, turboIcon?: TurboFileBootstrapIcon, iconColor?: TurboFileIconColor): void {
 		const button = document.createElement('button');
 		button.className = 'turbofile-toolbar-button';
@@ -6623,6 +6676,21 @@ export class TurboFileEditor extends EditorPane {
 		});
 	}
 
+	private showPaneSortMenu(side: 'left' | 'right', event: MouseEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+		this.setActiveFilePaneSide(side);
+		const anchor = new StandardMouseEvent(getWindow(event), event);
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => this.getPaneSortActions(side),
+			getActionViewItem: (action, options) => action.id.startsWith(`turbofile.sort.${side}.`)
+				? new ActionViewItem(null, action, { ...options, icon: true, label: true })
+				: undefined,
+			skipTelemetry: true
+		});
+	}
+
 	private showPreviewImageContextMenu(event: MouseEvent): void {
 		event.preventDefault();
 		event.stopPropagation();
@@ -6661,6 +6729,47 @@ export class TurboFileEditor extends EditorPane {
 			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
 			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side))
 		];
+	}
+
+	private getPaneSortActions(side: 'left' | 'right'): IAction[] {
+		const state = this.paneStates[side];
+		return [
+			...PANE_SORT_OPTIONS.map(option => this.menuAction(
+				`turbofile.sort.${side}.key.${option.key}`,
+				option.label,
+				'turbofile-sort-action',
+				() => this.setPaneSortKey(side, option.key),
+				true,
+				state.sortKey === option.key
+			)),
+			new Separator(),
+			...PANE_SORT_DIRECTION_OPTIONS.map(option => this.menuAction(
+				`turbofile.sort.${side}.direction.${option.direction}`,
+				option.label,
+				'turbofile-sort-action',
+				() => this.setPaneSortDirection(side, option.direction),
+				true,
+				state.sortDirection === option.direction
+			))
+		];
+	}
+
+	private setPaneSortKey(side: 'left' | 'right', key: TurboFileSortKey): void {
+		const state = this.paneStates[side];
+		if (state.sortKey === key) {
+			return;
+		}
+		state.sortKey = key;
+		this.resortPaneItems(side);
+	}
+
+	private setPaneSortDirection(side: 'left' | 'right', direction: TurboFileSortDirection): void {
+		const state = this.paneStates[side];
+		if (state.sortDirection === direction) {
+			return;
+		}
+		state.sortDirection = direction;
+		this.resortPaneItems(side);
 	}
 
 	private menuAction(id: string, label: string, icon: ThemeIcon | string, run: () => unknown, enabled = true, checked?: boolean): IAction {
@@ -6733,7 +6842,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			state.path = listing.path;
-			state.items = listing.items;
+			state.items = this.sortPaneItems(side, listing.items);
 			state.error = undefined;
 			this.setDeviceRuntimeStatus(device, 'online');
 			this.rememberPaneDevicePath(side, device, listing.path);
@@ -6873,7 +6982,7 @@ export class TurboFileEditor extends EditorPane {
 	private applyPaneDirectoryEntry(side: 'left' | 'right', device: TurboFileDevice, listing: TurboFileDirectoryCacheEntry): void {
 		const state = this.paneStates[side];
 		state.path = listing.path;
-		state.items = listing.items;
+		state.items = this.sortPaneItems(side, listing.items);
 		state.error = undefined;
 		state.loading = false;
 		this.setDeviceRuntimeStatus(device, 'online');
@@ -8494,16 +8603,7 @@ export class TurboFileEditor extends EditorPane {
 		if (item.path && state.items.some(existing => existing.path === item.path)) {
 			return;
 		}
-		const parents = state.items.filter(existing => existing.parent);
-		const entries = state.items.filter(existing => !existing.parent);
-		entries.push(item);
-		entries.sort((a, b) => {
-			if (!!a.directory !== !!b.directory) {
-				return a.directory ? -1 : 1;
-			}
-			return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-		});
-		state.items = [...parents, ...entries];
+		state.items = this.sortPaneItems(side, [...state.items, item]);
 		const device = this.getPaneDevice(side);
 		if (device) {
 			const cacheKey = this.getPaneDirectoryCacheKey(device, state.path);
@@ -8692,6 +8792,7 @@ export class TurboFileEditor extends EditorPane {
 		if (state.selectedPaths.delete(item.path)) {
 			state.selectedPaths.add(targetPath);
 		}
+		state.items = this.sortPaneItems(side, state.items);
 		this.fileListRenderedRange[side] = undefined;
 		const device = this.getPaneDevice(side);
 		if (device) {
@@ -8716,6 +8817,7 @@ export class TurboFileEditor extends EditorPane {
 		} else {
 			state.items.splice(Math.min(snapshot.index, state.items.length), 0, snapshot.originalItem);
 		}
+		state.items = this.sortPaneItems(side, state.items);
 		state.selectedPath = snapshot.selectedPath;
 		state.selectedPaths = new Set(snapshot.selectedPaths);
 		state.selectionAnchorPath = snapshot.selectionAnchorPath;
@@ -12255,7 +12357,7 @@ export class TurboFileEditor extends EditorPane {
 		const snapshot = this.getPaneDeviceSnapshot(side, device);
 		const cached = this.getCachedPaneDirectory(device, targetPath);
 		state.path = targetPath;
-		state.items = snapshot?.path === targetPath ? snapshot.items : cached?.items ?? [];
+		state.items = this.sortPaneItems(side, snapshot?.path === targetPath ? snapshot.items : cached?.items ?? []);
 		state.error = undefined;
 		this.resetPaneScroll(side);
 		if (snapshot?.path === targetPath) {
@@ -13092,6 +13194,33 @@ function toProviderFileType(type: TurboFileFileType): FileType {
 
 function createTurboFileProviderError(message: string, code: FileSystemProviderErrorCode): Error {
 	return createFileSystemProviderError(message, code);
+}
+
+function renderTurboFileSortIcon(color?: TurboFileIconColor): SVGElement {
+	const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	svg.setAttribute('viewBox', '0 0 16 16');
+	svg.setAttribute('aria-hidden', 'true');
+	svg.classList.add('turbofile-bi-icon');
+	if (color) {
+		svg.classList.add(`turbofile-text-${color}`);
+	}
+
+	const createPath = (d: string): SVGPathElement => {
+		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+		path.setAttribute('d', d);
+		path.setAttribute('fill', 'none');
+		path.setAttribute('stroke', 'currentColor');
+		path.setAttribute('stroke-linecap', 'round');
+		path.setAttribute('stroke-linejoin', 'round');
+		path.setAttribute('stroke-width', '1.6');
+		return path;
+	};
+
+	svg.appendChild(createPath('M4 13V3'));
+	svg.appendChild(createPath('M1.8 5.2 4 3l2.2 2.2'));
+	svg.appendChild(createPath('M12 3v10'));
+	svg.appendChild(createPath('M9.8 10.8 12 13l2.2-2.2'));
+	return svg;
 }
 
 function renderTurboFileIcon(icon: TurboFileBootstrapIcon, color?: TurboFileIconColor): SVGElement {

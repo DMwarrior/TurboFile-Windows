@@ -2204,6 +2204,65 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2367ef67' d='M5 3h14l2 14H3L5 3z'/%3E%3Cpath fill='%234bdc4f' d='M3 17h18v3c0 .9-.7 1.6-1.6 1.6H4.6C3.7 21.6 3 20.9 3 20v-3z'/%3E%3Cpath fill='%23182b19' d='M9.2 7.2h2v5h-2v-5zM13.6 7.2h2v5h-2v-5z'/%3E%3Ccircle fill='%23182b19' cx='8.3' cy='19.2' r='1.1'/%3E%3Ccircle fill='%23182b19' cx='12.2' cy='19.2' r='1.1'/%3E%3C/svg%3E");
 }
 
+.context-view.monaco-menu-container:has(.turbofile-sort-action) {
+	border: 1px solid rgba(129, 144, 160, 0.28);
+	border-radius: 10px;
+	background: #11151a;
+	box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
+	padding: 4px 0;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-menu,
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar {
+	background: transparent;
+	color: #f4f7fb;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar.vertical .action-label.turbofile-sort-action {
+	height: 34px;
+	margin: 2px 6px;
+	border-radius: 6px;
+	color: #f4f7fb !important;
+	background: transparent !important;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar.vertical .action-item.focused .action-label.turbofile-sort-action,
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar.vertical .action-label.turbofile-sort-action:hover {
+	background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar.vertical .action-label.separator {
+	border-bottom-color: rgba(255, 255, 255, 0.16);
+	margin: 5px 12px !important;
+}
+
+.context-view.monaco-menu-container:has(.turbofile-sort-action) .monaco-action-bar.vertical .menu-item-check {
+	display: none;
+}
+
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-sort-action {
+	display: inline-flex;
+	align-items: center;
+	min-width: 136px;
+	padding-left: 24px;
+	padding-right: 42px;
+	font-family: var(--vscode-font-family);
+	font-size: 14px;
+	font-weight: 500;
+}
+
+.monaco-menu .monaco-action-bar.vertical .action-label.turbofile-sort-action.checked::after {
+	content: "";
+	display: inline-block;
+	width: 5px;
+	height: 10px;
+	margin-left: auto;
+	margin-right: 3px;
+	border-right: 2px solid #8a8f98;
+	border-bottom: 2px solid #8a8f98;
+	transform: rotate(45deg) translateY(-1px);
+}
+
 .turbofile-pathbar strong,
 .turbofile-path-display {
 	min-width: 0;
