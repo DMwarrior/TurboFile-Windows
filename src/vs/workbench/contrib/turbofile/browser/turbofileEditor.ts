@@ -423,6 +423,11 @@ const TURBOFILE_REMOTE_DOCUMENT_SCHEME = 'turbofile-remote';
 const FILE_LIST_ROW_HEIGHT = 30;
 const FILE_LIST_OVERSCAN_ROWS = 24;
 const FILE_LIST_DEFAULT_VIEWPORT_HEIGHT = 720;
+// Lazy size/date enrichment of remote rows is best-effort over SSH; a single stat round trip can fail
+// transiently (connection contention, a momentary hiccup) and leave the visible rows blank. Retry a
+// few times with backoff so size/date reliably appear instead of staying empty until the user scrolls.
+const REMOTE_ENRICH_RETRY_BASE_MS = 350;
+const REMOTE_ENRICH_MAX_RETRIES = 6;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
 const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
@@ -714,6 +719,8 @@ export class TurboFileEditor extends EditorPane {
 	// rows scrolled into view while a batch was in flight so they get picked up right after.
 	private readonly remoteEnrichInFlight: Record<'left' | 'right', boolean> = { left: false, right: false };
 	private readonly remoteEnrichAgain: Record<'left' | 'right', boolean> = { left: false, right: false };
+	private readonly remoteEnrichRetryHandle: Record<'left' | 'right', number | undefined> = { left: undefined, right: undefined };
+	private readonly remoteEnrichRetryState: Record<'left' | 'right', { path: string; count: number } | undefined> = { left: undefined, right: undefined };
 	private readonly paneDirectoryCache = new Map<string, TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryInflight = new TurboFileDirectoryInflightTracker<TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryPrefetchQueue = new TurboFileDirectoryPrefetchQueue(PANE_DIRECTORY_PREFETCH_CONCURRENCY);
@@ -967,6 +974,12 @@ export class TurboFileEditor extends EditorPane {
 		this.clearFileListScrollRaf('right');
 		this.clearFileListRestoreRaf('left');
 		this.clearFileListRestoreRaf('right');
+		for (const side of ['left', 'right'] as const) {
+			if (this.remoteEnrichRetryHandle[side] !== undefined) {
+				getWindow(this.container).clearTimeout(this.remoteEnrichRetryHandle[side]);
+				this.remoteEnrichRetryHandle[side] = undefined;
+			}
+		}
 		this.releaseImageGridStateImages(this.imageGridState);
 		this.disposeImageGridObserver();
 		this.clearImageGridScrollTimer();
@@ -3510,6 +3523,8 @@ export class TurboFileEditor extends EditorPane {
 				changed = true;
 			}
 			if (changed) {
+				// Progress was made: give the directory a fresh retry budget for any rows still pending.
+				this.remoteEnrichRetryState[side] = undefined;
 				if (state.sortKey === 'modified' || state.sortKey === 'size') {
 					state.items = this.sortPaneItems(side, state.items);
 					this.fileListRenderedRange[side] = undefined;
@@ -3521,14 +3536,53 @@ export class TurboFileEditor extends EditorPane {
 				this.rerenderFileListSliceInPlace(side);
 			}
 		} catch {
-			// Enrichment is best-effort; rows keep their blank size/date if it fails.
+			// Enrichment is best-effort; a transient failure is retried below instead of leaving the rows blank.
 		} finally {
 			this.remoteEnrichInFlight[side] = false;
 			if (this.remoteEnrichAgain[side]) {
 				this.remoteEnrichAgain[side] = false;
 				this.scheduleEnrichVisibleRemoteRows(side);
+			} else {
+				// If any visible row is still missing size/date (a failed or partial stat), retry with
+				// backoff so the columns reliably fill in rather than staying blank.
+				this.scheduleRemoteEnrichRetryIfNeeded(side, path);
 			}
 		}
+	}
+
+	private scheduleRemoteEnrichRetryIfNeeded(side: 'left' | 'right', path: string): void {
+		const state = this.paneStates[side];
+		const device = this.getPaneDevice(side);
+		if (state.path !== path || !device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
+			this.remoteEnrichRetryState[side] = undefined;
+			return;
+		}
+		const range = this.getFileListRange(state);
+		const stillPending = this.getVisibleFileItems(state)
+			.slice(range.startIndex, range.endIndex)
+			.some(item => item.attrsPending && !!item.path && !item.parent);
+		if (!stillPending) {
+			this.remoteEnrichRetryState[side] = undefined;
+			return;
+		}
+		const current = this.remoteEnrichRetryState[side];
+		const count = current && current.path === path ? current.count : 0;
+		if (count >= REMOTE_ENRICH_MAX_RETRIES) {
+			// Give up after a few attempts: the remote likely cannot stat these entries at all.
+			return;
+		}
+		this.remoteEnrichRetryState[side] = { path, count: count + 1 };
+		const delay = REMOTE_ENRICH_RETRY_BASE_MS * Math.pow(2, Math.min(count, 4));
+		const targetWindow = getWindow(this.container);
+		if (this.remoteEnrichRetryHandle[side] !== undefined) {
+			targetWindow.clearTimeout(this.remoteEnrichRetryHandle[side]);
+		}
+		this.remoteEnrichRetryHandle[side] = targetWindow.setTimeout(() => {
+			this.remoteEnrichRetryHandle[side] = undefined;
+			if (this.paneStates[side].path === path) {
+				this.scheduleEnrichVisibleRemoteRows(side);
+			}
+		}, delay);
 	}
 
 	private resetPaneScroll(side: 'left' | 'right'): void {
