@@ -13,18 +13,18 @@ suite('TurboFileTitlebar', () => {
 			getTurboFileTitlebarUpdateActionKind(State.Idle(UpdateType.Setup)),
 			getTurboFileTitlebarUpdateActionKind(State.CheckingForUpdates(false)),
 			getTurboFileTitlebarUpdateActionKind(State.AvailableForDownload({ version: '1.2.0' })),
-			getTurboFileTitlebarUpdateActionKind(State.Downloading({ version: '1.2.0' }, true, false)),
+			getTurboFileTitlebarUpdateActionKind(State.Downloading({ version: '1.2.0' }, true, false, 50, 100)),
 			getTurboFileTitlebarUpdateActionKind(State.Downloaded({ version: '1.2.0' }, true, false)),
 			getTurboFileTitlebarUpdateActionKind(State.Updating({ version: '1.2.0' }, true)),
 			getTurboFileTitlebarUpdateActionKind(State.Ready({ version: '1.2.0' }, true, false)),
 			getTurboFileTitlebarUpdateActionKind({ type: StateType.Uninitialized })
 		], [
 			'hidden',
-			'hidden',
+			'checking',
 			'download',
-			'hidden',
+			'downloading',
 			'install',
-			'hidden',
+			'installing',
 			'restart',
 			'hidden'
 		]);

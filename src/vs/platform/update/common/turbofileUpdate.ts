@@ -25,6 +25,21 @@ export interface ITurboFileUpdateResolveOptions {
 	readonly allowPrerelease?: boolean;
 }
 
+export interface ITurboFileUpdateManifestPlatform {
+	readonly url?: string;
+	readonly sha256?: string;
+	readonly sha256hash?: string;
+	readonly signature?: string;
+}
+
+export interface ITurboFileUpdateManifest {
+	readonly version?: string;
+	readonly name?: string;
+	readonly notes?: string;
+	readonly pub_date?: string;
+	readonly platforms?: Record<string, ITurboFileUpdateManifestPlatform>;
+}
+
 interface IParsedVersion {
 	readonly major: number;
 	readonly minor: number;
@@ -125,6 +140,31 @@ export function resolveTurboFileUpdateFromGitHubRelease(release: ITurboFileGitHu
 	};
 }
 
+export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateManifest, currentVersion: string, options: ITurboFileUpdateResolveOptions = {}): IUpdate | undefined {
+	const version = normalizeTurboFileVersion(manifest.version) ?? normalizeTurboFileVersion(manifest.name);
+	const normalizedCurrentVersion = normalizeTurboFileVersion(currentVersion);
+	if (!version || !normalizedCurrentVersion || compareTurboFileVersions(version, normalizedCurrentVersion) <= 0) {
+		return undefined;
+	}
+
+	const platform = pickManifestPlatform(manifest.platforms, options.arch);
+	if (!platform?.url) {
+		return undefined;
+	}
+
+	const update: IUpdate = {
+		version,
+		productVersion: version,
+		url: platform.url,
+	};
+	const sha256hash = platform.sha256hash ?? platform.sha256;
+	if (sha256hash) {
+		update.sha256hash = sha256hash;
+	}
+
+	return update;
+}
+
 function parseTurboFileVersion(version: string): IParsedVersion | undefined {
 	const normalized = normalizeTurboFileVersion(version);
 	if (!normalized) {
@@ -190,6 +230,35 @@ function isInstallerAsset(name: string, pattern: RegExp | undefined): boolean {
 	}
 
 	return pattern ? pattern.test(name) : true;
+}
+
+function pickManifestPlatform(platforms: Record<string, ITurboFileUpdateManifestPlatform> | undefined, arch: string | undefined): ITurboFileUpdateManifestPlatform | undefined {
+	if (!platforms) {
+		return undefined;
+	}
+
+	const keys = getManifestPlatformKeys(arch);
+	for (const key of keys) {
+		const platform = platforms[key];
+		if (platform?.url) {
+			return platform;
+		}
+	}
+
+	return undefined;
+}
+
+function getManifestPlatformKeys(arch: string | undefined): readonly string[] {
+	switch (arch?.toLowerCase()) {
+		case 'arm64':
+			return ['windows-arm64', 'windows-aarch64', 'win32-arm64'];
+		case 'ia32':
+		case 'x86':
+			return ['windows-x86', 'windows-ia32', 'windows-i686', 'win32-ia32'];
+		case 'x64':
+		default:
+			return ['windows-x64', 'windows-x86_64', 'win32-x64', 'win64'];
+	}
 }
 
 function scoreAsset(name: string, arch: string | undefined): number {

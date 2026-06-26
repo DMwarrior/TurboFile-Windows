@@ -1,0 +1,31 @@
+name: TurboFile Update Manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy-prefix:
+        description: Optional download proxy prefix for update-proxy.json
+        required: false
+        type: string
+      sha256:
+        description: Optional installer SHA256 override
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: Publish update manifest
+        run: npm run turbofile:update-manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TURBOFILE_UPDATE_PROXY_PREFIX: ${{ inputs.proxy-prefix }}
+          TURBOFILE_UPDATE_SHA256: ${{ inputs.sha256 }}

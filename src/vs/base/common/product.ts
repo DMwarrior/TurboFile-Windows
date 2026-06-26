@@ -95,8 +95,10 @@ export interface IProductConfiguration {
 	readonly downloadUrl?: string;
 	readonly updateUrl?: string;
 	readonly turbofileUpdates?: {
-		readonly owner: string;
-		readonly repo: string;
+		readonly owner?: string;
+		readonly repo?: string;
+		readonly manifestUrl?: string;
+		readonly manifestUrls?: readonly string[];
 		readonly latestReleaseUrl?: string;
 		readonly assetNamePattern?: string;
 		readonly allowPrerelease?: boolean;

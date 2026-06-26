@@ -33,9 +33,14 @@ import { IProductService } from '../../product/common/productService.js';
 import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
-import { ITurboFileGitHubRelease, resolveTurboFileUpdateFromGitHubRelease } from '../common/turbofileUpdate.js';
+import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest } from '../common/turbofileUpdate.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
+
+interface ITurboFileUpdateCheckResult {
+	readonly checked: boolean;
+	readonly update?: IUpdate;
+}
 
 interface IAvailableUpdate {
 	packagePath: string;
@@ -179,7 +184,35 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 	private isTurboFileGitHubUpdatesEnabled(): boolean {
 		const config = this.productService.turbofileUpdates;
-		return !!config?.owner && !!config.repo;
+		return !!config && (
+			(!!config.owner && !!config.repo) ||
+			!!config.manifestUrl ||
+			!!config.manifestUrls?.length
+		);
+	}
+
+	private getTurboFileUpdateManifestUrls(): readonly string[] {
+		const config = this.productService.turbofileUpdates;
+		if (!config) {
+			return [];
+		}
+
+		const urls = new Set<string>();
+		for (const url of config.manifestUrls ?? []) {
+			if (url) {
+				urls.add(url);
+			}
+		}
+		if (config.manifestUrl) {
+			urls.add(config.manifestUrl);
+		}
+		if (config.owner && config.repo) {
+			const releaseUrl = `https://github.com/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/releases/download/updater`;
+			urls.add(`${releaseUrl}/update-proxy.json`);
+			urls.add(`${releaseUrl}/update.json`);
+		}
+
+		return Array.from(urls);
 	}
 
 	private buildTurboFileGitHubReleaseUrl(): string | undefined {
@@ -195,6 +228,13 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		return {
 			...(getUpdateRequestHeaders(this.productService.version) ?? {}),
 			Accept: 'application/vnd.github+json',
+		};
+	}
+
+	private getTurboFileManifestRequestHeaders(): Record<string, string> {
+		return {
+			...(getUpdateRequestHeaders(this.productService.version) ?? {}),
+			Accept: 'application/json',
 		};
 	}
 
@@ -341,27 +381,12 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	private doCheckForTurboFileGitHubUpdates(explicit: boolean, pendingVersion?: string): void {
-		const url = this.buildTurboFileGitHubReleaseUrl();
-		if (!url) {
-			this.setState(State.Idle(getUpdateType(), undefined, explicit || undefined));
-			return;
-		}
-
 		if (this.state.type !== StateType.Overwriting) {
 			this.setState(State.CheckingForUpdates(explicit));
 		}
 
-		const headers = this.getTurboFileGitHubRequestHeaders();
-		this.requestService.request({ url, headers, callSite: 'updateService.win32.checkTurboFileGitHubUpdates' }, CancellationToken.None)
-			.then<ITurboFileGitHubRelease | null>(context => context.res.statusCode === 404 ? Promise.resolve(null) : asJson<ITurboFileGitHubRelease>(context))
-			.then(release => {
-				const config = this.productService.turbofileUpdates;
-				const update = release && config ? resolveTurboFileUpdateFromGitHubRelease(release, pendingVersion ?? this.productService.version, {
-					allowPrerelease: config.allowPrerelease,
-					assetNamePattern: config.assetNamePattern,
-					arch: process.arch,
-				}) : undefined;
-
+		this.resolveTurboFileUpdate(pendingVersion ?? this.productService.version, CancellationToken.None)
+			.then(update => {
 				if (!update) {
 					if (this.state.type === StateType.Overwriting) {
 						this._overwrite = false;
@@ -389,9 +414,80 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 			});
 	}
 
+	private async resolveTurboFileUpdate(currentVersion: string, token: CancellationToken): Promise<IUpdate | undefined> {
+		const manifestResult = await this.resolveTurboFileUpdateFromManifestUrls(currentVersion, token);
+		if (manifestResult.checked) {
+			return manifestResult.update;
+		}
+
+		return this.resolveTurboFileUpdateFromGitHubReleaseUrl(currentVersion, token);
+	}
+
+	private async resolveTurboFileUpdateFromManifestUrls(currentVersion: string, token: CancellationToken): Promise<ITurboFileUpdateCheckResult> {
+		const urls = this.getTurboFileUpdateManifestUrls();
+		if (!urls.length) {
+			return { checked: false };
+		}
+
+		const config = this.productService.turbofileUpdates;
+		for (const url of urls) {
+			try {
+				const context = await this.requestService.request({ url, headers: this.getTurboFileManifestRequestHeaders(), callSite: 'updateService.win32.checkTurboFileManifestUpdates' }, token);
+				if (context.res.statusCode === 404) {
+					continue;
+				}
+				if (context.res.statusCode && context.res.statusCode >= 400) {
+					throw new Error(`TurboFile update manifest returned HTTP ${context.res.statusCode}`);
+				}
+
+				const manifest = await asJson<ITurboFileUpdateManifest>(context);
+				if (!manifest) {
+					continue;
+				}
+				return {
+					checked: true,
+					update: resolveTurboFileUpdateFromManifest(manifest, currentVersion, {
+						allowPrerelease: config?.allowPrerelease,
+						assetNamePattern: config?.assetNamePattern,
+						arch: process.arch,
+					}),
+				};
+			} catch (error) {
+				this.logService.warn(`update#resolveTurboFileUpdateFromManifestUrls(): failed to read ${url}`);
+				this.logService.warn(error);
+			}
+		}
+
+		return { checked: false };
+	}
+
+	private async resolveTurboFileUpdateFromGitHubReleaseUrl(currentVersion: string, token: CancellationToken): Promise<IUpdate | undefined> {
+		const url = this.buildTurboFileGitHubReleaseUrl();
+		const config = this.productService.turbofileUpdates;
+		if (!url || !config) {
+			return undefined;
+		}
+
+		const context = await this.requestService.request({ url, headers: this.getTurboFileGitHubRequestHeaders(), callSite: 'updateService.win32.checkTurboFileGitHubUpdates' }, token);
+		const release = context.res.statusCode === 404 ? null : await asJson<ITurboFileGitHubRelease>(context);
+		return release ? resolveTurboFileUpdateFromGitHubRelease(release, currentVersion, {
+			allowPrerelease: config.allowPrerelease,
+			assetNamePattern: config.assetNamePattern,
+			arch: process.arch,
+		}) : undefined;
+	}
+
 	protected override async doDownloadUpdate(state: AvailableForDownload): Promise<void> {
 		if (this.isTurboFileGitHubUpdatesEnabled() && state.update.url) {
-			await this.downloadAndPrepareUpdate(state.update, true);
+			try {
+				await this.downloadAndPrepareUpdate(state.update, true);
+			} catch (err) {
+				this.telemetryService.publicLog2<{ messageHash: string }, UpdateErrorClassification>('update:error', { messageHash: String(hash(String(err))) });
+				this.logService.error('update#doDownloadUpdate(): failed to download TurboFile update');
+				this.logService.error(err);
+				const message = err instanceof Error ? err.message : String(err);
+				this.setState(State.Idle(getUpdateType(), message));
+			}
 			return;
 		}
 
@@ -688,24 +784,11 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 			return super.isLatestVersion(commit, token);
 		}
 
-		const url = this.buildTurboFileGitHubReleaseUrl();
-		const config = this.productService.turbofileUpdates;
-		if (!url || !config) {
-			return undefined;
-		}
-
 		try {
-			const context = await this.requestService.request({ url, headers: this.getTurboFileGitHubRequestHeaders(), callSite: 'updateService.win32.isLatestTurboFileGitHubVersion' }, token);
-			const release = context.res.statusCode === 404 ? null : await asJson<ITurboFileGitHubRelease>(context);
-			const update = release ? resolveTurboFileUpdateFromGitHubRelease(release, commit ?? this.productService.version, {
-				allowPrerelease: config.allowPrerelease,
-				assetNamePattern: config.assetNamePattern,
-				arch: process.arch,
-			}) : undefined;
-
+			const update = await this.resolveTurboFileUpdate(commit ?? this.productService.version, token);
 			return !update;
 		} catch (error) {
-			this.logService.error('update#isLatestVersion(): failed to check TurboFile GitHub release');
+			this.logService.error('update#isLatestVersion(): failed to check TurboFile update');
 			this.logService.error(error);
 			return undefined;
 		}

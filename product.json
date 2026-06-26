@@ -12,7 +12,11 @@
 	"updateUrl": "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/latest",
 	"turbofileUpdates": {
 		"owner": "DMwarrior",
-		"repo": "TurboFile-Windows"
+		"repo": "TurboFile-Windows",
+		"manifestUrls": [
+			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update-proxy.json",
+			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update.json"
+		]
 	},
 	"serverLicenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
 	"serverGreeting": [],

@@ -37,7 +37,7 @@ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickin
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
-import { IUpdateService } from '../../../../platform/update/common/update.js';
+import { IUpdateService, StateType } from '../../../../platform/update/common/update.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { DEFAULT_EDITOR_ASSOCIATION, IEditorOpenContext, IUntypedFileEditorInput } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
@@ -1589,16 +1589,92 @@ export class TurboFileEditor extends EditorPane {
 	private createTitlebarUpdateButton(kind: TurboFileTitlebarUpdateActionKind): HTMLButtonElement {
 		const button = $('button.turbofile-titlebar-update-button') as HTMLButtonElement;
 		button.type = 'button';
-		const title = kind === 'download' ? '下载更新' : kind === 'install' ? '安装更新' : '重启以更新';
+		button.classList.add(`turbofile-titlebar-update-button-${kind}`);
+		const title = this.getTitlebarUpdateTitle(kind);
 		button.title = title;
 		button.setAttribute('aria-label', title);
-		button.appendChild(renderIcon(Codicon.cloudDownload));
+		button.disabled = !this.canRunTitlebarUpdateAction(kind);
+		button.appendChild(renderIcon(this.getTitlebarUpdateIcon(kind)));
+		const label = this.getTitlebarUpdateLabel(kind);
+		if (label) {
+			button.appendChild($('span.turbofile-titlebar-update-label', undefined, label));
+		}
 		button.addEventListener('click', event => {
 			event.preventDefault();
 			event.stopPropagation();
-			void this.runTitlebarUpdateAction(kind);
+			if (this.canRunTitlebarUpdateAction(kind)) {
+				void this.runTitlebarUpdateAction(kind);
+			}
 		});
 		return button;
+	}
+
+	private getTitlebarUpdateTitle(kind: TurboFileTitlebarUpdateActionKind): string {
+		switch (kind) {
+			case 'checking':
+				return 'Checking for updates';
+			case 'download':
+				return 'Download update';
+			case 'downloading':
+				return 'Downloading update';
+			case 'install':
+				return 'Install update';
+			case 'installing':
+				return 'Installing update';
+			case 'restart':
+				return 'Restart to update';
+			default:
+				return 'Update';
+		}
+	}
+
+	private getTitlebarUpdateIcon(kind: TurboFileTitlebarUpdateActionKind): ThemeIcon {
+		switch (kind) {
+			case 'checking':
+			case 'installing':
+				return Codicon.sync;
+			case 'downloading':
+				return Codicon.loading;
+			case 'install':
+				return Codicon.check;
+			default:
+				return Codicon.cloudDownload;
+		}
+	}
+
+	private getTitlebarUpdateLabel(kind: TurboFileTitlebarUpdateActionKind): string {
+		switch (kind) {
+			case 'checking':
+				return '...';
+			case 'downloading':
+				return this.getTitlebarDownloadProgressLabel();
+			case 'installing':
+				return this.getTitlebarInstallProgressLabel();
+			default:
+				return '';
+		}
+	}
+
+	private getTitlebarDownloadProgressLabel(): string {
+		const state = this.updateService.state;
+		if (state.type === StateType.Downloading && typeof state.downloadedBytes === 'number' && typeof state.totalBytes === 'number' && state.totalBytes > 0) {
+			return `${Math.max(0, Math.min(100, Math.floor((state.downloadedBytes / state.totalBytes) * 100)))}%`;
+		}
+
+		return '...';
+	}
+
+	private getTitlebarInstallProgressLabel(): string {
+		const state = this.updateService.state;
+		if (state.type === StateType.Updating && typeof state.currentProgress === 'number' && typeof state.maxProgress === 'number' && state.maxProgress > 0) {
+			return `${Math.max(0, Math.min(100, Math.floor((state.currentProgress / state.maxProgress) * 100)))}%`;
+		}
+
+		return '...';
+	}
+
+	private canRunTitlebarUpdateAction(kind: TurboFileTitlebarUpdateActionKind): boolean {
+		return kind === 'download' || kind === 'install' || kind === 'restart';
 	}
 
 	private createTitlebarMenuButton(label: string, onClick: (button: HTMLElement) => void): HTMLButtonElement {
