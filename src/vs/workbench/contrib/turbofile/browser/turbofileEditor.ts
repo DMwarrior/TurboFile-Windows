@@ -1100,6 +1100,17 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		// While the single-image preview is open, Left/Right always step between images. Handle it here
+		// in the capture-phase workbench handler — not only on the overlay's own keydown — so it works
+		// no matter which element holds focus (the overlay easily loses focus to a button, the canvas, or
+		// the file list behind it, which is why the arrows previously appeared to do nothing).
+		if (state.previewVisible && !this.isEditableKeyboardTarget(event.target) && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.moveImageGridPreview(event.key === 'ArrowLeft' ? -1 : 1);
+			return true;
+		}
+
 		const target = event.target;
 		if (!this.isKeyboardEventFromTurboFileSurface(target) || this.isEditableKeyboardTarget(target)) {
 			return false;
