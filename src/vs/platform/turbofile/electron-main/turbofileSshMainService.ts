@@ -3647,6 +3647,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	async movePathsIntoDirectory(sources: readonly ITurboFileTransferEndpoint[], targetDirectory: string): Promise<ITurboFileFileOperationResult> {
+		const targets = sources.filter(endpoint => !!endpoint.path);
+		if (!targets.length) {
+			return { ok: true, message: 'Nothing to move.' };
+		}
+		const first = targets[0];
+		const windowsPath = looksLikeWindowsPath(targetDirectory) || looksLikeWindowsPath(first.path);
+
+		try {
+			if (first.kind === 'local') {
+				// Local moves are metadata-only and have no network cost; run them in parallel.
+				await Promise.all(targets.map(endpoint => this.moveLocalPathNative(endpoint.path, joinRemotePath(targetDirectory, getTransferName(endpoint.path)))));
+			} else if (windowsPath) {
+				// Windows remote: move each into the directory. Rare path, kept simple for correctness.
+				for (const endpoint of targets) {
+					await this.moveRemotePathNative(endpoint, joinRemotePath(targetDirectory, getTransferName(endpoint.path)));
+				}
+			} else {
+				// POSIX remote: a single round trip moves the whole selection. The NUL-delimited sources
+				// are fed to `xargs -0`, which runs `mv -- <files> <dir>` server-side (batching as needed
+				// to stay under the argument-length limit), so a 1000-file move is one near-instant rename
+				// instead of 1000 separate SSH round trips. `mv` drops each file into <dir> under its own
+				// name, so no per-file target path needs computing.
+				const dir = quotePosixShellArg(targetDirectory);
+				const command = `mkdir -p -- ${dir} && LC_ALL=C xargs -0 -r sh -c 'mv -f -- "$@" "$0"' ${dir}`;
+				const input = Buffer.from(`${targets.map(endpoint => endpoint.path).join('\0')}\0`, 'utf8');
+				await this.withSshClient(first, client => this.execRemoteWithInput(client, command, input, { timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS }));
+			}
+			this.clearRemoteDirectoryListingCache(first);
+			this.clearRemoteDirectoryListingCache(first, targetDirectory);
+			return { ok: true, message: 'Paths moved.' };
+		} catch (error) {
+			return { ok: false, message: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
 	async calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult> {
 		try {
 			const size = endpoint.kind === 'local'

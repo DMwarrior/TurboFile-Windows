@@ -8043,17 +8043,22 @@ export class TurboFileEditor extends EditorPane {
 		const failures: string[] = [];
 		let completed = 0;
 		let totalBytes = 0;
-		for (const [index, sourceItem] of sourceItems.entries()) {
-			const transferItem = task.transferItems[index];
+		for (const [index, transferItem] of task.transferItems.entries()) {
 			task.activeTransferItemIndex = index;
 			transferItem.status = 'running';
 			transferItem.startedAt = Date.now();
 			transferItem.progress = 0;
 			transferItem.strategy = strategy;
+		}
+		this.updateTask(task, batch ? `正在移动 ${sourceItems.length} 项到 ${targetLabel}` : `正在移动：${sourceItems[0].name}`, 45);
+		// A same-device move is a metadata-only rename: hand the whole selection to one batched
+		// movePathsIntoDirectory (POSIX remote: a single `xargs -0 mv` round trip) instead of issuing one
+		// renamePath round trip per item, which made dragging many files feel like a slow per-file copy.
+		const endpoints = await Promise.all(sourceItems.map(item => this.toTransferEndpoint(device, item.path!)));
+		const result = await this.sshService.movePathsIntoDirectory(endpoints, targetDir);
+		for (const [index, sourceItem] of sourceItems.entries()) {
+			const transferItem = task.transferItems[index];
 			const itemBytes = Math.max(sourceItem.rawSize, transferItem.totalBytes, 0);
-			const targetPath = joinPanePath(targetDir, sourceItem.name, windowsPath);
-			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
-			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path!), targetPath);
 			if (result.ok) {
 				completed++;
 				totalBytes += itemBytes;
@@ -8062,7 +8067,6 @@ export class TurboFileEditor extends EditorPane {
 				transferItem.transferredBytes = itemBytes;
 				transferItem.totalBytes = Math.max(itemBytes, transferItem.totalBytes);
 				transferItem.endedAt = Date.now();
-				this.invalidatePaneDirectoryCaches(device, refreshPaths);
 			} else {
 				transferItem.status = 'error';
 				transferItem.error = result.message;
@@ -8070,6 +8074,7 @@ export class TurboFileEditor extends EditorPane {
 				failures.push(`${sourceItem.name}: ${result.message}`);
 			}
 		}
+		this.invalidatePaneDirectoryCaches(device, refreshPaths);
 
 		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
 		this.invalidatePaneDirectoryCaches(device, refreshPaths);

@@ -46,6 +46,12 @@ export interface ITurboFileSshService {
 	 */
 	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
+	/**
+	 * Moves many paths into a single target directory in as few round trips as possible (POSIX remote:
+	 * one `xargs -0 mv` — a metadata-only rename, no data copied). All sources must be on the same
+	 * device as the target directory.
+	 */
+	movePathsIntoDirectory(sources: readonly ITurboFileTransferEndpoint[], targetDirectory: string): Promise<ITurboFileFileOperationResult>;
 	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
