@@ -38,4 +38,23 @@ suite('TurboFileFileSort', () => {
 			['..', 'docs', 'alpha.png', 'beta.txt', 'zeta.txt']
 		]);
 	});
+
+	test('applies the same sort key to folders as to files (folders ordered among themselves by the key)', () => {
+		// Folders stay grouped ahead of files, but within the folder group they obey the same active
+		// sort key/direction as the files do - not a separate name-only rule.
+		const ordered = (key: TurboFileSortKey, direction: TurboFileSortDirection): string[] => sortTurboFileItems([
+			item('older-big', { directory: true, type: 'directory', rawModified: 100, rawSize: 999 }),
+			item('newer-small', { directory: true, type: 'directory', rawModified: 500, rawSize: 1 }),
+			item('file-a.txt', { rawModified: 300, rawSize: 50 }),
+			item('..', { parent: true, type: 'directory' })
+		], key, direction).map(entry => entry.name);
+
+		assert.deepStrictEqual([
+			ordered('modified', 'ascending'),
+			ordered('modified', 'descending')
+		], [
+			['..', 'older-big', 'newer-small', 'file-a.txt'],
+			['..', 'newer-small', 'older-big', 'file-a.txt']
+		]);
+	});
 });

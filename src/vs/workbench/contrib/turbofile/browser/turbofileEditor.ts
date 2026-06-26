@@ -125,6 +125,24 @@ const turboFileTerminalPageByTerminalId = new Map<number, string>();
 const turboFileLastActiveTerminalByPageId = new Map<string, number>();
 const turboFileTerminalPanelHiddenByPageId = new Set<string>();
 
+interface TurboFilePaneSelectionSide {
+	readonly deviceId: string;
+	readonly path: string;
+	readonly sortKey: TurboFileSortKey;
+	readonly sortDirection: TurboFileSortDirection;
+}
+
+interface TurboFilePaneSelectionSnapshot {
+	readonly left: TurboFilePaneSelectionSide;
+	readonly right: TurboFilePaneSelectionSide;
+}
+
+// Per-page (editor input) left/right device + path + sort selection. Held at module scope so it
+// survives an editor PANE instance being disposed and reused for another page - which is exactly
+// what merging two editor groups does. Without this, a merged page would render with the receiving
+// group's previous page selection (e.g. its server), instead of its own.
+const turboFilePaneSelectionByPageId = new Map<string, TurboFilePaneSelectionSnapshot>();
+
 interface TurboFileImageGridImage {
 	readonly item: TurboFileFileItem;
 	thumbnailContent: string;
@@ -866,7 +884,23 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	override async setInput(input: TurboFileEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		const previousInput = this.currentInput;
+		const isPageSwitch = !!previousInput && previousInput.instanceId !== input.instanceId;
+		if (isPageSwitch) {
+			// Save the page we are leaving before its selection is overwritten, then give the incoming
+			// page its own selection back. This is what makes a page keep its server/path/sort after a
+			// group merge or tab switch instead of showing the previous page's.
+			this.capturePaneSelectionForCurrentPage();
+		}
 		this.currentInput = input;
+		if (isPageSwitch) {
+			if (!this.restorePaneSelectionForPage(input.instanceId)) {
+				this.resetPaneSelectionToDefault();
+			}
+			this.refreshBothPanesAfterPageRestore();
+		}
+		// Record the incoming page's current selection so even an untouched page can be restored later.
+		this.capturePaneSelectionForCurrentPage();
 		input.setCancelRunningTasksForClose(() => this.cancelRunningTasksForClose());
 		this.updateInputRunningTaskCount();
 		await super.setInput(input, options, context, token);
@@ -874,6 +908,18 @@ export class TurboFileEditor extends EditorPane {
 			void this.syncActiveTerminalForCurrentPage();
 			this.notifyActivePageChanged();
 			this.render();
+		}
+	}
+
+	private refreshBothPanesAfterPageRestore(): void {
+		for (const side of ['left', 'right'] as const) {
+			const state = this.paneStates[side];
+			++this.paneRequestSeq[side];
+			state.items = [];
+			state.error = undefined;
+			this.resetPaneScroll(side);
+			this.clearPaneSelection(side);
+			void this.refreshPane(side, { force: false, silent: true });
 		}
 	}
 
@@ -3164,13 +3210,16 @@ export class TurboFileEditor extends EditorPane {
 
 		const state = this.paneStates[side];
 		const requestId = ++this.paneRequestSeq[side];
+		const needsAttributes = this.paneSortNeedsAttributes(side);
 		const cached = this.getCachedPaneDirectory(device, path);
 		state.path = path;
 		state.error = undefined;
 		state.loading = true;
 		this.resetPaneScroll(side);
 		this.clearPaneSelection(side);
-		if (cached) {
+		// Only take the instant cached path when the cached listing can satisfy the current sort. A
+		// names-only listing cannot be shown stably under a size/modified sort.
+		if (cached && (!needsAttributes || this.cachedListingHasAttributes(cached))) {
 			this.applyPaneDirectoryEntry(side, device, cached);
 			this.render();
 			return;
@@ -3188,7 +3237,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}, NAV_LOADING_PLACEHOLDER_DELAY_MS);
 		try {
-			const listing = await this.loadPaneDirectory(device, path, false);
+			const listing = await this.loadPaneDirectory(device, path, false, 'foreground', needsAttributes);
 			if (this.paneRequestSeq[side] !== requestId || this.paneStates[side].path !== path) {
 				return;
 			}
@@ -3318,6 +3367,21 @@ export class TurboFileEditor extends EditorPane {
 	private sortPaneItems(side: 'left' | 'right', items: readonly TurboFileFileItem[]): TurboFileFileItem[] {
 		const state = this.paneStates[side];
 		return sortTurboFileItems(items, state.sortKey, state.sortDirection);
+	}
+
+	/**
+	 * Sorting by size or modified time needs the per-file attributes a fast names-only remote listing
+	 * does not carry. When the active sort needs them we must load the full listing up front so the
+	 * directory opens already in the correct, stable order — otherwise the names-only listing renders
+	 * in name order first and then visibly re-sorts as {@link enrichVisibleRemoteRows} fills in sizes.
+	 */
+	private paneSortNeedsAttributes(side: 'left' | 'right'): boolean {
+		const key = this.paneStates[side].sortKey;
+		return key === 'size' || key === 'modified';
+	}
+
+	private cachedListingHasAttributes(entry: TurboFileDirectoryCacheEntry): boolean {
+		return !entry.items.some(item => item.attrsPending);
 	}
 
 	private resortPaneItems(side: 'left' | 'right'): void {
@@ -6760,6 +6824,18 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.sortKey = key;
+		this.applyPaneSortChange(side);
+	}
+
+	private applyPaneSortChange(side: 'left' | 'right'): void {
+		const state = this.paneStates[side];
+		// Switching to a size/modified sort on a remote names-only listing needs the full attributes to
+		// sort stably: reload the directory so it comes back already sorted, instead of re-sorting blank
+		// rows and then jumping as enrichVisibleRemoteRows() fills them in.
+		if (this.paneSortNeedsAttributes(side) && state.items.some(item => item.attrsPending)) {
+			void this.refreshPane(side, { silent: true });
+			return;
+		}
 		this.resortPaneItems(side);
 	}
 
@@ -6769,7 +6845,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		state.sortDirection = direction;
-		this.resortPaneItems(side);
+		this.applyPaneSortChange(side);
 	}
 
 	private menuAction(id: string, label: string, icon: ThemeIcon | string, run: () => unknown, enabled = true, checked?: boolean): IAction {
@@ -6835,7 +6911,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		try {
-			const listing = await this.loadPaneDirectory(device, targetPath, !!options.force);
+			const listing = await this.loadPaneDirectory(device, targetPath, !!options.force, 'foreground', this.paneSortNeedsAttributes(side));
 
 			if (this.paneRequestSeq[side] !== requestId || this.paneStates[side].path !== targetPath) {
 				return;
@@ -6868,17 +6944,21 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async loadPaneDirectory(device: TurboFileDevice, path: string, force: boolean, purpose: TurboFileDirectoryLoadPurpose = 'foreground'): Promise<TurboFileDirectoryCacheEntry> {
+	private async loadPaneDirectory(device: TurboFileDevice, path: string, force: boolean, purpose: TurboFileDirectoryLoadPurpose = 'foreground', needsAttributes = false): Promise<TurboFileDirectoryCacheEntry> {
 		const cacheKey = this.getPaneDirectoryCacheKey(device, path);
 		const now = Date.now();
 		if (!force) {
 			const cached = this.paneDirectoryCache.get(cacheKey);
-			if (cached && cached.expiresAt > now) {
+			// A names-only cached listing cannot satisfy a size/modified sort; fall through to a full load.
+			if (cached && cached.expiresAt > now && (!needsAttributes || this.cachedListingHasAttributes(cached))) {
 				return cached;
 			}
-			const inflight = this.paneDirectoryInflight.getReusable(cacheKey, purpose);
-			if (inflight) {
-				return inflight;
+			// An in-flight names-only load likewise cannot be reused when attributes are required.
+			if (!needsAttributes) {
+				const inflight = this.paneDirectoryInflight.getReusable(cacheKey, purpose);
+				if (inflight) {
+					return inflight;
+				}
 			}
 		} else {
 			this.paneDirectoryCache.delete(cacheKey);
@@ -6887,11 +6967,15 @@ export class TurboFileEditor extends EditorPane {
 
 		const promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
 			const isRemote = device.id !== LOCAL_WINDOWS_DEVICE_ID;
-			// Remote directories load names + type only (one round trip, no per-file stat) so even a
-			// directory with hundreds of thousands of files appears instantly; the size and modified
-			// time are filled in lazily for the visible rows by enrichVisibleRemoteRows().
+			// Remote directories normally load names + type only (one round trip, no per-file stat) so
+			// even a directory with hundreds of thousands of files appears instantly; size/modified are
+			// filled in lazily for visible rows by enrichVisibleRemoteRows(). When the active sort is by
+			// size/modified we instead fetch the full listing so the directory opens already sorted and
+			// never visibly re-orders.
 			const listing = isRemote
-				? await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force)
+				? (needsAttributes
+					? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
+					: await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force))
 				: await this.sshService.listLocalDirectory(path, force);
 			this.setDeviceRuntimeStatus(device, 'online');
 			const items = this.toFileItems(device, listing.path, listing.entries);
@@ -11219,6 +11303,7 @@ export class TurboFileEditor extends EditorPane {
 				await this.revealBoundTerminalsForPage(pageInstanceId, instance, true);
 				this.statusMessage = `已打开本地终端：${title}`;
 				this.render();
+				this.refocusTerminalAfterRender(instance);
 				return;
 			}
 
@@ -11236,6 +11321,7 @@ export class TurboFileEditor extends EditorPane {
 			await this.revealBoundTerminalsForPage(pageInstanceId, instance, true);
 			this.statusMessage = `已打开内置 SSH 终端：${title}`;
 			this.render();
+			this.refocusTerminalAfterRender(instance);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.restoreTaskbarAfterTerminal();
@@ -11260,6 +11346,13 @@ export class TurboFileEditor extends EditorPane {
 
 	private rememberTerminalPanelHiddenForCurrentPage(): void {
 		if (!this.isEditorVisible) {
+			return;
+		}
+		// Only treat a panel hide as "the user hid this page's terminal" while the transfer page is
+		// actually showing. A hide triggered while on another in-app page (images, themes, tasks, …)
+		// must not mark the terminal hidden, otherwise it would appear to vanish when returning to the
+		// transfer page even though it is still open and bound.
+		if (this.activePage !== 'transfer') {
 			return;
 		}
 		const pageInstanceId = this.currentInput?.instanceId;
@@ -11402,6 +11495,23 @@ export class TurboFileEditor extends EditorPane {
 				turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
 			}
 		}
+	}
+
+	/**
+	 * Re-focus the terminal after the editor re-render that follows opening/revealing it. xterm only
+	 * accepts keyboard input once its textarea is focused while attached and laid out; focusing before
+	 * the render commits (or having the render move focus) is the usual cause of "the terminal opened
+	 * but I can't type until I click it". A post-render animation frame guarantees focus lands last.
+	 */
+	private refocusTerminalAfterRender(instance: ITerminalInstance): void {
+		const targetWindow = getWindow(this.container);
+		targetWindow.requestAnimationFrame(() => {
+			if (instance.isDisposed || !this.isEditorVisible || this.activePage !== 'transfer') {
+				return;
+			}
+			this.terminalService.setActiveInstance(instance);
+			void this.terminalService.focusInstance(instance);
+		});
 	}
 
 	private async createAndRevealTerminal(options: ICreateTerminalOptions): Promise<ITerminalInstance> {
@@ -12308,6 +12418,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private rememberPaneDeviceSnapshot(side: 'left' | 'right'): void {
+		// Keep this page's own device/path/sort selection fresh so a later group merge or tab switch
+		// restores it instead of inheriting the receiving pane's previous page.
+		this.capturePaneSelectionForCurrentPage();
 		const device = this.getPaneDevice(side);
 		const state = this.paneStates[side];
 		if (!device || !state.path) {
@@ -12372,6 +12485,67 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		void this.refreshPane(side, { path: targetPath, silent: true });
+	}
+
+	/**
+	 * Mirror the current page's left/right device + path + sort selection into the module-level map so
+	 * it can be restored if this page is later shown by a different editor pane instance (group merge,
+	 * tab switch). Cheap and idempotent; called from the same spots that snapshot pane contents.
+	 */
+	private capturePaneSelectionForCurrentPage(): void {
+		const pageInstanceId = this.currentInput?.instanceId;
+		if (!pageInstanceId) {
+			return;
+		}
+		const capture = (side: 'left' | 'right'): TurboFilePaneSelectionSide => {
+			const state = this.paneStates[side];
+			return { deviceId: state.deviceId, path: state.path, sortKey: state.sortKey, sortDirection: state.sortDirection };
+		};
+		turboFilePaneSelectionByPageId.set(pageInstanceId, { left: capture('left'), right: capture('right') });
+	}
+
+	/**
+	 * Restore a page's own pane selection when this editor pane starts showing it. Returns true when a
+	 * saved selection was applied; false when the page has none yet (a brand-new page).
+	 */
+	private restorePaneSelectionForPage(pageInstanceId: string): boolean {
+		const snapshot = turboFilePaneSelectionByPageId.get(pageInstanceId);
+		if (!snapshot) {
+			return false;
+		}
+		const devices = this.getAllDevices();
+		for (const side of ['left', 'right'] as const) {
+			const saved = snapshot[side];
+			const state = this.paneStates[side];
+			state.sortKey = saved.sortKey;
+			state.sortDirection = saved.sortDirection;
+			if (devices.some(device => device.id === saved.deviceId)) {
+				state.deviceId = saved.deviceId;
+				state.path = saved.path;
+			}
+		}
+		this.hasAppliedInitialRightPaneDefault = true;
+		return true;
+	}
+
+	/**
+	 * Give a page that has no saved selection a fresh default (local on the left, first SSH device on
+	 * the right) rather than letting it inherit the selection of whatever page this reused pane showed
+	 * before.
+	 */
+	private resetPaneSelectionToDefault(): void {
+		for (const side of ['left', 'right'] as const) {
+			this.paneStates[side].deviceId = LOCAL_WINDOWS_DEVICE_ID;
+			this.paneStates[side].path = '';
+		}
+		this.hasAppliedInitialRightPaneDefault = false;
+		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
+		for (const side of ['left', 'right'] as const) {
+			const device = this.getPaneDevice(side);
+			if (device && !this.paneStates[side].path) {
+				this.paneStates[side].path = this.getDefaultPaneDevicePath(device);
+			}
+		}
 	}
 
 	private ensurePaneDeviceSelection(options: { preferFirstSshOnRight?: boolean } = {}): void {

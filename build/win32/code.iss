@@ -39,6 +39,16 @@ WizardStyle=modern
 // to shutdown VS Code. We rely on the fact that the update signals
 // that VS Code is ready to be shutdown, so we're good to use `force` here.
 CloseApplications=force
+// Only ever force-close TurboFile's own executables. Without this filter the default mask (*.exe)
+// makes the Restart Manager force-close ANY process holding a file under {app} open - including
+// explorer.exe, which loads our drag CopyHook (resources\...\TurboFileDragExt.dll). That made
+// installing/updating close the user's File Explorer. Restricting the filter leaves Explorer (and
+// any unrelated process) untouched while still closing the running app for in-place updates.
+#ifdef ProxyExeBasename
+CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe,{#ProxyExeBasename}.exe,new_{#ProxyExeBasename}.exe
+#else
+CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe
+#endif
 
 #ifdef Sign
 SignTool=esrp
