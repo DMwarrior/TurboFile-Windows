@@ -494,6 +494,10 @@ const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKe
 ];
 const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const IMAGE_GRID_COLUMN_MIN = 4;
+// Default number of columns when the image grid opens (clamped down only when the body is too narrow
+// to fit that many thumbnails) and the hard upper bound when zooming columns in.
+const IMAGE_GRID_COLUMN_DEFAULT = 14;
+const IMAGE_GRID_COLUMN_MAX = 17;
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 10;
@@ -9203,7 +9207,7 @@ export class TurboFileEditor extends EditorPane {
 			selectedIndex,
 			selectedIndexes,
 			selectionAnchorIndex: selectedIndex,
-			columns: 12,
+			columns: IMAGE_GRID_COLUMN_DEFAULT,
 			thumbnailScale: 1,
 			sortKey: this.imageGridSortKey,
 			sortDescending: this.imageGridSortDescending,
@@ -10833,7 +10837,8 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridMaxColumns(): TurboFileImageGridColumns {
 		const width = this.getImageGridBodyWidth();
-		return Math.max(IMAGE_GRID_COLUMN_MIN, Math.floor((width + IMAGE_GRID_CARD_GAP) / (IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_GAP)));
+		const fitByWidth = Math.floor((width + IMAGE_GRID_CARD_GAP) / (IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_GAP));
+		return Math.max(IMAGE_GRID_COLUMN_MIN, Math.min(IMAGE_GRID_COLUMN_MAX, fitByWidth));
 	}
 
 	private updateImageGridVirtualSlice(state: TurboFileImageGridState, range: TurboFileImageGridRange): void {

@@ -4758,12 +4758,30 @@ body.turbofile-shell .turbofile-theme-toggle {
 
 .turbofile-titlebar-update-button {
 	width: 28px;
+	min-width: 28px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	gap: 4px;
 	border-radius: 999px;
 	color: #ffffff;
 	background: #168bd8;
+}
+
+.turbofile-titlebar-update-button-checking,
+.turbofile-titlebar-update-button-downloading,
+.turbofile-titlebar-update-button-installing {
+	width: auto;
+	min-width: 46px;
+	padding: 0 8px;
+	cursor: default;
+}
+
+.turbofile-titlebar-update-label {
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1;
+	white-space: nowrap;
 }
 
 .turbofile-titlebar-menu-button:hover,
@@ -4776,6 +4794,15 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-titlebar-update-button:focus-visible {
 	background: #1f9ff2;
 	box-shadow: 0 4px 12px color-mix(in srgb, #168bd8 36%, transparent);
+}
+
+.turbofile-titlebar-update-button:disabled,
+.turbofile-titlebar-update-button:disabled:hover,
+.turbofile-titlebar-update-button:disabled:focus-visible {
+	background: #168bd8;
+	box-shadow: none;
+	color: #ffffff;
+	opacity: 0.88;
 }
 
 .turbofile-about-overlay {
