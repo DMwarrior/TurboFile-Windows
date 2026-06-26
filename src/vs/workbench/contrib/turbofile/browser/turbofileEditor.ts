@@ -7101,15 +7101,13 @@ export class TurboFileEditor extends EditorPane {
 
 		const promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
 			const isRemote = device.id !== LOCAL_WINDOWS_DEVICE_ID;
-			// Remote directories normally load names + type only (one round trip, no per-file stat) so
-			// even a directory with hundreds of thousands of files appears instantly; size/modified are
-			// filled in lazily for visible rows by enrichVisibleRemoteRows(). When the active sort is by
-			// size/modified we instead fetch the full listing so the directory opens already sorted and
-			// never visibly re-orders.
+			// Always fetch the FULL remote listing (name + type + size + modified) in a single `find`
+			// round trip. This makes a freshly opened folder appear already complete and sorted by the
+			// active sort key, with no lazy size/date "pop-in" and no later visible re-sort — which is the
+			// stable behaviour users expect after choosing a sort order. (`needsAttributes` is retained
+			// only for the cache/in-flight reuse checks above.)
 			const listing = isRemote
-				? (needsAttributes
-					? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
-					: await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force))
+				? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
 				: await this.sshService.listLocalDirectory(path, force);
 			this.setDeviceRuntimeStatus(device, 'online');
 			const items = this.toFileItems(device, listing.path, listing.entries);
