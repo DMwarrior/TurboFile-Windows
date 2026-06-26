@@ -20,6 +20,7 @@ import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js'
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
 import { shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
+import { createPosixNativeBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
@@ -2629,11 +2630,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			currentName: items[0]?.displayName ?? items[0]?.targetName
 		});
 		const sources = items.map(item => item.sourcePath);
-		const command = looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)
-			? buildWindowsBatchCommand(sources, request.targetDirectory.path, operation)
-			: buildPosixBatchCommand(sources, request.targetDirectory.path, operation);
 		this.markTransferDataStarted(request.progressId);
-		await this.withSshClient(request.source, client => this.execRemote(client, command));
+		if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
+			await this.withSshClient(request.source, client => this.execRemote(client, buildWindowsBatchCommand(sources, request.targetDirectory.path, operation)));
+		} else {
+			const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
+			await this.withSshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input));
+		}
 		this.throwIfTransferCanceled(request.progressId);
 		this.fireTransferProgress(request, expectedBytes, expectedBytes, 'complete', 'Batch remote native transfer completed.', true, {
 			completedItems: items.length,
@@ -9558,15 +9561,6 @@ function buildWindowsBatchCommand(sourcePaths: readonly string[], targetDirector
 	const command = operation === 'move' ? 'Move-Item' : 'Copy-Item';
 	const recurse = operation === 'copy' ? ' -Recurse' : '';
 	return buildPowerShellCommand(withPowerShellDefaults(`$srcs=@(${sources}); $dst=${target}; if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Force -Path $dst | Out-Null }; foreach ($src in $srcs) { ${command} -LiteralPath $src -Destination $dst -Force${recurse} }`));
-}
-
-function buildPosixBatchCommand(sourcePaths: readonly string[], targetDirectory: string, operation: 'copy' | 'move'): string {
-	const target = quotePosixShellArg(targetDirectory);
-	const sources = sourcePaths.map(path => quotePosixShellArg(path)).join(' ');
-	if (operation === 'move') {
-		return `mkdir -p ${target} && mv -f ${sources} ${target}`;
-	}
-	return `mkdir -p ${target} && (cp -a --reflink=auto --sparse=always ${sources} ${target} 2>/dev/null || cp -a ${sources} ${target})`;
 }
 
 function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string {
