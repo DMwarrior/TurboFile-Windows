@@ -13639,7 +13639,7 @@ function isHiddenFileName(name: string): boolean {
 }
 
 function isImageFile(name: string): boolean {
-	return /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i.test(name);
+	return /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico|tiff?)$/i.test(name);
 }
 
 function getFileExtensionLower(name: string): string {

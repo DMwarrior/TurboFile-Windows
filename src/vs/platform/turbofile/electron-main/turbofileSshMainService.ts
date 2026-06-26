@@ -7074,7 +7074,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		// nativeImage path (JPEG/PNG output) always rendered. JPEG decodes universally and is
 		// verifiable via nativeImage, so it removes that whole failure class.
 		const effectiveFormat: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-		const source = quotePosixShellArg(endpoint.path);
+		// `[0]` selects the first page of a multi-page TIFF; without it ImageMagick would stream every
+		// page and produce an undecodable multi-frame JPEG.
+		const lowerPath = endpoint.path.toLowerCase();
+		const frame = lowerPath.endsWith('.tif') || lowerPath.endsWith('.tiff') ? '[0]' : '';
+		const source = `${quotePosixShellArg(endpoint.path)}${frame}`;
 		const thumbnail = ` -thumbnail ${quotePosixShellArg(geometry)}`;
 		const filter = interpolation === 'lanczos' ? ' -filter Lanczos' : '';
 		const qualityOption = effectiveFormat === 'png' ? '' : ` -quality ${quality}`;
@@ -9766,29 +9770,32 @@ function buildPosixReadImagesBatchCommand(paths: readonly string[], maxBytes: nu
 	const forceRaw = !maxWidth || maxWidth <= 0;
 	const width = Math.max(96, Math.floor(maxWidth) || 480);
 	const rawPassthrough = 768 * 1024;
+	// TIFF has no in-browser decoder, so it must be transcoded to JPEG by a remote tool regardless of
+	// size: full resolution for the single-image preview (forceRaw), the thumbnail width otherwise.
+	const tiffWidth = forceRaw ? 0 : width;
 	const lines: string[] = [];
-	if (forceRaw) {
-		lines.push('T=');
-	} else {
-		lines.push(`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`);
-		lines.push(`elif command -v magick >/dev/null 2>&1; then T=magick`);
-		lines.push(`elif command -v convert >/dev/null 2>&1; then T=convert`);
-		lines.push(`else T=; fi`);
-	}
+	// Always probe for an image tool: it downscales large originals AND is the only way to render TIFF.
+	// Probing is just a couple of `command -v` calls, so it stays cheap even on weak boards.
+	lines.push(`if command -v vipsthumbnail >/dev/null 2>&1; then T=vips`);
+	lines.push(`elif command -v magick >/dev/null 2>&1; then T=magick`);
+	lines.push(`elif command -v convert >/dev/null 2>&1; then T=convert`);
+	lines.push(`else T=; fi`);
 	lines.push(`emit(){ if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$2"; cat "$1"; else printf '%s\\n-1\\n' "$1"; fi; }`);
-	if (!forceRaw) {
-		lines.push(`mk(){ case "$T" in vips) vipsthumbnail "$1" --size ${width}x -o "$2[Q=80,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1" -resize ${width}x -strip -quality 80 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac }`);
-	}
+	// Transcode $1 to JPEG file $2. $3>0 downscales to that width; $3=0 keeps the native resolution.
+	// `[0]` takes the first page of a multi-page TIFF for ImageMagick; vips reads page 0 by default.
+	lines.push(`mkjpg(){ if [ "$3" -gt 0 ]; then case "$T" in vips) vipsthumbnail "$1" --size "$3x" -o "$2[Q=82,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1[0]" -resize "$3x" -strip -quality 82 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac; else case "$T" in vips) vipsthumbnail "$1" --size 30000x30000 -o "$2[Q=88,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1[0]" -strip -quality 88 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac; fi }`);
+	// Emit a transcoded JPEG (length-framed); returns non-zero without emitting if transcoding fails.
+	lines.push(`tojpg(){ o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"; if mkjpg "$1" "$oj" "$3" && [ -s "$oj" ]; then tz=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$tz" ] && [ "$tz" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$tz"; cat "$oj"; rm -f "$o" "$oj" 2>/dev/null; return 0; fi; fi; rm -f "$o" "$oj" 2>/dev/null; return 1; }`);
 	lines.push(`for f in ${list}; do`);
 	lines.push(`[ -f "$f" ] || continue`);
 	lines.push(`sz=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); [ -n "$sz" ] || continue`);
+	// TIFF can never stream raw (browsers can't decode it): always transcode, or report -1 if no tool.
+	lines.push(`case $(printf '%s' "$f" | tr 'A-Z' 'a-z') in *.tif|*.tiff) if [ -n "$T" ] && tojpg "$f" "$sz" ${tiffWidth}; then :; else printf '%s\\n-1\\n' "$f"; fi; continue;; esac`);
 	if (forceRaw) {
 		lines.push(`emit "$f" "$sz"`);
 	} else {
 		lines.push(`if [ "$sz" -le ${rawPassthrough} ] || [ -z "$T" ]; then emit "$f" "$sz"; continue; fi`);
-		lines.push(`o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"`);
-		lines.push(`if mk "$f" "$oj" && [ -s "$oj" ]; then tz=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); printf '%s\\n%s\\n' "$f" "$tz"; cat "$oj"; else emit "$f" "$sz"; fi`);
-		lines.push(`rm -f "$o" "$oj" 2>/dev/null`);
+		lines.push(`if tojpg "$f" "$sz" ${width}; then :; else emit "$f" "$sz"; fi`);
 	}
 	lines.push(`done`);
 	lines.push(`:`);
@@ -9824,7 +9831,11 @@ function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
 		}
 		const bytes = buffer.subarray(position, position + size);
 		position += size;
-		entries.push({ path, ok: true, content: bytes.toString('base64'), mime: getMimeType(path) });
+		// TIFF is always returned transcoded to JPEG (browsers can't decode TIFF), so tag the bytes as
+		// JPEG rather than by the source extension.
+		const lowerPath = path.toLowerCase();
+		const mime = lowerPath.endsWith('.tif') || lowerPath.endsWith('.tiff') ? 'image/jpeg' : getMimeType(path);
+		entries.push({ path, ok: true, content: bytes.toString('base64'), mime });
 	}
 	return entries;
 }
@@ -9851,6 +9862,9 @@ function getMimeType(path: string): string {
 	}
 	if (lower.endsWith('.bmp')) {
 		return 'image/bmp';
+	}
+	if (lower.endsWith('.tif') || lower.endsWith('.tiff')) {
+		return 'image/tiff';
 	}
 	if (lower.endsWith('.svg')) {
 		return 'image/svg+xml';
