@@ -33,7 +33,7 @@ import { IProductService } from '../../product/common/productService.js';
 import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
-import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest } from '../common/turbofileUpdate.js';
+import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate as shouldAutoInstallTurboFileSetupUpdatePolicy } from '../common/turbofileUpdate.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
 
@@ -512,15 +512,29 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 			: await this.downloadUpdatePackage(update, updatePackagePath, explicit, startTime);
 
 		this.availableUpdate = { packagePath };
-		this.saveUpdateMetadata(update);
+		await this.saveUpdateMetadata(update);
 		this.setState(State.Downloaded(update, explicit, this._overwrite));
+
+		if (this.shouldAutoInstallTurboFileSetupUpdate()) {
+			this.setState(State.Ready(update, explicit, this._overwrite));
+			void this.quitAndInstall();
+			return;
+		}
 
 		const fastUpdatesEnabled = this.configurationService.getValue('update.enableWindowsBackgroundUpdates');
 		if (fastUpdatesEnabled && this.productService.target === 'user') {
-			this.doApplyUpdate();
+			void this.doApplyUpdate();
 		} else {
 			this.setState(State.Ready(update, explicit, this._overwrite));
 		}
+	}
+
+	private shouldAutoInstallTurboFileSetupUpdate(): boolean {
+		return shouldAutoInstallTurboFileSetupUpdatePolicy({
+			turboFileGitHubUpdatesEnabled: this.isTurboFileGitHubUpdatesEnabled(),
+			updateType: getUpdateType(),
+			productTarget: this.productService.target,
+		});
 	}
 
 	private async downloadUpdatePackage(update: IUpdate, updatePackagePath: string, explicit: boolean, startTime: number): Promise<string> {
@@ -806,8 +820,14 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		this.availableUpdate = { packagePath };
 		this.setState(State.Downloaded(update, true, false));
 
+		if (this.shouldAutoInstallTurboFileSetupUpdate()) {
+			this.setState(State.Ready(update, true, false));
+			void this.quitAndInstall();
+			return;
+		}
+
 		if (fastUpdatesEnabled && this.productService.target === 'user') {
-			this.doApplyUpdate();
+			void this.doApplyUpdate();
 		} else {
 			this.setState(State.Ready(update, true, false));
 		}

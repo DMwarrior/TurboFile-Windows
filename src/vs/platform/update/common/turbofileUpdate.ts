@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IUpdate } from './update.js';
+import { IUpdate, UpdateType } from './update.js';
 
 export interface ITurboFileGitHubAsset {
 	readonly name?: string;
@@ -23,6 +23,12 @@ export interface ITurboFileUpdateResolveOptions {
 	readonly arch?: string;
 	readonly assetNamePattern?: string;
 	readonly allowPrerelease?: boolean;
+}
+
+export interface ITurboFileAutoInstallOptions {
+	readonly turboFileGitHubUpdatesEnabled: boolean;
+	readonly updateType: UpdateType;
+	readonly productTarget?: string;
 }
 
 export interface ITurboFileUpdateManifestPlatform {
@@ -163,6 +169,12 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 	}
 
 	return update;
+}
+
+export function shouldAutoInstallTurboFileSetupUpdate(options: ITurboFileAutoInstallOptions): boolean {
+	return options.turboFileGitHubUpdatesEnabled
+		&& options.updateType === UpdateType.Setup
+		&& options.productTarget === 'user';
 }
 
 function parseTurboFileVersion(version: string): IParsedVersion | undefined {

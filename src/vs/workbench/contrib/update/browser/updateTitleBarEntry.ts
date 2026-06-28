@@ -6,10 +6,13 @@
 import * as dom from '../../../../base/browser/dom.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IManagedHoverContent } from '../../../../base/browser/ui/hover/hover.js';
+import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { IAction, WorkbenchActionExecutedClassification, WorkbenchActionExecutedEvent } from '../../../../base/common/actions.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { isWeb } from '../../../../base/common/platform.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
@@ -218,6 +221,7 @@ export class UpdateTitleBarEntry extends BaseActionViewItem {
 	public override render(container: HTMLElement) {
 		super.render(container);
 
+		container.setAttribute('role', 'button');
 		this.content = dom.append(container, dom.$('.update-indicator'));
 		this.updateTooltip();
 		this.onStateChange(this.updateService.state);
@@ -283,6 +287,12 @@ export class UpdateTitleBarEntry extends BaseActionViewItem {
 		this.content.classList.remove('prominent', 'progress-indefinite', 'progress-percent', 'update-disabled');
 		this.content.style.removeProperty('--update-progress');
 
+		const icon = dom.append(this.content, renderIcon(this.getIcon(state)));
+		icon.classList.add('indicator-icon');
+		if (this.isSpinningState(state)) {
+			icon.classList.add('codicon-modifier-spin');
+		}
+
 		const label = dom.append(this.content, dom.$('.indicator-label'));
 		switch (state.type) {
 			case StateType.Disabled:
@@ -326,6 +336,10 @@ export class UpdateTitleBarEntry extends BaseActionViewItem {
 				label.textContent = localize('updateIndicator.update', "Update");
 				break;
 		}
+
+		const accessibleLabel = label.textContent ?? localize('updateIndicator.update', "Update");
+		this.content.setAttribute('aria-label', accessibleLabel);
+		this.content.title = accessibleLabel;
 	}
 
 	private renderProgressState(content: HTMLElement, percentage?: number) {
@@ -335,5 +349,24 @@ export class UpdateTitleBarEntry extends BaseActionViewItem {
 		} else {
 			content.classList.add('progress-indefinite');
 		}
+	}
+
+	private getIcon(state: State): ThemeIcon {
+		switch (state.type) {
+			case StateType.CheckingForUpdates:
+			case StateType.Updating:
+			case StateType.Overwriting:
+			case StateType.Restarting:
+				return Codicon.sync;
+			default:
+				return Codicon.cloudDownload;
+		}
+	}
+
+	private isSpinningState(state: State): boolean {
+		return state.type === StateType.CheckingForUpdates
+			|| state.type === StateType.Updating
+			|| state.type === StateType.Overwriting
+			|| state.type === StateType.Restarting;
 	}
 }
