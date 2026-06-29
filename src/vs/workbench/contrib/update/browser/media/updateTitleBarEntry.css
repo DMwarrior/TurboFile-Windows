@@ -11,11 +11,11 @@
 	border-radius: 50%;
 	white-space: nowrap;
 	padding: 0;
-	width: 30px;
-	height: 30px;
+	width: 24px;
+	height: 24px;
 	box-sizing: border-box;
 	background-color: transparent;
-	border: 1px solid transparent;
+	border: 0;
 }
 
 .monaco-action-bar .update-indicator:hover {
@@ -35,20 +35,18 @@
 }
 
 .monaco-action-bar .update-indicator .indicator-icon {
-	font-size: 16px;
+	font-size: 14px;
 	line-height: 1;
 }
 
 .monaco-action-bar .update-indicator.prominent {
-	background-color: var(--vscode-button-background);
+	background-color: #168bd8;
 	color: var(--vscode-button-foreground);
-	border-color: var(--vscode-button-background);
-	box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-button-background) 25%, transparent);
+	box-shadow: none;
 }
 
 .monaco-action-bar .update-indicator.prominent:hover {
-	background-color: var(--vscode-button-hoverBackground);
-	border-color: var(--vscode-button-hoverBackground);
+	background-color: #1f9ff2;
 }
 
 .monaco-action-bar .update-indicator.update-disabled {

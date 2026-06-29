@@ -103,15 +103,15 @@ function createProxiedManifest(manifest, prefix) {
 
 async function resolveSha256(asset) {
 	if (process.env.TURBOFILE_UPDATE_SHA256) {
-		return process.env.TURBOFILE_UPDATE_SHA256.toUpperCase();
+		return process.env.TURBOFILE_UPDATE_SHA256.toLowerCase();
 	}
 
 	if (process.env.TURBOFILE_UPDATE_LOCAL_FILE) {
-		return (await sha256File(process.env.TURBOFILE_UPDATE_LOCAL_FILE)).toUpperCase();
+		return (await sha256File(process.env.TURBOFILE_UPDATE_LOCAL_FILE)).toLowerCase();
 	}
 
 	if (typeof asset.digest === 'string' && asset.digest.toLowerCase().startsWith('sha256:')) {
-		return asset.digest.slice('sha256:'.length).toUpperCase();
+		return asset.digest.slice('sha256:'.length).toLowerCase();
 	}
 
 	return undefined;
