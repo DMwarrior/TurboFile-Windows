@@ -163,12 +163,21 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 		productVersion: version,
 		url: platform.url,
 	};
-	const sha256hash = platform.sha256hash ?? platform.sha256;
+	const sha256hash = normalizeTurboFileSha256Hash(platform.sha256hash ?? platform.sha256);
 	if (sha256hash) {
 		update.sha256hash = sha256hash;
 	}
 
 	return update;
+}
+
+function normalizeTurboFileSha256Hash(hash: string | undefined): string | undefined {
+	const normalized = hash?.trim();
+	if (!normalized) {
+		return undefined;
+	}
+
+	return /^[a-fA-F0-9]{64}$/.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
 export function shouldAutoInstallTurboFileSetupUpdate(options: ITurboFileAutoInstallOptions): boolean {
