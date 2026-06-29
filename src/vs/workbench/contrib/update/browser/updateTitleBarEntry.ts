@@ -9,7 +9,6 @@ import { IManagedHoverContent } from '../../../../base/browser/ui/hover/hover.js
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { IAction, WorkbenchActionExecutedClassification, WorkbenchActionExecutedEvent } from '../../../../base/common/actions.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
-import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { isWeb } from '../../../../base/common/platform.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -32,6 +31,7 @@ import { computeProgressPercent } from '../common/updateUtils.js';
 import { waitForState } from '../../../../base/common/observable.js';
 import './media/updateTitleBarEntry.css';
 import { UpdateTooltip } from './updateTooltip.js';
+import { getUpdateTitleBarIcon } from '../common/updateTitleBarPresentation.js';
 
 const UPDATE_TITLE_BAR_ACTION_ID = 'workbench.actions.updateIndicator';
 const UPDATE_TITLE_BAR_CONTEXT = new RawContextKey<boolean>('updateTitleBar', false);
@@ -352,15 +352,7 @@ export class UpdateTitleBarEntry extends BaseActionViewItem {
 	}
 
 	private getIcon(state: State): ThemeIcon {
-		switch (state.type) {
-			case StateType.CheckingForUpdates:
-			case StateType.Updating:
-			case StateType.Overwriting:
-			case StateType.Restarting:
-				return Codicon.sync;
-			default:
-				return Codicon.cloudDownload;
-		}
+		return getUpdateTitleBarIcon(state.type);
 	}
 
 	private isSpinningState(state: State): boolean {
