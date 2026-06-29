@@ -29,4 +29,21 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.shouldLetConcreteDropTargetHandle(event)'));
 		assert.ok(editor.includes('getTurboFileImageGridPasteTargetSide(state.side, this.internalTransferClipboard?.sourceSide)'));
 	});
+
+	test('keeps left and right pane image-grid toolbar actions bound to their own state', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		assert.ok(editor.includes('this.setImageGridColumns(state, option);'));
+		assert.ok(editor.includes('this.setImageGridThumbnailScale(state, scale);'));
+		assert.ok(editor.includes('this.setImageGridSort(state, option.key);'));
+		assert.ok(editor.includes('void this.deleteSelectedImageGridItems(state);'));
+		assert.ok(editor.includes('this.selectAllImageGridItems(state);'));
+		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns - 1);'));
+		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns + 1);'));
+	});
+
+	test('updates image-grid deletion in place instead of re-rendering the whole editor', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		assert.ok(editor.includes('private updateImageGridAfterLocalMutation(state: TurboFileImageGridState): void'));
+		assert.ok(editor.includes('this.updateImageGridAfterLocalMutation(state);'));
+	});
 });
