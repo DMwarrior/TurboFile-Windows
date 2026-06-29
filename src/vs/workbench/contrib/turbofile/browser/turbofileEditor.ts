@@ -196,6 +196,13 @@ interface TurboFileImageGridState {
 	fileListScrollTop: number;
 	scrollTop: number;
 	viewportHeight: number;
+	thumbnailLoadToken: number;
+	renderedRange?: { startIndex: number; endIndex: number; columns: number; total: number };
+	layoutMetrics?: TurboFileImageGridLayoutMetrics;
+	bodyWidthCache?: number;
+	readonly loadedThumbnailIndexes: Set<number>;
+	readonly loadedPreviewIndexes: Set<number>;
+	scrollRaf: number;
 }
 
 interface TurboFileImageReadResult {
@@ -685,6 +692,7 @@ export class TurboFileEditor extends EditorPane {
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
 	private imageGridState: TurboFileImageGridState | undefined;
+	private readonly paneImageGridStates: Record<'left' | 'right', TurboFileImageGridState | undefined> = { left: undefined, right: undefined };
 	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
 	private imageGridSortDescending = false;
 	private imagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';
@@ -693,26 +701,19 @@ export class TurboFileEditor extends EditorPane {
 	private imageGridObserver: IntersectionObserver | undefined;
 	private liveTransferTicker: number | undefined;
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
-	private imageGridScrollRaf = 0;
 	// Thumbnails load only after scrolling settles, and only for the page in view; bumping the token
 	// invalidates any batch still loading a page the user has scrolled away from (fast jumps).
-	private imageGridVisibleLoadTimer: ReturnType<typeof setTimeout> | undefined;
-	private imageGridThumbnailLoadToken = 0;
+	private readonly imageGridVisibleLoadTimers = new Map<TurboFileImageGridState, ReturnType<typeof setTimeout>>();
 	private readonly imageGridThumbnailQueue: TurboFileImageGridThumbnailRequest[] = [];
 	private readonly imageGridThumbnailQueued = new Set<string>();
 	private imageGridThumbnailLoadingCount = 0;
-	private imageGridRenderedRange: { startIndex: number; endIndex: number; columns: number; total: number } | undefined;
-	private imageGridLayoutMetrics: TurboFileImageGridLayoutMetrics | undefined;
 	// Memoized scroll-body width. Measuring body.clientWidth forces a synchronous layout; reading it
 	// once per card during a slice rebuild caused dozens of forced reflows per scroll frame, which
 	// both janked scrolling and made the grid's scrollHeight momentarily collapse (the browser then
 	// clamped scrollTop, producing the post-scroll "jump/jitter"). The body width only changes on
 	// window/pane resize, so cache it and invalidate on layout() and full image-page renders.
-	private imageGridBodyWidthCache: number | undefined;
 	private imageGridPreviewRequestSeq = 0;
 	private imageGridPreviewPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
-	private readonly imageGridLoadedThumbnailIndexes = new Set<number>();
-	private readonly imageGridLoadedPreviewIndexes = new Set<number>();
 	private imageGridCtrlWheelDeltaRemainder = 0;
 	private imagePreviewAnalysis: TurboFileImagePreviewAnalysis | undefined;
 	private imagePreviewRender: TurboFileImagePreviewRender | undefined;
@@ -940,8 +941,7 @@ export class TurboFileEditor extends EditorPane {
 	override layout(_dimension: Dimension, _position?: IDomPosition): void {
 		// CSS grid owns the fast-transfer two-pane layout.
 		// The image-grid body width is derived from the viewport, so drop its cache on resize.
-		this.invalidateImageGridBodyWidthCache();
-		this.imageGridLayoutMetrics = undefined;
+		this.invalidateAllImageGridLayoutCaches();
 	}
 
 	override setVisible(visible: boolean): void {
@@ -987,16 +987,14 @@ export class TurboFileEditor extends EditorPane {
 				this.remoteEnrichRetryHandle[side] = undefined;
 			}
 		}
-		this.releaseImageGridStateImages(this.imageGridState);
+		this.releaseAllImageGridStates();
 		this.disposeImageGridObserver();
 		this.clearImageGridScrollTimer();
 		this.clearImageGridScrollRaf();
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
-		this.clearImageGridLoadedImageIndexes();
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
-		this.imageGridRenderedRange = undefined;
 		super.dispose();
 	}
 
@@ -1156,8 +1154,62 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private isImageGridSurfaceActive(state: TurboFileImageGridState): boolean {
-		return this.imageGridState === state
-			&& (this.activePage === 'images' || (this.activePage === 'transfer' && state.displayMode === 'pane'));
+		if (state.displayMode === 'page') {
+			return this.activePage === 'images' && this.imageGridState === state;
+		}
+		return this.activePage === 'transfer' && this.paneImageGridStates[state.side] === state;
+	}
+
+	private setActiveImageGridState(state: TurboFileImageGridState): void {
+		this.imageGridState = state;
+		this.setActiveFilePaneSide(state.side);
+	}
+
+	private getVisibleImageGridStates(): TurboFileImageGridState[] {
+		const states: TurboFileImageGridState[] = [];
+		if (this.activePage === 'images' && this.imageGridState?.displayMode === 'page') {
+			states.push(this.imageGridState);
+		}
+		if (this.activePage === 'transfer') {
+			for (const state of Object.values(this.paneImageGridStates)) {
+				if (state) {
+					states.push(state);
+				}
+			}
+		}
+		return states;
+	}
+
+	private releaseImageGridState(state: TurboFileImageGridState | undefined): void {
+		if (!state) {
+			return;
+		}
+		this.releaseImageGridStateImages(state);
+		this.clearImageGridVisibleLoadTimer(state);
+		this.clearImageGridStateScrollRaf(state);
+		this.clearImageGridLoadedImageIndexes(state);
+		this.clearImageGridLayoutMetrics(state);
+		state.renderedRange = undefined;
+		state.bodyWidthCache = undefined;
+		if (this.imageGridState === state) {
+			this.imageGridState = undefined;
+		}
+		if (state.displayMode === 'pane' && this.paneImageGridStates[state.side] === state) {
+			this.paneImageGridStates[state.side] = undefined;
+		}
+	}
+
+	private releaseAllImageGridStates(): void {
+		const seen = new Set<TurboFileImageGridState>();
+		for (const state of [this.imageGridState, ...Object.values(this.paneImageGridStates)]) {
+			if (state && !seen.has(state)) {
+				seen.add(state);
+				this.releaseImageGridState(state);
+			}
+		}
+		this.imageGridState = undefined;
+		this.paneImageGridStates.left = undefined;
+		this.paneImageGridStates.right = undefined;
 	}
 
 	private getDeleteKeyboardTargetSide(event: KeyboardEvent): 'left' | 'right' | undefined {
@@ -1675,7 +1727,8 @@ export class TurboFileEditor extends EditorPane {
 			case 'downloading':
 				return Codicon.loading;
 			case 'install':
-				return Codicon.check;
+			case 'restart':
+				return Codicon.download;
 			default:
 				return Codicon.download;
 		}
@@ -2607,18 +2660,15 @@ export class TurboFileEditor extends EditorPane {
 		if (page !== this.activePage) {
 			this.closeDeviceSelect(undefined, false);
 		}
-		if (page !== 'images' && (this.activePage === 'images' || this.imageGridState?.displayMode === 'pane')) {
-			this.releaseImageGridStateImages(this.imageGridState);
-			this.imageGridState = undefined;
+		if (page !== 'images' && page !== 'transfer' && (this.imageGridState || this.paneImageGridStates.left || this.paneImageGridStates.right)) {
+			this.releaseAllImageGridStates();
 			this.disposeImageGridObserver();
 			this.clearImageGridScrollTimer();
 			this.clearImageGridScrollRaf();
 			this.clearImageGridThumbnailQueue();
 			this.clearImageGridPreviewPrefetchTimer();
-			this.clearImageGridLoadedImageIndexes();
 			this.imagePreviewAnalysis = undefined;
 			this.clearImagePreviewRender();
-			this.imageGridRenderedRange = undefined;
 		}
 		this.activePage = page;
 		if (page !== 'transfer') {
@@ -2873,9 +2923,10 @@ export class TurboFileEditor extends EditorPane {
 		pane.classList.toggle('is-hidden-by-maximize', !!this.maximizedPane && this.maximizedPane !== side);
 		pane.addEventListener('pointerdown', () => this.setActiveFilePaneSide(side));
 		pane.addEventListener('focusin', () => this.setActiveFilePaneSide(side));
-		if (this.activePage === 'transfer' && this.imageGridState?.displayMode === 'pane' && this.imageGridState.side === side) {
+		const paneImageGridState = this.activePage === 'transfer' ? this.paneImageGridStates[side] : undefined;
+		if (paneImageGridState) {
 			pane.classList.add('turbofile-pane-image-grid');
-			pane.appendChild(this.renderImageGridPage());
+			pane.appendChild(this.renderImageGridPage(paneImageGridState));
 			return pane;
 		}
 		const browserTitle = side === 'left' ? '左侧文件浏览' : '右侧文件浏览';
@@ -2899,7 +2950,8 @@ export class TurboFileEditor extends EditorPane {
 		this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', toolbarAccent);
 		this.appendToolbarButton(toolbar, Codicon.trash, '删除选中项', () => this.deleteSelected(side), 'trash', 'danger');
 		this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', 'secondary');
-		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'), 'grid-3x3-gap', gridAccent);
+		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', gridAccent);
+		this.appendToolbarButton(toolbar, side === 'left' ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarRight, '在当前侧展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'));
 		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
 		this.appendToolbarButton(
 			toolbar,
@@ -5155,19 +5207,18 @@ export class TurboFileEditor extends EditorPane {
 		return overlay;
 	}
 
-	private renderImageGridPage(): HTMLElement {
-		const state = this.imageGridState;
+	private renderImageGridPage(state: TurboFileImageGridState | undefined = this.imageGridState): HTMLElement {
 		const page = $('.turbofile-image-page');
 		if (!state) {
 			return page;
 		}
 		page.classList.toggle('is-pane-mode', state.displayMode === 'pane');
 		page.dataset.turbofileSide = state.side;
-		page.addEventListener('pointerdown', () => this.setActiveFilePaneSide(state.side));
-		page.addEventListener('focusin', () => this.setActiveFilePaneSide(state.side));
+		page.addEventListener('pointerdown', () => this.setActiveImageGridState(state));
+		page.addEventListener('focusin', () => this.setActiveImageGridState(state));
 		// The scroll body is recreated on every full render; drop the cached width so this pass
 		// re-measures (and so a post-attach measurement below picks up the real body width).
-		this.invalidateImageGridBodyWidthCache();
+		this.invalidateImageGridBodyWidthCache(state);
 		this.normalizeImageGridStateColumns(state);
 		const range = this.getImageGridVirtualRange(state);
 
@@ -5189,7 +5240,10 @@ export class TurboFileEditor extends EditorPane {
 			if (state.columns === option) {
 				button.classList.add('is-active');
 			}
-			button.addEventListener('click', () => this.setImageGridColumns(option));
+			button.addEventListener('click', () => {
+				this.setActiveImageGridState(state);
+				this.setImageGridColumns(option);
+			});
 			columns.appendChild(button);
 		}
 		headerLeft.appendChild(columns);
@@ -5203,7 +5257,10 @@ export class TurboFileEditor extends EditorPane {
 		deleteButton.disabled = selectedCount === 0;
 		deleteButton.setAttribute('aria-label', '\u5220\u9664\u9009\u4e2d\u56fe\u7247');
 		deleteButton.appendChild(renderIcon(Codicon.trash));
-		deleteButton.addEventListener('click', () => { void this.deleteSelectedImageGridItems(); });
+		deleteButton.addEventListener('click', () => {
+			this.setActiveImageGridState(state);
+			void this.deleteSelectedImageGridItems();
+		});
 		actions.appendChild(deleteButton);
 		actions.appendChild(this.renderImageGridSortControl(state));
 		actions.appendChild(this.renderImageGridScaleControl(state));
@@ -5212,10 +5269,10 @@ export class TurboFileEditor extends EditorPane {
 		closeIcon.title = '关闭';
 		closeIcon.setAttribute('aria-label', '关闭图片网格');
 		closeIcon.appendChild(renderIcon(Codicon.close));
-		closeIcon.addEventListener('click', () => this.closeImageGridPage());
+		closeIcon.addEventListener('click', () => this.closeImageGridPage(state));
 		actions.appendChild(closeIcon);
 		const close = this.createButton('关闭', 'turbofile-secondary-button');
-		close.element.addEventListener('click', () => this.closeImageGridPage());
+		close.element.addEventListener('click', () => this.closeImageGridPage(state));
 		actions.appendChild(close.element);
 		header.appendChild(actions);
 		page.appendChild(header);
@@ -5224,18 +5281,21 @@ export class TurboFileEditor extends EditorPane {
 		body.tabIndex = 0;
 		body.scrollTop = state.scrollTop;
 		body.addEventListener('pointerdown', event => {
+			this.setActiveImageGridState(state);
 			const target = event.target instanceof HTMLElement ? event.target : undefined;
 			if (!target?.closest('.turbofile-image-page-card, button, .turbofile-image-page-sort, .turbofile-image-page-scale')) {
 				body.focus({ preventScroll: true });
 			}
 		});
+		body.addEventListener('focusin', () => this.setActiveImageGridState(state));
 		body.addEventListener('paste', event => {
+			this.setActiveImageGridState(state);
 			event.preventDefault();
 			void this.pasteIntoPane(this.getOppositeSide(state.side));
 		});
 		this.registerImageGridDropTarget(body, state);
-		body.addEventListener('scroll', () => this.handleImageGridScroll(body), { passive: true });
-		page.addEventListener('wheel', event => this.handleImageGridWheel(event, body), { passive: false, capture: true });
+		body.addEventListener('scroll', () => this.handleImageGridScroll(body, state), { passive: true });
+		page.addEventListener('wheel', event => this.handleImageGridWheel(event, body, state), { passive: false, capture: true });
 		const grid = $('.turbofile-image-page-grid');
 		grid.setAttribute('role', 'listbox');
 		grid.setAttribute('aria-multiselectable', 'true');
@@ -5251,7 +5311,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 			// Now that the body is in the document, drop the render-time (container-based) width
 			// estimate so subsequent scroll passes measure the real attached body exactly once.
-			this.invalidateImageGridBodyWidthCache();
+			this.invalidateImageGridBodyWidthCache(state);
 			if (scrollTop > 0) {
 				body.scrollTop = scrollTop;
 			}
@@ -5295,6 +5355,7 @@ export class TurboFileEditor extends EditorPane {
 				event.stopPropagation();
 				select.classList.remove('is-open');
 				button.setAttribute('aria-expanded', 'false');
+				this.setActiveImageGridState(state);
 				this.setImageGridThumbnailScale(scale);
 			});
 			menu.appendChild(item);
@@ -5383,6 +5444,7 @@ export class TurboFileEditor extends EditorPane {
 				event.stopPropagation();
 				select.classList.remove('is-open');
 				button.setAttribute('aria-expanded', 'false');
+				this.setActiveImageGridState(state);
 				this.setImageGridSort(option.key);
 			});
 			menu.appendChild(item);
@@ -5453,7 +5515,7 @@ export class TurboFileEditor extends EditorPane {
 			bottomSpacer.style.height = `${range.bottomSpacerHeight}px`;
 			grid.appendChild(bottomSpacer);
 		}
-		this.imageGridRenderedRange = {
+		state.renderedRange = {
 			startIndex: range.startIndex,
 			endIndex: range.endIndex,
 			columns: this.getImageGridEffectiveColumns(state),
@@ -5469,15 +5531,13 @@ export class TurboFileEditor extends EditorPane {
 	 * page fills in fast instead of waiting behind loads for pages that were merely scrolled past.
 	 */
 	private scheduleImageGridVisibleLoad(state: TurboFileImageGridState): void {
-		if (this.imageGridVisibleLoadTimer) {
-			clearTimeout(this.imageGridVisibleLoadTimer);
-		}
-		this.imageGridVisibleLoadTimer = setTimeout(() => {
-			this.imageGridVisibleLoadTimer = undefined;
+		this.clearImageGridVisibleLoadTimer(state);
+		const timer = setTimeout(() => {
+			this.imageGridVisibleLoadTimers.delete(state);
 			if (!this.isImageGridSurfaceActive(state)) {
 				return;
 			}
-			this.imageGridThumbnailLoadToken++;
+			state.thumbnailLoadToken++;
 			const range = this.getImageGridVirtualRange(state);
 			const indexes: number[] = [];
 			for (let index = range.startIndex; index < range.endIndex; index++) {
@@ -5487,6 +5547,7 @@ export class TurboFileEditor extends EditorPane {
 				this.queueImageGridThumbnailLoads(state, indexes, true);
 			}
 		}, IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS);
+		this.imageGridVisibleLoadTimers.set(state, timer);
 	}
 
 	private renderImageGridCard(state: TurboFileImageGridState, image: TurboFileImageGridImage, index: number): HTMLElement {
@@ -5531,15 +5592,23 @@ export class TurboFileEditor extends EditorPane {
 		name.addEventListener('dblclick', event => event.stopPropagation());
 		card.appendChild(name);
 
-		card.addEventListener('pointerdown', event => this.selectImageGridItemWithPointer(index, event));
+		card.addEventListener('pointerdown', event => {
+			this.setActiveImageGridState(state);
+			this.selectImageGridItemWithPointer(index, event);
+		});
 		card.addEventListener('dragstart', event => this.beginImageGridCardDrag(state, index, event));
 		card.addEventListener('dragend', () => this.clearCurrentFileDragState());
-		card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
+		card.addEventListener('contextmenu', event => {
+			this.setActiveImageGridState(state);
+			this.selectImageGridItemWithContextMenu(index, event);
+		});
 		card.addEventListener('dblclick', event => {
 			event.preventDefault();
+			this.setActiveImageGridState(state);
 			this.openImageGridPreview(index);
 		});
 		card.addEventListener('keydown', event => {
+			this.setActiveImageGridState(state);
 			if (event.key === 'Enter') {
 				event.preventDefault();
 				this.openImageGridPreview(index);
@@ -5552,9 +5621,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private beginImageGridCardDrag(state: TurboFileImageGridState, index: number, event: DragEvent): void {
-		if (!event.dataTransfer || this.imageGridState !== state || index < 0 || index >= state.images.length) {
+		if (!event.dataTransfer || !this.isImageGridSurfaceActive(state) || index < 0 || index >= state.images.length) {
 			return;
 		}
+		this.setActiveImageGridState(state);
 		const image = state.images[index];
 		if (!image?.item.path || image.item.parent) {
 			return;
@@ -5579,9 +5649,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private copyImageGridSelectionToInternalClipboard(state: TurboFileImageGridState, operation: 'copy' | 'move'): void {
-		if (this.imageGridState !== state) {
+		if (!this.isImageGridSurfaceActive(state)) {
 			return;
 		}
+		this.setActiveImageGridState(state);
 		this.syncImageGridSelectionToPane(state);
 		this.copySelectedToInternalClipboard(state.side, operation);
 	}
@@ -7785,6 +7856,20 @@ export class TurboFileEditor extends EditorPane {
 		return this.container?.querySelector<HTMLElement>(`.turbofile-pane[data-turbofile-side="${side}"] .turbofile-image-page-body`) ?? undefined;
 	}
 
+	private getImageGridRootElement(state: TurboFileImageGridState): HTMLElement | undefined {
+		if (!this.container) {
+			return undefined;
+		}
+		if (state.displayMode === 'pane') {
+			return this.container.querySelector<HTMLElement>(`.turbofile-pane[data-turbofile-side="${state.side}"] .turbofile-image-page`) ?? undefined;
+		}
+		return this.container.querySelector<HTMLElement>('.turbofile-editor-content > .turbofile-image-page') ?? this.container.querySelector<HTMLElement>('.turbofile-image-page:not(.is-pane-mode)') ?? undefined;
+	}
+
+	private getImageGridBodyElement(state: TurboFileImageGridState): HTMLElement | undefined {
+		return this.getImageGridRootElement(state)?.querySelector<HTMLElement>('.turbofile-image-page-body') ?? undefined;
+	}
+
 	private hasExternalDropData(event: DragEvent): boolean {
 		const dataTransfer = event.dataTransfer;
 		if (!dataTransfer) {
@@ -9332,11 +9417,11 @@ export class TurboFileEditor extends EditorPane {
 		const state = this.paneStates[side];
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
-		this.clearImageGridLoadedImageIndexes();
-		this.clearImageGridLayoutMetrics();
-		this.releaseImageGridStateImages(this.imageGridState);
-		this.imageGridState = undefined;
-		this.imageGridRenderedRange = undefined;
+		if (displayMode === 'pane') {
+			this.releaseImageGridState(this.paneImageGridStates[side]);
+		} else if (this.imageGridState?.displayMode === 'page') {
+			this.releaseImageGridState(this.imageGridState);
+		}
 		const images = state.items
 			.filter(item => !item.parent && !item.directory && !!item.path && isImageFile(item.name))
 			.map(item => {
@@ -9374,7 +9459,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
-		this.imageGridState = {
+		const nextState: TurboFileImageGridState = {
 			side,
 			path: state.path,
 			displayMode,
@@ -9399,8 +9484,16 @@ export class TurboFileEditor extends EditorPane {
 			histogramY: 72,
 			fileListScrollTop: state.scrollTop,
 			scrollTop: 0,
-			viewportHeight: this.getImageGridDefaultViewportHeight()
+			viewportHeight: this.getImageGridDefaultViewportHeight(),
+			thumbnailLoadToken: 0,
+			loadedThumbnailIndexes: new Set<number>(),
+			loadedPreviewIndexes: new Set<number>(),
+			scrollRaf: 0
 		};
+		this.imageGridState = nextState;
+		if (displayMode === 'pane') {
+			this.paneImageGridStates[side] = nextState;
+		}
 		this.imageGridCtrlWheelDeltaRemainder = 0;
 		if (displayMode === 'page') {
 			this.activePage = 'images';
@@ -9409,34 +9502,32 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.statusMessage = `已展开 ${this.getSideLabel(side)} 图片：${images.length} 张。`;
 		this.render();
-		if (previewVisible && this.imageGridState) {
+		if (previewVisible) {
 			this.imageGridPreviewRequestSeq++;
-			void this.ensureImageGridPreviewLoaded(this.imageGridState, selectedIndex, this.imageGridPreviewRequestSeq);
-			this.scheduleImageGridPreviewNeighborsLoaded(this.imageGridState, selectedIndex);
+			void this.ensureImageGridPreviewLoaded(nextState, selectedIndex, this.imageGridPreviewRequestSeq);
+			this.scheduleImageGridPreviewNeighborsLoaded(nextState, selectedIndex);
 		}
 	}
 
-	private closeImageGridPage(): void {
-		const state = this.imageGridState;
+	private closeImageGridPage(state: TurboFileImageGridState | undefined = this.imageGridState): void {
 		this.imageGridCtrlWheelDeltaRemainder = 0;
 		this.disposeImageGridObserver();
 		this.clearImageGridScrollTimer();
 		this.clearImageGridScrollRaf();
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
-		this.clearImageGridLayoutMetrics(state);
-		this.releaseImageGridStateImages(state);
-		this.clearImageGridLoadedImageIndexes();
+		this.releaseImageGridState(state);
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
-		this.imageGridRenderedRange = undefined;
-		this.imageGridState = undefined;
 		if (state) {
 			this.restoreFileListScrollAfterImageGrid(state.side, state.fileListScrollTop);
 		}
-		this.activePage = 'transfer';
-		this.updateTransferTabsVisibility();
-		this.notifyActivePageChanged();
+		if (!state || state.displayMode === 'page') {
+			this.activePage = 'transfer';
+			this.updateTransferTabsVisibility();
+			this.notifyActivePageChanged();
+		}
+		this.imageGridState = state ? (this.paneImageGridStates[state.side] ?? this.paneImageGridStates[this.getOppositeSide(state.side)]) : undefined;
 		this.render();
 	}
 
@@ -9876,10 +9967,10 @@ export class TurboFileEditor extends EditorPane {
 		state.previewSamplingMode = this.imagePreviewSamplingMode;
 		state.previewVisible = keepPreviewVisible && state.images.length > 0;
 		this.imageGridPreviewRequestSeq++;
-		this.imageGridRenderedRange = undefined;
+		state.renderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
-		this.clearImageGridLoadedImageIndexes();
+		this.clearImageGridLoadedImageIndexes(state);
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.removePaneItemsFromState(state.side, items);
@@ -9940,10 +10031,10 @@ export class TurboFileEditor extends EditorPane {
 		state.previewSamplingMode = this.imagePreviewSamplingMode;
 		state.previewVisible = state.images.length > 0;
 		this.imageGridPreviewRequestSeq++;
-		this.imageGridRenderedRange = undefined;
+		state.renderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridPreviewPrefetchTimer();
-		this.clearImageGridLoadedImageIndexes();
+		this.clearImageGridLoadedImageIndexes(state);
 		this.imagePreviewAnalysis = undefined;
 		this.clearImagePreviewRender();
 		this.removePaneItemsFromState(state.side, [image.item]);
@@ -9980,7 +10071,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.imageGridState.columns = nextColumns;
-		this.imageGridRenderedRange = undefined;
+		this.imageGridState.renderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
 		this.render();
 	}
@@ -9995,9 +10086,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.imageGridState.thumbnailScale = nextScale;
 		this.clearImageGridLayoutMetrics(this.imageGridState);
-		this.imageGridRenderedRange = undefined;
+		this.imageGridState.renderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
-		this.clearImageGridLoadedImageIndexes();
+		this.clearImageGridLoadedImageIndexes(this.imageGridState);
 		for (const image of this.imageGridState.images) {
 			this.releaseImageBlobUrl(image.thumbnailUrl);
 			image.thumbnailUrl = undefined;
@@ -10022,7 +10113,7 @@ export class TurboFileEditor extends EditorPane {
 		const nextColumns = this.normalizeImageGridColumns(state.columns);
 		if (state.columns !== nextColumns) {
 			state.columns = nextColumns;
-			this.imageGridRenderedRange = undefined;
+			state.renderedRange = undefined;
 		}
 	}
 
@@ -10062,9 +10153,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const nextAnchorIndex = anchorPath ? state.images.findIndex(image => image.item.path === anchorPath) : -1;
 		state.selectionAnchorIndex = nextAnchorIndex >= 0 ? nextAnchorIndex : state.selectedIndex;
-		this.imageGridRenderedRange = undefined;
+		state.renderedRange = undefined;
 		this.clearImageGridThumbnailQueue();
-		this.clearImageGridLoadedImageIndexes();
+		this.clearImageGridLoadedImageIndexes(state);
 		this.render();
 	}
 
@@ -10194,7 +10285,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const token = this.imageGridThumbnailLoadToken;
+		const token = state.thumbnailLoadToken;
 		const targetWidth = this.getImageGridThumbnailRequestWidth(state);
 		const chunks: { index: number; image: TurboFileImageGridImage; path: string; rawSize: number }[][] = [];
 		for (let offset = 0; offset < pending.length; offset += IMAGE_GRID_BATCH_CHUNK_COUNT) {
@@ -10205,7 +10296,7 @@ export class TurboFileEditor extends EditorPane {
 		// A stale token (user scrolled to a different page) stops the loop so the new page gets priority.
 		let cursor = 0;
 		const worker = async (): Promise<void> => {
-			while (cursor < chunks.length && this.imageGridState === state && this.imageGridThumbnailLoadToken === token) {
+			while (cursor < chunks.length && this.isImageGridSurfaceActive(state) && state.thumbnailLoadToken === token) {
 				const chunk = chunks[cursor++];
 				await this.loadImageGridThumbnailChunk(state, device, chunk, targetWidth, token);
 			}
@@ -10223,7 +10314,7 @@ export class TurboFileEditor extends EditorPane {
 		// If a newer load superseded this one, some now-visible images we had marked as loading were
 		// skipped by that newer load (it saw thumbnailLoading=true) and have just been reset here. Run
 		// one more pass for the current page so those never get orphaned as blank placeholders.
-		if (this.isImageGridSurfaceActive(state) && this.imageGridThumbnailLoadToken !== token) {
+		if (this.isImageGridSurfaceActive(state) && state.thumbnailLoadToken !== token) {
 			this.scheduleImageGridVisibleLoad(state);
 		}
 	}
@@ -10235,7 +10326,7 @@ export class TurboFileEditor extends EditorPane {
 		targetWidth: number,
 		token: number
 	): Promise<void> {
-		if (this.imageGridState !== state || this.imageGridThumbnailLoadToken !== token) {
+		if (!this.isImageGridSurfaceActive(state) || state.thumbnailLoadToken !== token) {
 			for (const target of chunk) {
 				target.image.thumbnailLoading = false;
 			}
@@ -10248,7 +10339,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch {
 			entries = [];
 		}
-		if (this.imageGridState !== state) {
+		if (!this.isImageGridSurfaceActive(state)) {
 			for (const target of chunk) {
 				target.image.thumbnailLoading = false;
 			}
@@ -10274,10 +10365,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (!entry?.ok || !entry.content) {
 			target.image.thumbnailError = entry?.message ?? '加载失败';
-			this.updateImageGridCard(target.index);
+			this.updateImageGridCard(state, target.index);
 			return;
 		}
-		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
+		if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, target.index)) {
 			return;
 		}
 		const mime = entry.mime ?? getMimeType(target.image.item.name);
@@ -10298,7 +10389,7 @@ export class TurboFileEditor extends EditorPane {
 		const url = bytes.byteLength > IMAGE_GRID_CLIENT_DOWNSCALE_BYTES
 			? (await this.createDownscaledThumbnailUrl(bytes, mime, this.getImageGridThumbnailRequestWidth(state))) ?? this.createBlobUrlFromBytes(bytes, mime)
 			: this.createBlobUrlFromBytes(bytes, mime);
-		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, target.index)) {
+		if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, target.index)) {
 			this.releaseImageBlobUrl(url);
 			return;
 		}
@@ -10308,9 +10399,9 @@ export class TurboFileEditor extends EditorPane {
 		target.image.thumbnailMime = mime;
 		target.image.thumbnailError = url ? undefined : '加载失败';
 		if (url) {
-			this.imageGridLoadedThumbnailIndexes.add(target.index);
+			state.loadedThumbnailIndexes.add(target.index);
 		}
-		this.updateImageGridCard(target.index);
+		this.updateImageGridCard(state, target.index);
 	}
 
 	private async createDownscaledThumbnailUrl(bytes: Uint8Array, mime: string, targetWidth: number): Promise<string | undefined> {
@@ -10356,12 +10447,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private async applySshThumbnailViaProtocol(state: TurboFileImageGridState, device: TurboFileDevice, index: number): Promise<void> {
 		const image = state.images[index];
-		if (!image?.item.path || this.imageGridState !== state) {
+		if (!image?.item.path || !this.isImageGridSurfaceActive(state)) {
 			return;
 		}
 		const requestWidth = this.getImageGridThumbnailRequestWidth(state);
 		const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImageGridResourceOptions(requestWidth, image.item.rawSize, image.item.rawModified));
-		if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+		if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, index)) {
 			if (result.url) {
 				this.releaseImageBlobUrl(result.url);
 			}
@@ -10373,18 +10464,20 @@ export class TurboFileEditor extends EditorPane {
 		image.thumbnailMime = result.mime || getMimeType(image.item.name);
 		image.thumbnailError = result.ok ? undefined : result.message;
 		if (result.ok) {
-			this.imageGridLoadedThumbnailIndexes.add(index);
+			state.loadedThumbnailIndexes.add(index);
 		}
-		this.updateImageGridCard(index);
+		this.updateImageGridCard(state, index);
 	}
 
 	private processImageGridThumbnailQueue(): void {
-		const state = this.imageGridState;
-		if (!state || !this.isImageGridSurfaceActive(state)) {
+		if (!this.getVisibleImageGridStates().length) {
 			return;
 		}
 
-		const limit = this.getImageGridThumbnailParallelLimit(state);
+		const activeState = this.imageGridState && this.isImageGridSurfaceActive(this.imageGridState)
+			? this.imageGridState
+			: this.getVisibleImageGridStates()[0];
+		const limit = activeState ? this.getImageGridThumbnailParallelLimit(activeState) : IMAGE_GRID_REMOTE_PARALLEL_LIMIT;
 		const available = Math.max(0, limit - this.imageGridThumbnailLoadingCount);
 		for (let started = 0; started < available && this.imageGridThumbnailQueue.length;) {
 			const request = this.imageGridThumbnailQueue.shift();
@@ -10392,10 +10485,10 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			this.imageGridThumbnailQueued.delete(request.key);
-			if (request.state !== state || !this.shouldLoadImageGridThumbnail(request.state, request.index)) {
+			if (!this.shouldLoadImageGridThumbnail(request.state, request.index)) {
 				continue;
 			}
-			const image = state.images[request.index];
+			const image = request.state.images[request.index];
 			if (!image) {
 				continue;
 			}
@@ -10519,7 +10612,7 @@ export class TurboFileEditor extends EditorPane {
 	private async loadImageGridThumbnail(state: TurboFileImageGridState, index: number): Promise<void> {
 		const image = state.images[index];
 		const device = this.getPaneDevice(state.side);
-		if (!image?.item.path || !device || this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+		if (!image?.item.path || !device || !this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, index)) {
 			return;
 		}
 
@@ -10527,7 +10620,7 @@ export class TurboFileEditor extends EditorPane {
 			const requestWidth = this.getImageGridThumbnailRequestWidth(state);
 			if (this.isRemoteSshImageDevice(device)) {
 				const result = await this.createImageGridResourceUrl(device, image.item.path, createTurboFileImageGridResourceOptions(requestWidth, image.item.rawSize, image.item.rawModified));
-				if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+				if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, index)) {
 					if (result.url) {
 						this.releaseImageBlobUrl(result.url);
 					}
@@ -10539,9 +10632,9 @@ export class TurboFileEditor extends EditorPane {
 				image.thumbnailMime = result.mime || getMimeType(image.item.name);
 				image.thumbnailError = result.ok ? undefined : result.message;
 				if (result.ok) {
-					this.imageGridLoadedThumbnailIndexes.add(index);
+					state.loadedThumbnailIndexes.add(index);
 				}
-				this.updateImageGridCard(index);
+				this.updateImageGridCard(state, index);
 				return;
 			}
 
@@ -10562,7 +10655,7 @@ export class TurboFileEditor extends EditorPane {
 					sourceSize: image.item.rawSize,
 					sourceModified: image.item.rawModified
 				});
-			if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+			if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, index)) {
 				return;
 			}
 			const resolvedWidth = result.width ?? image.width;
@@ -10574,7 +10667,7 @@ export class TurboFileEditor extends EditorPane {
 					sourceSize: image.item.rawSize,
 					sourceModified: image.item.rawModified
 				});
-				if (this.imageGridState !== state || !this.isImageGridIndexNearViewport(state, index)) {
+				if (!this.isImageGridSurfaceActive(state) || !this.isImageGridIndexNearViewport(state, index)) {
 					return;
 				}
 				if (originalResult.ok) {
@@ -10590,16 +10683,16 @@ export class TurboFileEditor extends EditorPane {
 			image.width = result.width ?? resolvedWidth;
 			image.height = result.height ?? resolvedHeight;
 			if (result.ok) {
-				this.imageGridLoadedThumbnailIndexes.add(index);
+				state.loadedThumbnailIndexes.add(index);
 			}
-			this.updateImageGridCard(index);
+			this.updateImageGridCard(state, index);
 		} catch (error) {
-			if (this.imageGridState === state) {
+			if (this.isImageGridSurfaceActive(state)) {
 				image.thumbnailError = error instanceof Error ? error.message : String(error);
-				this.updateImageGridCard(index);
+				this.updateImageGridCard(state, index);
 			}
 		} finally {
-			if (this.imageGridState === state) {
+			if (this.isImageGridSurfaceActive(state)) {
 				image.thumbnailLoading = false;
 			}
 		}
@@ -10656,7 +10749,7 @@ export class TurboFileEditor extends EditorPane {
 					image.previewMime = mime;
 					image.previewError = image.previewUrl ? undefined : '加载失败';
 					if (image.previewUrl) {
-						this.imageGridLoadedPreviewIndexes.add(index);
+						state.loadedPreviewIndexes.add(index);
 						await this.ensureImagePreviewElementLoaded(state, index);
 					}
 					return;
@@ -10676,7 +10769,7 @@ export class TurboFileEditor extends EditorPane {
 				image.previewMime = result.mime || getMimeType(image.item.name);
 				image.previewError = result.ok ? undefined : result.message;
 				if (result.ok) {
-					this.imageGridLoadedPreviewIndexes.add(index);
+					state.loadedPreviewIndexes.add(index);
 					await this.ensureImagePreviewElementLoaded(state, index);
 				}
 				return;
@@ -10705,7 +10798,7 @@ export class TurboFileEditor extends EditorPane {
 			image.width = result.width ?? image.width;
 			image.height = result.height ?? image.height;
 			if (result.ok) {
-				this.imageGridLoadedPreviewIndexes.add(index);
+				state.loadedPreviewIndexes.add(index);
 				await this.ensureImagePreviewElementLoaded(state, index);
 			}
 		} catch (error) {
@@ -10735,20 +10828,28 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private bindImageGridObserver(): void {
-		if (!this.imageGridState || !this.isImageGridSurfaceActive(this.imageGridState) || !this.container) {
+		const state = this.imageGridState;
+		if (!state || !this.isImageGridSurfaceActive(state) || !this.container) {
 			this.disposeImageGridObserver();
 			return;
 		}
+		if (state.displayMode === 'pane') {
+			this.disposeImageGridObserver();
+			for (const paneState of this.getVisibleImageGridStates()) {
+				this.scheduleImageGridVisibleLoad(paneState);
+			}
+			return;
+		}
 
-		const body = this.container.querySelector('.turbofile-image-page-body') as HTMLElement | null;
+		const root = this.getImageGridRootElement(state);
+		const body = root?.querySelector('.turbofile-image-page-body') as HTMLElement | null | undefined;
 		if (!body || !('IntersectionObserver' in getWindow(this.container))) {
 			return;
 		}
 
 		this.disposeImageGridObserver();
 		this.imageGridObserver = new IntersectionObserver(entries => {
-			const state = this.imageGridState;
-			if (!state) {
+			if (!this.isImageGridSurfaceActive(state)) {
 				return;
 			}
 			let sawVisible = false;
@@ -10773,12 +10874,12 @@ export class TurboFileEditor extends EditorPane {
 		});
 
 		let hasCards = false;
-		for (const card of Array.from(this.container.querySelectorAll('.turbofile-image-page-card[data-image-index]'))) {
+		for (const card of Array.from(root?.querySelectorAll('.turbofile-image-page-card[data-image-index]') ?? [])) {
 			this.imageGridObserver.observe(card);
 			hasCards = true;
 		}
 		if (hasCards) {
-			this.scheduleImageGridVisibleLoad(this.imageGridState);
+			this.scheduleImageGridVisibleLoad(state);
 		}
 	}
 
@@ -10790,12 +10891,12 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridObserver = undefined;
 	}
 
-	private updateImageGridCard(index: number): void {
-		const state = this.imageGridState;
-		if (!this.container || !state || !this.isImageGridSurfaceActive(state)) {
+	private updateImageGridCard(state: TurboFileImageGridState, index: number): void {
+		if (!this.container || !this.isImageGridSurfaceActive(state)) {
 			return;
 		}
-		const card = this.container.querySelector(`.turbofile-image-page-card[data-image-index="${index}"]`) as HTMLElement | null;
+		const root = this.getImageGridRootElement(state);
+		const card = root?.querySelector(`.turbofile-image-page-card[data-image-index="${index}"]`) as HTMLElement | null | undefined;
 		const image = state?.images[index];
 		if (!card || !image) {
 			return;
@@ -10833,7 +10934,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridEffectiveColumns(state: TurboFileImageGridState): number {
 		const base = Math.max(1, state.columns);
-		return getTurboFileImageGridEffectiveColumns(base, this.getImageGridBodyWidth(), this.getImageGridMaxCardWidth(state), IMAGE_GRID_CARD_GAP);
+		return getTurboFileImageGridEffectiveColumns(base, this.getImageGridBodyWidth(state), this.getImageGridMaxCardWidth(state), IMAGE_GRID_CARD_GAP);
 	}
 
 	private getImageGridVirtualRange(state: TurboFileImageGridState): TurboFileImageGridRange {
@@ -10870,7 +10971,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridBaseCardWidth(state: TurboFileImageGridState): number {
 		const columns = Math.max(1, state.columns);
-		const width = this.getImageGridBodyWidth();
+		const width = this.getImageGridBodyWidth(state);
 		const available = width - (IMAGE_GRID_CARD_GAP * Math.max(0, columns - 1));
 		return Math.max(IMAGE_GRID_THUMB_MIN, available / columns);
 	}
@@ -10881,8 +10982,8 @@ export class TurboFileEditor extends EditorPane {
 
 	private getImageGridLayoutMetrics(state: TurboFileImageGridState): TurboFileImageGridLayoutMetrics {
 		const baseCardWidth = this.getImageGridBaseCardWidth(state);
-		if (this.imageGridLayoutMetrics?.state === state && this.imageGridLayoutMetrics.scale === state.thumbnailScale && this.imageGridLayoutMetrics.baseCardWidth === baseCardWidth) {
-			return this.imageGridLayoutMetrics;
+		if (state.layoutMetrics?.state === state && state.layoutMetrics.scale === state.thumbnailScale && state.layoutMetrics.baseCardWidth === baseCardWidth) {
+			return state.layoutMetrics;
 		}
 		let cardWidth = baseCardWidth;
 		let imageWidth = IMAGE_GRID_THUMB_MIN;
@@ -10893,7 +10994,7 @@ export class TurboFileEditor extends EditorPane {
 			imageWidth = Math.max(imageWidth, size.imageWidth);
 			rowHeight = Math.max(rowHeight, size.rowHeight);
 		}
-		this.imageGridLayoutMetrics = {
+		state.layoutMetrics = {
 			state,
 			scale: state.thumbnailScale,
 			baseCardWidth,
@@ -10901,30 +11002,40 @@ export class TurboFileEditor extends EditorPane {
 			maxImageWidth: Math.max(1, Math.round(imageWidth)),
 			rowHeight: Math.max(150, Math.round(rowHeight))
 		};
-		return this.imageGridLayoutMetrics;
+		return state.layoutMetrics;
 	}
 
 	private clearImageGridLayoutMetrics(state?: TurboFileImageGridState): void {
-		if (!state || this.imageGridLayoutMetrics?.state === state) {
-			this.imageGridLayoutMetrics = undefined;
+		if (state) {
+			state.layoutMetrics = undefined;
 		}
 	}
 
-	private getImageGridBodyWidth(): number {
-		if (this.imageGridBodyWidthCache !== undefined) {
-			return this.imageGridBodyWidthCache;
+	private getImageGridBodyWidth(state: TurboFileImageGridState): number {
+		if (state.bodyWidthCache !== undefined) {
+			return state.bodyWidthCache;
 		}
-		const body = this.container?.querySelector<HTMLElement>('.turbofile-image-page-body');
+		const body = this.getImageGridBodyElement(state);
 		const measured = body?.clientWidth ?? 0;
 		const width = measured > 0
 			? Math.max(320, measured - 28)
 			: Math.max(320, (this.container?.clientWidth ?? 1440) - 28);
-		this.imageGridBodyWidthCache = width;
+		state.bodyWidthCache = width;
 		return width;
 	}
 
-	private invalidateImageGridBodyWidthCache(): void {
-		this.imageGridBodyWidthCache = undefined;
+	private invalidateImageGridBodyWidthCache(state?: TurboFileImageGridState): void {
+		if (state) {
+			state.bodyWidthCache = undefined;
+		}
+	}
+
+	private invalidateAllImageGridLayoutCaches(): void {
+		for (const state of this.getVisibleImageGridStates()) {
+			this.invalidateImageGridBodyWidthCache(state);
+			this.clearImageGridLayoutMetrics(state);
+			state.renderedRange = undefined;
+		}
 	}
 
 	private getImageGridThumbnailRequestWidth(state: TurboFileImageGridState): number {
@@ -10960,24 +11071,21 @@ export class TurboFileEditor extends EditorPane {
 		return device.platform === 'windows' ? IMAGE_GRID_REMOTE_WINDOWS_PARALLEL_LIMIT : IMAGE_GRID_REMOTE_PARALLEL_LIMIT;
 	}
 
-	private handleImageGridScroll(body: HTMLElement): void {
-		const state = this.imageGridState;
-		if (!state) {
-			return;
-		}
+	private handleImageGridScroll(body: HTMLElement, state: TurboFileImageGridState): void {
+		this.setActiveImageGridState(state);
 		state.scrollTop = body.scrollTop;
 		state.viewportHeight = body.clientHeight || state.viewportHeight;
 		this.trimImageGridThumbnailQueue(state);
-		if (this.imageGridScrollRaf || !this.container) {
+		if (state.scrollRaf || !this.container) {
 			return;
 		}
-		this.imageGridScrollRaf = getWindow(this.container).requestAnimationFrame(() => {
-			this.imageGridScrollRaf = 0;
+		state.scrollRaf = getWindow(this.container).requestAnimationFrame(() => {
+			state.scrollRaf = 0;
 			if (!this.isImageGridSurfaceActive(state)) {
 				return;
 			}
 			const range = this.getImageGridVirtualRange(state);
-			const rendered = this.imageGridRenderedRange;
+			const rendered = state.renderedRange;
 			if (rendered && rendered.startIndex === range.startIndex && rendered.endIndex === range.endIndex && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
 				return;
 			}
@@ -10986,9 +11094,9 @@ export class TurboFileEditor extends EditorPane {
 		});
 	}
 
-	private handleImageGridWheel(event: WheelEvent, body: HTMLElement): void {
-		const state = this.imageGridState;
-		if (!state || !event.ctrlKey || event.altKey || event.metaKey) {
+	private handleImageGridWheel(event: WheelEvent, body: HTMLElement, state: TurboFileImageGridState): void {
+		this.setActiveImageGridState(state);
+		if (!event.ctrlKey || event.altKey || event.metaKey) {
 			return;
 		}
 		event.preventDefault();
@@ -11010,11 +11118,11 @@ export class TurboFileEditor extends EditorPane {
 
 	private normalizeImageGridColumns(columns: number): TurboFileImageGridColumns {
 		const rounded = Math.round(columns);
-		return clampNumber(rounded, IMAGE_GRID_COLUMN_MIN, this.getImageGridMaxColumns());
+		return clampNumber(rounded, IMAGE_GRID_COLUMN_MIN, this.getImageGridMaxColumns(this.imageGridState));
 	}
 
-	private getImageGridMaxColumns(): TurboFileImageGridColumns {
-		const width = this.getImageGridBodyWidth();
+	private getImageGridMaxColumns(state: TurboFileImageGridState | undefined): TurboFileImageGridColumns {
+		const width = state ? this.getImageGridBodyWidth(state) : Math.max(320, (this.container?.clientWidth ?? 1440) - 28);
 		const fitByWidth = Math.floor((width + IMAGE_GRID_CARD_GAP) / (IMAGE_GRID_THUMB_MIN + IMAGE_GRID_CARD_GAP));
 		return Math.max(IMAGE_GRID_COLUMN_MIN, Math.min(IMAGE_GRID_COLUMN_MAX, fitByWidth));
 	}
@@ -11023,7 +11131,8 @@ export class TurboFileEditor extends EditorPane {
 		if (!this.container || !this.isImageGridSurfaceActive(state)) {
 			return;
 		}
-		const grid = this.container.querySelector<HTMLElement>('.turbofile-image-page-grid');
+		const root = this.getImageGridRootElement(state);
+		const grid = root?.querySelector<HTMLElement>('.turbofile-image-page-grid');
 		if (!grid) {
 			return;
 		}
@@ -11032,7 +11141,7 @@ export class TurboFileEditor extends EditorPane {
 		// live scroll position before the rebuild and only restore it if the rebuild actually drove
 		// scrollTop backwards (a collapse). Using the live pre-render value — not the stale state —
 		// ensures we never yank against ongoing inertial scrolling, which is what caused the jitter.
-		const body = this.container.querySelector<HTMLElement>('.turbofile-image-page-body');
+		const body = root?.querySelector<HTMLElement>('.turbofile-image-page-body');
 		const scrollTopBeforeRender = body ? body.scrollTop : state.scrollTop;
 		this.renderImageGridSlice(grid, state, range);
 		if (body && body.scrollTop < scrollTopBeforeRender) {
@@ -11042,10 +11151,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private clearImageGridScrollTimer(): void {
-		if (this.imageGridVisibleLoadTimer) {
-			clearTimeout(this.imageGridVisibleLoadTimer);
-			this.imageGridVisibleLoadTimer = undefined;
+		for (const timer of this.imageGridVisibleLoadTimers.values()) {
+			clearTimeout(timer);
 		}
+		this.imageGridVisibleLoadTimers.clear();
 		if (!this.imageGridScrollRenderTimer) {
 			return;
 		}
@@ -11053,13 +11162,32 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridScrollRenderTimer = undefined;
 	}
 
-	private clearImageGridScrollRaf(): void {
-		if (!this.imageGridScrollRaf || !this.container) {
-			this.imageGridScrollRaf = 0;
+	private clearImageGridVisibleLoadTimer(state: TurboFileImageGridState): void {
+		const timer = this.imageGridVisibleLoadTimers.get(state);
+		if (!timer) {
 			return;
 		}
-		getWindow(this.container).cancelAnimationFrame(this.imageGridScrollRaf);
-		this.imageGridScrollRaf = 0;
+		clearTimeout(timer);
+		this.imageGridVisibleLoadTimers.delete(state);
+	}
+
+	private clearImageGridScrollRaf(): void {
+		const seen = new Set<TurboFileImageGridState>();
+		for (const state of [this.imageGridState, ...Object.values(this.paneImageGridStates)]) {
+			if (state && !seen.has(state)) {
+				seen.add(state);
+				this.clearImageGridStateScrollRaf(state);
+			}
+		}
+	}
+
+	private clearImageGridStateScrollRaf(state: TurboFileImageGridState): void {
+		if (!state.scrollRaf || !this.container) {
+			state.scrollRaf = 0;
+			return;
+		}
+		getWindow(this.container).cancelAnimationFrame(state.scrollRaf);
+		state.scrollRaf = 0;
 	}
 
 	private clearImageGridPreviewPrefetchTimer(): void {
@@ -11071,8 +11199,8 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridVisibleIndexes(state: TurboFileImageGridState): number[] {
-		const rendered = this.imageGridRenderedRange;
-		const range = this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length
+		const rendered = state.renderedRange;
+		const range = rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length
 			? { startIndex: rendered.startIndex, endIndex: rendered.endIndex }
 			: this.getImageGridVirtualRange(state);
 		const indexes: number[] = [];
@@ -11101,14 +11229,14 @@ export class TurboFileEditor extends EditorPane {
 		this.imageGridThumbnailQueued.clear();
 	}
 
-	private clearImageGridLoadedImageIndexes(): void {
-		this.imageGridLoadedThumbnailIndexes.clear();
-		this.imageGridLoadedPreviewIndexes.clear();
+	private clearImageGridLoadedImageIndexes(state: TurboFileImageGridState): void {
+		state.loadedThumbnailIndexes.clear();
+		state.loadedPreviewIndexes.clear();
 	}
 
 	private isImageGridIndexNearViewport(state: TurboFileImageGridState, index: number): boolean {
-		const rendered = this.imageGridRenderedRange;
-		if (this.imageGridState === state && rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
+		const rendered = state.renderedRange;
+		if (rendered && rendered.columns === this.getImageGridEffectiveColumns(state) && rendered.total === state.images.length) {
 			return index >= rendered.startIndex && index < rendered.endIndex;
 		}
 		const range = this.getImageGridVirtualRange(state);
@@ -11119,10 +11247,10 @@ export class TurboFileEditor extends EditorPane {
 		const keepRowWidth = this.getImageGridEffectiveColumns(state);
 		const keepThumbnailStart = Math.max(0, range.startIndex - keepRowWidth);
 		const keepThumbnailEnd = Math.min(state.images.length, range.endIndex + keepRowWidth);
-		for (const index of Array.from(this.imageGridLoadedThumbnailIndexes)) {
+		for (const index of Array.from(state.loadedThumbnailIndexes)) {
 			const image = state.images[index];
 			if (!image) {
-				this.imageGridLoadedThumbnailIndexes.delete(index);
+				state.loadedThumbnailIndexes.delete(index);
 				continue;
 			}
 			const keepThumbnail = index >= keepThumbnailStart && index < keepThumbnailEnd;
@@ -11131,14 +11259,14 @@ export class TurboFileEditor extends EditorPane {
 				image.thumbnailUrl = undefined;
 				image.thumbnailContent = '';
 				image.thumbnailError = undefined;
-				this.imageGridLoadedThumbnailIndexes.delete(index);
+				state.loadedThumbnailIndexes.delete(index);
 			}
 		}
 
-		for (const index of Array.from(this.imageGridLoadedPreviewIndexes)) {
+		for (const index of Array.from(state.loadedPreviewIndexes)) {
 			const image = state.images[index];
 			if (!image) {
-				this.imageGridLoadedPreviewIndexes.delete(index);
+				state.loadedPreviewIndexes.delete(index);
 				continue;
 			}
 			const keepPreview = this.shouldKeepImageGridPreview(state, index);
@@ -11151,7 +11279,7 @@ export class TurboFileEditor extends EditorPane {
 				image.previewImageKey = undefined;
 				image.previewImageLoading = undefined;
 				image.previewImageLoadingKey = undefined;
-				this.imageGridLoadedPreviewIndexes.delete(index);
+				state.loadedPreviewIndexes.delete(index);
 			}
 		}
 	}
@@ -11205,7 +11333,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private handleImageGridThumbnailError(state: TurboFileImageGridState, index: number): void {
-		if (this.imageGridState !== state) {
+		if (!this.isImageGridSurfaceActive(state)) {
 			return;
 		}
 		const image = state.images[index];
@@ -11215,7 +11343,7 @@ export class TurboFileEditor extends EditorPane {
 		image.thumbnailUrl = undefined;
 		image.thumbnailContent = '';
 		image.thumbnailError = '缩略图解码失败';
-		this.updateImageGridCard(index);
+		this.updateImageGridCard(state, index);
 	}
 
 	private getImageGridSelectedIndexes(state: TurboFileImageGridState): number[] {
@@ -11248,9 +11376,13 @@ export class TurboFileEditor extends EditorPane {
 		if (!this.container || !state) {
 			return;
 		}
+		const root = this.getImageGridRootElement(state);
+		if (!root) {
+			return;
+		}
 
 		const selectedIndexes = new Set(this.getImageGridSelectedIndexes(state));
-		for (const card of Array.from(this.container.querySelectorAll<HTMLElement>('.turbofile-image-page-card[data-image-index]'))) {
+		for (const card of Array.from(root.querySelectorAll<HTMLElement>('.turbofile-image-page-card[data-image-index]'))) {
 			const index = Number(card.dataset.imageIndex);
 			const selected = Number.isFinite(index) && selectedIndexes.has(index);
 			card.classList.toggle('is-selected', selected);
@@ -11258,7 +11390,7 @@ export class TurboFileEditor extends EditorPane {
 			card.setAttribute('aria-selected', selected ? 'true' : 'false');
 		}
 
-		const deleteButton = this.container.querySelector<HTMLButtonElement>('.turbofile-image-page-action.is-delete');
+		const deleteButton = root.querySelector<HTMLButtonElement>('.turbofile-image-page-action.is-delete');
 		if (deleteButton) {
 			const deleteTargetCount = this.getImageGridDeleteTargets(state).length;
 			deleteButton.disabled = deleteTargetCount === 0;
