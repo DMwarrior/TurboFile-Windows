@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../../common/turbofileDragDrop.js';
 
 suite('TurboFileDragDrop', () => {
@@ -26,5 +28,12 @@ suite('TurboFileDragDrop', () => {
 			'/work/images',
 			'/work/images/done'
 		]);
+	});
+
+	test('keeps local file drops inside TurboFile panes instead of bubbling to the workbench opener', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private consumeTurboFileDropEvent(event: DragEvent): void'));
+		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
 });

@@ -130,6 +130,8 @@ export interface ITurboFileImageBatchEntry {
 	/** True when the file exceeded the batch size limit; the caller should load it individually. */
 	readonly oversized?: boolean;
 	readonly message?: string;
+	/** True when the batch transport failed transiently; callers should retry instead of caching a file error. */
+	readonly transient?: boolean;
 }
 
 export type TurboFileEndpointKind = 'local' | 'ssh';

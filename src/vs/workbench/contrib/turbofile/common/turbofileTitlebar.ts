@@ -10,7 +10,7 @@ export type TurboFileTitlebarUpdateActionKind = 'hidden' | 'checking' | 'downloa
 export function getTurboFileTitlebarUpdateActionKind(state: State): TurboFileTitlebarUpdateActionKind {
 	switch (state.type) {
 		case StateType.CheckingForUpdates:
-			return 'checking';
+			return 'hidden';
 		case StateType.AvailableForDownload:
 			return 'download';
 		case StateType.Downloading:

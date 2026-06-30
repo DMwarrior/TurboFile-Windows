@@ -22,7 +22,7 @@ suite('TurboFileTitlebar', () => {
 			getTurboFileTitlebarUpdateActionKind({ type: StateType.Uninitialized })
 		], [
 			'hidden',
-			'checking',
+			'hidden',
 			'download',
 			'downloading',
 			'install',

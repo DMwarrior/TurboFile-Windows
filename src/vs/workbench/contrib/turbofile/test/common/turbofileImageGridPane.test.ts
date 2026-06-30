@@ -62,4 +62,26 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes("this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);"));
 		assert.ok(editor.includes('void this.pasteIntoPane(side);'));
 	});
+
+	test('keeps transient image batch failures retryable in the current directory', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const service = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts'), 'utf8');
+		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
+
+		assert.ok(contract.includes('readonly transient?: boolean;'));
+		assert.ok(service.includes('transient: true'));
+		assert.ok(editor.includes('private retryImageGridThumbnailChunkAfterTransientFailure('));
+		assert.ok(editor.includes('entries.some(entry => entry.transient)'));
+		assert.ok(editor.includes('target.image.thumbnailError = undefined;'));
+		assert.ok(editor.includes('this.scheduleImageGridTransientRetry(state);'));
+	});
+
+	test('drops stale preview sources after element decode failure so preview can reload', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private retryImageGridPreviewAfterDecodeFailure('));
+		assert.ok(editor.includes('image.previewDecodeFailures'));
+		assert.ok(editor.includes('this.releaseImageBlobUrl(image.previewUrl);'));
+		assert.ok(editor.includes('void this.ensureImageGridPreviewLoaded(state, index, this.imageGridPreviewRequestSeq);'));
+	});
 });

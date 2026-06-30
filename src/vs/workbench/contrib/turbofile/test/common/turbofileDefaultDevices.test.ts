@@ -67,60 +67,39 @@ function device(id: string, host: string, username: string, name = host, port = 
 }
 
 suite('TurboFileDefaultDevices', () => {
-	test('local private build embeds only requested default SSH devices', () => {
+	const legacyDefaultPrefix = 'turbofile-' + 'default-';
+
+	test('public build does not embed default SSH devices or passwords', () => {
 		const source = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileDeviceStore.ts'), 'utf8');
 
 		const defaultIds = Array.from(source.matchAll(/id: '(turbofile-default-[^']+)'/g), match => match[1]);
-		assert.deepStrictEqual(defaultIds, [
-			'turbofile-default-61',
-			'turbofile-default-57',
-			'turbofile-default-60',
-			'turbofile-default-64',
-			'turbofile-default-62',
-			'turbofile-default-nas',
-			'turbofile-default-5336'
-		]);
+		assert.deepStrictEqual(defaultIds, []);
 
-		for (const expected of [
-			"id: 'turbofile-default-62'",
-			"id: 'turbofile-default-61'",
-			"id: 'turbofile-default-60'",
-			"id: 'turbofile-default-57'",
-			"id: 'turbofile-default-64'",
-			"id: 'turbofile-default-nas'",
-			"id: 'turbofile-default-5336'",
-			"password: 'th123456'",
-			"password: '123456'",
-			"password: 'taiho603656_0'",
-			"password: 'asdf1234'",
-			"password: 'Ai123456'",
-			"password: 'depstek'"
+		for (const forbidden of [
+			"password: '",
+			...['62', '61', '60', '57', '64', 'nas', '5336'].map(id => `${legacyDefaultPrefix}${id}`)
 		]) {
-			assert.ok(source.includes(expected), `Missing default secret marker: ${expected}`);
+			assert.ok(!source.includes(forbidden), `Embedded default device marker should not be present: ${forbidden}`);
 		}
 	});
 
-	test('migrates matching manual devices into required default devices', async () => {
+	test('removes legacy embedded default devices when no defaults are shipped', async () => {
+		const legacyDefaultId = `${legacyDefaultPrefix}64`;
 		const { store, storage, secrets } = createStore([
-			device('manual-64', '192.168.9.64', 'ubuntu', '64服务器'),
-			device('manual-nas', '10.190.21.253', 'Algorithm', 'NAS', 8000)
-		], ['turbofile-default-nas']);
+			device('manual-64', '192.168.9.64', 'ubuntu', 'manual-64'),
+			device(legacyDefaultId, '192.168.9.64', 'ubuntu', 'default-64')
+		]);
 
 		await secrets.set('turbofile.device.secret.manual-64.password', 'old-manual-password');
-		await secrets.set('turbofile.device.secret.manual-nas.password', 'old-manual-password');
+		await secrets.set(`turbofile.device.secret.${legacyDefaultId}.password`, 'old-default-password');
 
 		await store.ensureDefaultDevices();
 
 		const devices = JSON.parse(storage.get('turbofile.devices', undefined, '[]')) as TurboFileDevice[];
 		const ids = devices.map(device => device.id);
-		assert.ok(ids.includes('turbofile-default-64'));
-		assert.ok(ids.includes('turbofile-default-nas'));
-		assert.ok(!ids.includes('manual-64'));
-		assert.ok(!ids.includes('manual-nas'));
-		assert.ok(!JSON.parse(storage.get('turbofile.deletedDefaultDevices', undefined, '[]')).includes('turbofile-default-nas'));
-		assert.strictEqual(await secrets.get('turbofile.device.secret.manual-64.password'), undefined);
-		assert.strictEqual(await secrets.get('turbofile.device.secret.manual-nas.password'), undefined);
-		assert.strictEqual(await secrets.get('turbofile.device.secret.turbofile-default-64.password'), 'asdf1234');
-		assert.strictEqual(await secrets.get('turbofile.device.secret.turbofile-default-nas.password'), 'Ai123456');
+		assert.ok(ids.includes('manual-64'));
+		assert.ok(!ids.includes(legacyDefaultId));
+		assert.strictEqual(await secrets.get('turbofile.device.secret.manual-64.password'), 'old-manual-password');
+		assert.strictEqual(await secrets.get(`turbofile.device.secret.${legacyDefaultId}.password`), undefined);
 	});
 });

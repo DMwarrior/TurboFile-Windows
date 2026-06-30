@@ -4077,7 +4077,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return parseImageBatchOutput(output);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			return targets.map(path => ({ path, ok: false, message }));
+			return targets.map(path => ({ path, ok: false, message, transient: true }));
 		} finally {
 			this.releaseImageReadSlot();
 		}
@@ -9856,7 +9856,7 @@ function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
 			continue;
 		}
 		if (position + size > buffer.length) {
-			entries.push({ path, ok: false, message: 'Truncated image batch stream.' });
+			entries.push({ path, ok: false, message: 'Truncated image batch stream.', transient: true });
 			break;
 		}
 		const bytes = buffer.subarray(position, position + size);
