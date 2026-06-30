@@ -84,4 +84,15 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.releaseImageBlobUrl(image.previewUrl);'));
 		assert.ok(editor.includes('void this.ensureImageGridPreviewLoaded(state, index, this.imageGridPreviewRequestSeq);'));
 	});
+
+	test('keeps pane preview controls bound to the preview-visible state', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private getActiveImageGridPreviewState(): TurboFileImageGridState | undefined'));
+		assert.ok(editor.includes('const previewState = this.getActiveImageGridPreviewState();'));
+		assert.ok(editor.includes('this.renderImagePreviewOverlay(previewState)'));
+		assert.ok(editor.includes('this.getActiveImageGridPreviewState() !== state'));
+		assert.ok(editor.includes('private moveImageGridPreview(delta: number, state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): void'));
+		assert.ok(editor.includes('private toggleImagePreviewPixelInspector(state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): void'));
+	});
 });
