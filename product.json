@@ -13,6 +13,8 @@
 	"turbofileUpdates": {
 		"owner": "DMwarrior",
 		"repo": "TurboFile-Windows",
+		"initialCheckDelayMs": 10000,
+		"checkIntervalMs": 60000,
 		"manifestUrls": [
 			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update-proxy.json",
 			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update.json"

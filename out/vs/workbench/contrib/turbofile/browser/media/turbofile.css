@@ -4774,20 +4774,20 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .turbofile-titlebar-update-button {
-	width: 24px;
-	min-width: 24px;
-	height: 24px;
+	width: 20px;
+	min-width: 20px;
+	height: 20px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	gap: 4px;
+	gap: 3px;
 	border-radius: 999px;
 	color: #ffffff;
 	background: #168bd8;
 }
 
 .turbofile-titlebar-update-button .codicon {
-	font-size: 14px;
+	font-size: 12px;
 	line-height: 1;
 }
 
@@ -4795,8 +4795,8 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-titlebar-update-button-downloading,
 .turbofile-titlebar-update-button-installing {
 	width: auto;
-	min-width: 42px;
-	padding: 0 8px;
+	min-width: 34px;
+	padding: 0 6px;
 	cursor: default;
 }
 

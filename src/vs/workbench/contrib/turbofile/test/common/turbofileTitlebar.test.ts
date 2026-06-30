@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import { State, StateType, UpdateType } from '../../../../../platform/update/common/update.js';
 import { getTurboFileTitlebarUpdateActionKind } from '../../common/turbofileTitlebar.js';
 
@@ -28,5 +30,25 @@ suite('TurboFileTitlebar', () => {
 			'restart',
 			'hidden'
 		]);
+	});
+
+	test('keeps the TurboFile update button compact in the custom titlebar', () => {
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+
+		assert.ok(css.includes('width: 20px;'));
+		assert.ok(css.includes('min-width: 20px;'));
+		assert.ok(css.includes('height: 20px;'));
+		assert.ok(css.includes('font-size: 12px;'));
+		assert.ok(css.includes('min-width: 34px;'));
+	});
+
+	test('uses a short TurboFile update check interval while the app stays open', () => {
+		const product = fs.readFileSync(path.join(process.cwd(), 'product.json'), 'utf8');
+		const updateService = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/update/electron-main/abstractUpdateService.ts'), 'utf8');
+
+		assert.ok(product.includes('"checkIntervalMs": 60000'));
+		assert.ok(product.includes('"initialCheckDelayMs": 10000'));
+		assert.ok(updateService.includes('getAutomaticUpdateCheckIntervalMs()'));
+		assert.ok(updateService.includes('getAutomaticUpdateInitialDelayMs()'));
 	});
 });

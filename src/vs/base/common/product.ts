@@ -102,6 +102,8 @@ export interface IProductConfiguration {
 		readonly latestReleaseUrl?: string;
 		readonly assetNamePattern?: string;
 		readonly allowPrerelease?: boolean;
+		readonly initialCheckDelayMs?: number;
+		readonly checkIntervalMs?: number;
 	};
 	readonly webUrl?: string;
 	readonly webEndpointUrlTemplate?: string;

@@ -197,11 +197,10 @@ export abstract class AbstractUpdateService implements IUpdateService {
 		if (updateMode === 'start') {
 			this.logService.info('update#ctor - startup checks only; automatic updates are disabled by user preference');
 
-			// Check for updates only once after 30 seconds
-			setTimeout(() => this.checkForUpdates(false), 30 * 1000);
+			// Check for updates only once after the configured startup delay.
+			setTimeout(() => this.checkForUpdates(false), this.getAutomaticUpdateInitialDelayMs());
 		} else {
-			// Start checking for updates after 30 seconds
-			this.scheduleCheckForUpdates(30 * 1000).then(undefined, err => this.logService.error(err));
+			this.scheduleCheckForUpdates(this.getAutomaticUpdateInitialDelayMs()).then(undefined, err => this.logService.error(err));
 		}
 	}
 
@@ -277,13 +276,22 @@ export abstract class AbstractUpdateService implements IUpdateService {
 		return updateMode === 'none' ? undefined : this.productService.quality;
 	}
 
-	private scheduleCheckForUpdates(delay = 60 * 60 * 1000): Promise<void> {
+	private scheduleCheckForUpdates(delay = this.getAutomaticUpdateCheckIntervalMs()): Promise<void> {
 		return timeout(delay)
 			.then(() => this.checkForUpdates(false))
 			.then(() => {
-				// Check again after 1 hour
-				return this.scheduleCheckForUpdates(60 * 60 * 1000);
+				return this.scheduleCheckForUpdates(this.getAutomaticUpdateCheckIntervalMs());
 			});
+	}
+
+	private getAutomaticUpdateInitialDelayMs(): number {
+		const value = this.productService.turbofileUpdates?.initialCheckDelayMs;
+		return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 30 * 1000;
+	}
+
+	private getAutomaticUpdateCheckIntervalMs(): number {
+		const value = this.productService.turbofileUpdates?.checkIntervalMs;
+		return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 60 * 60 * 1000;
 	}
 
 	async checkForUpdates(explicit: boolean): Promise<void> {
