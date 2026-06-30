@@ -132,6 +132,7 @@ body.turbofile-shell {
 	   keeps the nav, the expand/collapse toggle and the bottom taskbar aligned exactly with the
 	   file-browser (editor) boundary. */
 	--turbofile-page-nav-width: 54px;
+	--turbofile-taskbar-height: 24px;
 }
 
 body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
@@ -170,6 +171,13 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tab,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
+}
+
+body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-taskbar) .monaco-workbench .part.panel.bottom .pane-body.integrated-terminal {
+	/* The fixed TurboFile taskbar sits outside VS Code's panel layout; shrink terminal content so
+	   the last prompt line and horizontal scrollbar remain above the blue task/log bar. */
+	box-sizing: border-box;
+	padding-bottom: var(--turbofile-taskbar-height);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench {
@@ -2592,8 +2600,8 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	display: grid;
 	grid-template-rows: minmax(0, 1fr);
 	box-sizing: border-box;
-	min-height: 24px;
-	height: 24px;
+	min-height: var(--turbofile-taskbar-height);
+	height: var(--turbofile-taskbar-height);
 	padding: 0;
 	border-top: 1px solid var(--vscode-statusBar-border, var(--vscode-panel-border));
 	color: var(--vscode-statusBar-foreground);

@@ -51,4 +51,14 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(updateService.includes('getAutomaticUpdateCheckIntervalMs()'));
 		assert.ok(updateService.includes('getAutomaticUpdateInitialDelayMs()'));
 	});
+
+	test('reserves the TurboFile bottom taskbar height for the terminal panel', () => {
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+
+		assert.ok(css.includes('--turbofile-taskbar-height: 24px;'));
+		assert.ok(css.includes('body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-taskbar)'));
+		assert.ok(css.includes('.part.panel.bottom .pane-body.integrated-terminal'));
+		assert.ok(css.includes('padding-bottom: var(--turbofile-taskbar-height);'));
+		assert.ok(css.includes('height: var(--turbofile-taskbar-height);'));
+	});
 });
