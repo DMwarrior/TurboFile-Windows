@@ -36,4 +36,18 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(editor.includes('private consumeTurboFileDropEvent(event: DragEvent): void'));
 		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
+
+	test('normalizes external Windows paths before transferring them', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('await this.sshService.normalizeLocalWindowsPaths(sourcePaths)'));
+		assert.ok(editor.includes('normalizedSourcePaths.map(path => this.resolveExternalTransferItem(path))'));
+	});
+
+	test('defers post-drop transfers until after drag image teardown frames', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(() => {'));
+		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(action);'));
+	});
 });

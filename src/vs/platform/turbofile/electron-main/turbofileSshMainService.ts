@@ -25,6 +25,7 @@ import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } fr
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
+import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_SOURCE_LIMIT = 128 * 1024 * 1024;
@@ -706,6 +707,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			path,
 			entries: entries.sort(compareFileEntries)
 		};
+	}
+
+	async normalizeLocalWindowsPaths(paths: readonly string[]): Promise<string[]> {
+		return normalizeWindowsTransferPaths(paths, resolveLocalWindowsRealPath);
 	}
 
 	async transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult> {
@@ -8140,19 +8145,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 async function readWindowsClipboardFilePaths(): Promise<string[]> {
 	const paths: string[] = [];
-	const seen = new Set<string>();
 	const acceptPath = (path: string): void => {
 		const candidate = path.trim().replace(/^"|"$/g, '').replace(/^file:\/\/\/?/i, '');
 		if (!isWindowsClipboardPath(candidate)) {
 			return;
 		}
 
-		const key = candidate.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-		if (seen.has(key)) {
-			return;
-		}
-
-		seen.add(key);
 		paths.push(candidate);
 	};
 
@@ -8169,7 +8167,7 @@ async function readWindowsClipboardFilePaths(): Promise<string[]> {
 		acceptPath(path);
 	}
 
-	return paths;
+	return normalizeWindowsTransferPaths(paths, resolveLocalWindowsRealPath);
 }
 
 async function readWindowsClipboardDropListPaths(): Promise<string[]> {
@@ -8212,6 +8210,11 @@ function readWindowsClipboardOperation(): 'copy' | 'move' {
 
 function isWindowsClipboardPath(path: string): boolean {
 	return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]+\\[^\\]+/.test(path);
+}
+
+function resolveLocalWindowsRealPath(path: string): Promise<string> {
+	const realpath = fsp.realpath as typeof fsp.realpath & { native?: (path: string) => Promise<string> };
+	return realpath.native ? realpath.native(path) : fsp.realpath(path);
 }
 
 // Match WinSCP's SCP path: run remote "scp -t/-f" and speak the SCP wire protocol over the SSH channel.

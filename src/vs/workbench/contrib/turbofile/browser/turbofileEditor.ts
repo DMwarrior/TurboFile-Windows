@@ -1365,7 +1365,12 @@ export class TurboFileEditor extends EditorPane {
 	 * "shadow") floating on screen. Running on the next timer tick lets that teardown complete first.
 	 */
 	private deferAfterDrag(action: () => void): void {
-		getWindow(this.container).setTimeout(action, 0);
+		const ownerWindow = getWindow(this.container);
+		ownerWindow.setTimeout(() => {
+			ownerWindow.requestAnimationFrame(() => {
+				ownerWindow.requestAnimationFrame(action);
+			});
+		}, 0);
 	}
 
 	private clearInternalDropTargetHighlight(): void {
@@ -1640,18 +1645,18 @@ export class TurboFileEditor extends EditorPane {
 		this.consumeTurboFileDropEvent(event);
 		this.setExternalDropTargetSide(undefined);
 		if (sourceSide) {
-			if (sourceSide !== targetSide) {
-				void this.transferSelected(sourceSide, targetSide, initiatedAt);
-			}
 			this.clearCurrentFileDragState();
+			if (sourceSide !== targetSide) {
+				this.deferAfterDrag(() => void this.transferSelected(sourceSide, targetSide, initiatedAt));
+			}
 			return;
 		}
 
 		const externalPaths = this.extractExternalDropPaths(event);
-		if (externalPaths.length) {
-			void this.transferExternalPaths(targetSide, externalPaths, 'copy', initiatedAt);
-		}
 		this.clearCurrentFileDragState();
+		if (externalPaths.length) {
+			this.deferAfterDrag(() => void this.transferExternalPaths(targetSide, externalPaths, 'copy', initiatedAt));
+		}
 	}
 
 	private consumeTurboFileDropEvent(event: DragEvent): void {
@@ -3141,6 +3146,7 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== side) {
+				this.clearCurrentFileDragState();
 				this.deferAfterDrag(() => void this.transferSelected(sourceSide, side, initiatedAt));
 				return;
 			}
@@ -3148,6 +3154,7 @@ export class TurboFileEditor extends EditorPane {
 			// Read the external paths synchronously (the dataTransfer is only valid inside the handler),
 			// then defer the transfer so the drag image is cleared before the list re-renders.
 			const externalPaths = this.extractExternalDropPaths(event);
+			this.clearCurrentFileDragState();
 			if (externalPaths.length) {
 				this.deferAfterDrag(() => void this.transferExternalPaths(side, externalPaths, 'copy', initiatedAt));
 			}
@@ -5852,6 +5859,7 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
 			if (sourceSide && sourceSide !== state.side) {
+				this.clearCurrentFileDragState();
 				this.deferAfterDrag(() => {
 					void this.transferSelected(sourceSide, state.side, initiatedAt);
 					this.clearCurrentFileDragState();
@@ -5859,6 +5867,7 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 			const externalPaths = this.extractExternalDropPaths(event);
+			this.clearCurrentFileDragState();
 			if (externalPaths.length) {
 				this.deferAfterDrag(() => {
 					void this.transferExternalPaths(state.side, externalPaths, 'copy', initiatedAt);
@@ -8135,7 +8144,8 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		const sourceItems = (await Promise.all(sourcePaths.map(path => this.resolveExternalTransferItem(path)))).filter((item): item is TurboFileFileItem => !!item);
+		const normalizedSourcePaths = await this.sshService.normalizeLocalWindowsPaths(sourcePaths);
+		const sourceItems = (await Promise.all(normalizedSourcePaths.map(path => this.resolveExternalTransferItem(path)))).filter((item): item is TurboFileFileItem => !!item);
 		if (!sourceItems.length) {
 			this.statusMessage = '未识别到可传输的 Windows 文件或文件夹。';
 			this.render();
