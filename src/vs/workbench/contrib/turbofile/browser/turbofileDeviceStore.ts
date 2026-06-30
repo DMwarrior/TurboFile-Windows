@@ -12,6 +12,7 @@ const TURBOFILE_DEVICES_STORAGE_KEY = 'turbofile.devices';
 const TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY = 'turbofile.deletedDefaultDevices';
 const TURBOFILE_SECRET_PREFIX = 'turbofile.device.secret';
 const TURBOFILE_AUTO_FAST_DEFAULT_MIGRATION_KEY = 'turbofile.transferProtocolDefault.autoFast.v1';
+const TURBOFILE_REQUIRED_DEFAULT_DEVICES_RESET_KEY = 'turbofile.requiredDefaultDevicesReset.v1';
 
 export interface TurboFileDeviceDraft {
 	readonly name: string;
@@ -82,6 +83,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 22,
 		username: 'th',
 		authType: 'password',
+		password: 'th123456',
 		defaultPath: '/home/th',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -93,6 +95,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 22,
 		username: 'thgd',
 		authType: 'password',
+		password: '123456',
 		defaultPath: '/home/thgd',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -104,6 +107,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 22,
 		username: 'th',
 		authType: 'password',
+		password: 'taiho603656_0',
 		defaultPath: '/home/th',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -115,6 +119,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 22,
 		username: 'ubuntu',
 		authType: 'password',
+		password: 'asdf1234',
 		defaultPath: '/home/ubuntu',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -126,6 +131,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 22,
 		username: 'th',
 		authType: 'password',
+		password: 'th123456',
 		defaultPath: '/home/th',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -137,6 +143,7 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [
 		port: 8000,
 		username: 'Algorithm',
 		authType: 'password',
+		password: 'Ai123456',
 		defaultPath: '/var/services/homes/Algorithm',
 		platform: 'linux',
 		preferredTransferProtocol: 'auto-fast'
@@ -212,6 +219,7 @@ export class TurboFileDeviceStore {
 	async ensureDefaultDevices(): Promise<{ added: number; updated: number; removed: number }> {
 		let devices = this.loadDevices();
 		const deletedDefaultDeviceIds = this.loadDeletedDefaultDeviceIds();
+		this.restoreRequiredDefaultDeviceDeleteMarkersOnce(deletedDefaultDeviceIds);
 		let added = 0;
 		let updated = 0;
 		const removedDeviceIds = devices
@@ -232,39 +240,22 @@ export class TurboFileDeviceStore {
 			if (deletedDefaultDeviceIds.has(defaultDevice.id)) {
 				continue;
 			}
-			const existingIndex = devices.findIndex(device =>
-				device.id === defaultDevice.id ||
-				(device.host === defaultDevice.host && device.port === defaultDevice.port && device.username === defaultDevice.username)
-			);
+			const existingIndex = this.findDefaultDeviceIndex(devices, defaultDevice);
 			if (existingIndex >= 0) {
+				const existingDevice = devices[existingIndex];
+				const nextDevice = this.createDeviceFromDefault(defaultDevice, existingDevice);
+				if (JSON.stringify(existingDevice) !== JSON.stringify(nextDevice)) {
+					devices[existingIndex] = nextDevice;
+					updated++;
+				}
+				await this.storeDefaultDeviceSecrets(defaultDevice, nextDevice.id, existingDevice.id);
 				continue;
 			}
-			const device: TurboFileDevice = {
-				id: defaultDevice.id,
-				name: defaultDevice.name,
-				host: defaultDevice.host,
-				port: defaultDevice.port || 22,
-				username: defaultDevice.username,
-				authType: defaultDevice.authType,
-				defaultPath: normalizeDefaultPath(defaultDevice.defaultPath, defaultDevice.platform),
-				platform: defaultDevice.platform,
-				privateKeyPath: defaultDevice.privateKeyPath,
-				capabilities: defaultDevice.capabilities ?? defaultTurboFileDeviceCapabilities,
-				preferredTransferProtocol: normalizeTransferProtocol(defaultDevice.preferredTransferProtocol)
-			};
+			const device = this.createDeviceFromDefault(defaultDevice);
 
 			devices.push(device);
 			added++;
-
-			if (defaultDevice.password) {
-				await this.secretStorageService.set(this.getPasswordKey(device.id), defaultDevice.password);
-			}
-			if (defaultDevice.privateKey) {
-				await this.secretStorageService.set(this.getPrivateKeyKey(device.id), defaultDevice.privateKey);
-			}
-			if (defaultDevice.passphrase) {
-				await this.secretStorageService.set(this.getPassphraseKey(device.id), defaultDevice.passphrase);
-			}
+			await this.storeDefaultDeviceSecrets(defaultDevice, device.id);
 		}
 
 		if (added || updated || removedDeviceIds.length) {
@@ -272,6 +263,67 @@ export class TurboFileDeviceStore {
 		}
 
 		return { added, updated, removed: removedDeviceIds.length };
+	}
+
+	private restoreRequiredDefaultDeviceDeleteMarkersOnce(deletedDefaultDeviceIds: Set<string>): void {
+		if (this.storageService.get(TURBOFILE_REQUIRED_DEFAULT_DEVICES_RESET_KEY, StorageScope.PROFILE, 'false') === 'true') {
+			return;
+		}
+
+		let changed = false;
+		for (const defaultDevice of TURBOFILE_DEFAULT_SSH_DEVICES) {
+			changed = deletedDefaultDeviceIds.delete(defaultDevice.id) || changed;
+		}
+		if (changed) {
+			this.storageService.store(TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY, JSON.stringify([...deletedDefaultDeviceIds]), StorageScope.PROFILE, StorageTarget.MACHINE);
+		}
+		this.storageService.store(TURBOFILE_REQUIRED_DEFAULT_DEVICES_RESET_KEY, 'true', StorageScope.PROFILE, StorageTarget.MACHINE);
+	}
+
+	private findDefaultDeviceIndex(devices: TurboFileDevice[], defaultDevice: TurboFileDefaultDevice): number {
+		const idIndex = devices.findIndex(device => device.id === defaultDevice.id);
+		if (idIndex >= 0) {
+			return idIndex;
+		}
+		return devices.findIndex(device =>
+			device.host === defaultDevice.host &&
+			device.port === (defaultDevice.port || 22) &&
+			device.username === defaultDevice.username
+		);
+	}
+
+	private createDeviceFromDefault(defaultDevice: TurboFileDefaultDevice, existingDevice?: TurboFileDevice): TurboFileDevice {
+		return {
+			...existingDevice,
+			id: defaultDevice.id,
+			name: defaultDevice.name,
+			host: defaultDevice.host,
+			port: defaultDevice.port || 22,
+			username: defaultDevice.username,
+			authType: defaultDevice.authType,
+			defaultPath: normalizeDefaultPath(defaultDevice.defaultPath, defaultDevice.platform),
+			platform: defaultDevice.platform,
+			privateKeyPath: defaultDevice.privateKeyPath,
+			capabilities: defaultDevice.capabilities ?? getDefaultCapabilitiesForPlatform(defaultDevice.platform),
+			preferredTransferProtocol: normalizeTransferProtocol(defaultDevice.preferredTransferProtocol)
+		};
+	}
+
+	private async storeDefaultDeviceSecrets(defaultDevice: TurboFileDefaultDevice, deviceId: string, previousDeviceId?: string): Promise<void> {
+		if (defaultDevice.password) {
+			await this.secretStorageService.set(this.getPasswordKey(deviceId), defaultDevice.password);
+		}
+		if (defaultDevice.privateKey) {
+			await this.secretStorageService.set(this.getPrivateKeyKey(deviceId), defaultDevice.privateKey);
+		}
+		if (defaultDevice.passphrase) {
+			await this.secretStorageService.set(this.getPassphraseKey(deviceId), defaultDevice.passphrase);
+		}
+		if (previousDeviceId && previousDeviceId !== deviceId) {
+			await this.secretStorageService.delete(this.getPasswordKey(previousDeviceId));
+			await this.secretStorageService.delete(this.getPrivateKeyKey(previousDeviceId));
+			await this.secretStorageService.delete(this.getPassphraseKey(previousDeviceId));
+		}
 	}
 
 	async updateDevice(deviceId: string, draft: TurboFileDeviceDraft): Promise<TurboFileDevice> {
@@ -394,7 +446,7 @@ export class TurboFileDeviceStore {
 	}
 
 	private isLegacyDefaultDeviceId(deviceId: string): boolean {
-		return deviceId.startsWith(TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX);
+		return deviceId.startsWith(TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX) && !TURBOFILE_DEFAULT_SSH_DEVICES.some(device => device.id === deviceId);
 	}
 
 	private normalizeDevice(candidate: unknown): TurboFileDevice | undefined {

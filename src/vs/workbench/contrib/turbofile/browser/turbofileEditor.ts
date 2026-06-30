@@ -22,6 +22,7 @@ import { getIconClasses } from '../../../../editor/common/services/getIconClasse
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITurboFileFileEntry, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { withTurboFileTimeout } from '../../../../platform/turbofile/common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { createFileSystemProviderError, FileChangeType, FileKind, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileChange, IFileDeleteOptions, IFileOverwriteOptions, IFileService, IFileSystemProviderWithFileReadWriteCapability, IFileWriteOptions, IStat, IWatchOptions } from '../../../../platform/files/common/files.js';
@@ -542,6 +543,7 @@ const IMAGE_GRID_CLIENT_DOWNSCALE_BYTES = 320 * 1024;
 // to a display-sized JPEG remotely instead, so a huge file never spikes client memory or fails to
 // decode in the <img>.
 const IMAGE_PREVIEW_RAW_MAX_BYTES = 10 * 1024 * 1024;
+const IMAGE_PREVIEW_ELEMENT_LOAD_TIMEOUT_MS = 8000;
 // Wait this long after the last scroll movement before loading the visible page, so a fast drag/jump
 // through many pages doesn't fire (and then have to abandon) a load for every page it passes.
 const IMAGE_GRID_VISIBLE_LOAD_DEBOUNCE_MS = 110;
@@ -843,7 +845,7 @@ export class TurboFileEditor extends EditorPane {
 		parent.appendChild(this.container);
 		this.deviceStore = this.instantiationService.createInstance(TurboFileDeviceStore);
 		this.devices = this.deviceStore.loadDevices();
-		void this.ensureDefaultSshDevices();
+		void this.ensureDefaultSshDevices().catch(error => this.handleDefaultSshDevicesError(error));
 		void this.ensureTurboFileChrome();
 		this.ensureRemoteFileSystemProvider();
 		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => this.handleWorkbenchCommand(command)));
@@ -897,6 +899,25 @@ export class TurboFileEditor extends EditorPane {
 		void this.refreshPane('left');
 		void this.refreshPane('right');
 		void this.prefetchDefaultDeviceDirectories();
+	}
+
+	private handleDefaultSshDevicesError(error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		this.statusMessage = `Default SSH devices failed to load: ${message}`;
+		this.render();
+	}
+
+	private async refreshDevicesFromStore(): Promise<void> {
+		try {
+			await this.ensureDefaultSshDevices();
+		} catch (error) {
+			this.handleDefaultSshDevicesError(error);
+			return;
+		}
+		this.devices = this.deviceStore?.loadDevices() ?? [];
+		this.ensurePaneDeviceSelection();
+		this.statusMessage = `Device list refreshed: ${this.devices.length} SSH devices.`;
+		this.render();
 	}
 
 	override async setInput(input: TurboFileEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -1622,12 +1643,7 @@ export class TurboFileEditor extends EditorPane {
 	private renderDevicesPage(): HTMLElement {
 		const page = $('.turbofile-full-page');
 		page.appendChild(this.renderPageHeader(Codicon.server, '设备管理', '管理已保存的 SSH 设备，可在这里编辑、删除和测试连接。', [
-			this.createPageButton(Codicon.refresh, '刷新设备', () => {
-				this.devices = this.deviceStore?.loadDevices() ?? [];
-				this.ensurePaneDeviceSelection();
-				this.statusMessage = `设备列表已刷新：${this.devices.length} 台 SSH 设备。`;
-				this.render();
-			}),
+			this.createPageButton(Codicon.refresh, '刷新设备', () => void this.refreshDevicesFromStore()),
 			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm())
 		]));
 
@@ -2865,10 +2881,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (command.type === 'refreshDevices') {
-			this.devices = this.deviceStore.loadDevices();
-			this.ensurePaneDeviceSelection();
-			this.statusMessage = `设备列表已刷新：${this.devices.length} 台 SSH 设备。`;
-			this.render();
+			void this.refreshDevicesFromStore();
 			return;
 		}
 
@@ -6236,15 +6249,16 @@ export class TurboFileEditor extends EditorPane {
 			}
 			return false;
 		} finally {
-			if (image.previewImageLoadingKey === key) {
-				image.previewImageLoading = undefined;
-				image.previewImageLoadingKey = undefined;
-			}
+			this.clearImagePreviewElementLoadingState(image, key);
 		}
 	}
 
 	private loadImagePreviewElement(loader: HTMLImageElement, src: string): Promise<HTMLImageElement> {
-		return new Promise((resolve, reject) => {
+		return this.withImagePreviewElementLoadTimeout(loader, src);
+	}
+
+	private withImagePreviewElementLoadTimeout(loader: HTMLImageElement, src: string): Promise<HTMLImageElement> {
+		return withTurboFileTimeout(new Promise<HTMLImageElement>((resolve, reject) => {
 			let retries = 0;
 			loader.onload = async () => {
 				try {
@@ -6265,7 +6279,20 @@ export class TurboFileEditor extends EditorPane {
 				reject(new Error('Failed to load image'));
 			};
 			loader.src = src;
+		}), IMAGE_PREVIEW_ELEMENT_LOAD_TIMEOUT_MS, 'Image preview load timed out').catch(error => {
+			loader.onload = null;
+			loader.onerror = null;
+			loader.src = '';
+			throw error;
 		});
+	}
+
+	private clearImagePreviewElementLoadingState(image: TurboFileImageGridImage, key: string): void {
+		if (image.previewImageLoadingKey !== key) {
+			return;
+		}
+		image.previewImageLoading = undefined;
+		image.previewImageLoadingKey = undefined;
 	}
 
 	private observeImagePreviewCanvas(canvas: HTMLCanvasElement): void {

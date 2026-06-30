@@ -46,4 +46,11 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('private updateImageGridAfterLocalMutation(state: TurboFileImageGridState): void'));
 		assert.ok(editor.includes('this.updateImageGridAfterLocalMutation(state);'));
 	});
+
+	test('times out stalled preview element decodes so image preview can recover', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		assert.ok(editor.includes('IMAGE_PREVIEW_ELEMENT_LOAD_TIMEOUT_MS'));
+		assert.ok(editor.includes('clearImagePreviewElementLoadingState(image, key);'));
+		assert.ok(editor.includes('return this.withImagePreviewElementLoadTimeout(loader, src);'));
+	});
 });
