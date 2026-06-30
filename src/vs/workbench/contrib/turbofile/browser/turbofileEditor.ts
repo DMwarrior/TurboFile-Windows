@@ -1104,6 +1104,10 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		if (this.handlePaneKeyboardShortcut(event)) {
+			return;
+		}
+
 		if ((event.key !== 'Delete' && event.code !== 'Delete') || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
@@ -1115,6 +1119,51 @@ export class TurboFileEditor extends EditorPane {
 
 		event.preventDefault();
 		void this.deleteSelected(side);
+	}
+
+	private handlePaneKeyboardShortcut(event: KeyboardEvent): boolean {
+		if (this.activePage !== 'transfer' || this.dialogState || this.imageGridState?.previewVisible || this.isDeviceFormVisible || this.isTaskLogVisible) {
+			return false;
+		}
+		if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+			return false;
+		}
+
+		const key = event.key.toLowerCase();
+		if (key !== 'a' && key !== 'c' && key !== 'x' && key !== 'v') {
+			return false;
+		}
+
+		const target = event.target;
+		if (!this.isKeyboardEventFromTurboFileSurface(target) || this.isEditableKeyboardTarget(target)) {
+			return false;
+		}
+
+		const targetElement = target instanceof HTMLElement ? target : undefined;
+		if (targetElement?.closest('.turbofile-inline-rename, .turbofile-dialog, .turbofile-device-form, .turbofile-device-select.is-open, .turbofile-image-page')) {
+			return false;
+		}
+
+		const side = this.getPaneSideFromElement(targetElement) ?? this.activeFilePaneSide;
+		if (!side) {
+			return false;
+		}
+
+		event.preventDefault();
+		event.stopPropagation();
+		this.setActiveFilePaneSide(side);
+
+		if (key === 'a') {
+			this.selectAllPaneItems(side);
+			return true;
+		}
+		if (key === 'c' || key === 'x') {
+			this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
+			return true;
+		}
+
+		void this.pasteIntoPane(side);
+		return true;
 	}
 
 	private handleImageGridKeyboardShortcut(event: KeyboardEvent): boolean {
@@ -3041,7 +3090,7 @@ export class TurboFileEditor extends EditorPane {
 				if (key === 'c' || key === 'x') {
 					event.preventDefault();
 					this.setActiveFilePaneSide(side);
-					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy');
+					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
 					return;
 				}
 			}

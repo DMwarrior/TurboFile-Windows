@@ -53,4 +53,13 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('clearImagePreviewElementLoadingState(image, key);'));
 		assert.ok(editor.includes('return this.withImagePreviewElementLoadTimeout(loader, src);'));
 	});
+
+	test('handles pane clipboard shortcuts from the workbench capture handler without full rerender', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private handlePaneKeyboardShortcut(event: KeyboardEvent): boolean'));
+		assert.ok(editor.includes('if (this.handlePaneKeyboardShortcut(event))'));
+		assert.ok(editor.includes("this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);"));
+		assert.ok(editor.includes('void this.pasteIntoPane(side);'));
+	});
 });
