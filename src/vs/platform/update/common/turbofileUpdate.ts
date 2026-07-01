@@ -31,6 +31,12 @@ export interface ITurboFileAutoInstallOptions {
 	readonly productTarget?: string;
 }
 
+export interface ITurboFileUserSetupAdminDisablementOptions {
+	readonly isAdmin: boolean;
+	readonly productTarget?: string;
+	readonly turboFileGitHubUpdatesEnabled: boolean;
+}
+
 export interface ITurboFileUpdateManifestPlatform {
 	readonly url?: string;
 	readonly sha256?: string;
@@ -184,6 +190,12 @@ export function shouldAutoInstallTurboFileSetupUpdate(options: ITurboFileAutoIns
 	return options.turboFileGitHubUpdatesEnabled
 		&& options.updateType === UpdateType.Setup
 		&& options.productTarget === 'user';
+}
+
+export function shouldDisableWindowsUserSetupUpdatesAsAdmin(options: ITurboFileUserSetupAdminDisablementOptions): boolean {
+	return options.isAdmin
+		&& options.productTarget === 'user'
+		&& !options.turboFileGitHubUpdatesEnabled;
 }
 
 function parseTurboFileVersion(version: string): IParsedVersion | undefined {

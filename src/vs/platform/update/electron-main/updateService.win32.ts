@@ -33,7 +33,7 @@ import { IProductService } from '../../product/common/productService.js';
 import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
-import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate as shouldAutoInstallTurboFileSetupUpdatePolicy } from '../common/turbofileUpdate.js';
+import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate as shouldAutoInstallTurboFileSetupUpdatePolicy, shouldDisableWindowsUserSetupUpdatesAsAdmin } from '../common/turbofileUpdate.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
 
@@ -128,10 +128,18 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		const osNodeRelease = release();
 		this.telemetryService.publicLog2<WindowsUpdateInitEvent, WindowsUpdateInitClassification>('windowsUpdateInit', { osRelease, osNodeRelease });
 
-		if (this.productService.target === 'user' && await this.nativeHostMainService.isAdmin(undefined)) {
+		const isAdmin = await this.nativeHostMainService.isAdmin(undefined);
+		if (shouldDisableWindowsUserSetupUpdatesAsAdmin({
+			isAdmin,
+			productTarget: this.productService.target,
+			turboFileGitHubUpdatesEnabled: this.isTurboFileGitHubUpdatesEnabled(),
+		})) {
 			this.setState(State.Disabled(DisablementReason.RunningAsAdmin));
 			this.logService.info('update#ctor - updates are disabled due to running as Admin in user setup');
 			return;
+		}
+		if (isAdmin && this.productService.target === 'user' && this.isTurboFileGitHubUpdatesEnabled()) {
+			this.logService.info('update#ctor - TurboFile GitHub user setup updates remain enabled while running as Admin');
 		}
 
 		await super.initialize();

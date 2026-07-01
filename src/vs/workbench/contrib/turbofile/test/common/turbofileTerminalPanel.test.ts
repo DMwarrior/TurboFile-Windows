@@ -25,4 +25,16 @@ suite('TurboFileTerminalPanel', () => {
 		assert.ok(editor.includes('if (!this.isCurrentTransferEditorActive())'));
 		assert.ok(editor.includes('this.editorService.activeEditor === this.currentInput'));
 	});
+
+	test('disposes only terminals bound to the closed transfer page', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const input = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/common/turbofileEditorInput.ts'), 'utf8');
+
+		assert.ok(input.includes('setCleanupForClose(handler: () => void): void'));
+		assert.ok(input.includes('this.cleanupForClose?.();'));
+		assert.ok(editor.includes('input.setCleanupForClose(() => this.disposeBoundTerminalsForPage(input.instanceId));'));
+		assert.ok(editor.includes('private disposeBoundTerminalsForPage(pageInstanceId: string): void'));
+		assert.ok(editor.includes('void this.terminalService.safeDisposeTerminal(instance);'));
+		assert.ok(!editor.includes('this.terminalService.safeDisposeTerminal(instance);') || editor.includes('void this.terminalService.safeDisposeTerminal(instance);'));
+	});
 });

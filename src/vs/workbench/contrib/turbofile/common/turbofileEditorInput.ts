@@ -22,6 +22,7 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 	private readonly resourceValue: URI;
 	private runningTaskCount = 0;
 	private cancelRunningTasksForClose: (() => Promise<void>) | undefined;
+	private cleanupForClose: (() => void) | undefined;
 
 	constructor(
 		readonly instanceId: string = `transfer-${Date.now().toString(36)}`,
@@ -75,6 +76,17 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 
 	setCancelRunningTasksForClose(handler: () => Promise<void>): void {
 		this.cancelRunningTasksForClose = handler;
+	}
+
+	setCleanupForClose(handler: () => void): void {
+		this.cleanupForClose = handler;
+	}
+
+	override dispose(): void {
+		this.cleanupForClose?.();
+		this.cleanupForClose = undefined;
+		this.cancelRunningTasksForClose = undefined;
+		super.dispose();
 	}
 
 	showConfirm(): boolean {

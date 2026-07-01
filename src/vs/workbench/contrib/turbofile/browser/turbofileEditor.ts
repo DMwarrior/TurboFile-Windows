@@ -947,6 +947,7 @@ export class TurboFileEditor extends EditorPane {
 		// Record the incoming page's current selection so even an untouched page can be restored later.
 		this.capturePaneSelectionForCurrentPage();
 		input.setCancelRunningTasksForClose(() => this.cancelRunningTasksForClose());
+		input.setCleanupForClose(() => this.disposeBoundTerminalsForPage(input.instanceId));
 		this.updateInputRunningTaskCount();
 		await super.setInput(input, options, context, token);
 		if (!token.isCancellationRequested) {
@@ -12361,6 +12362,20 @@ export class TurboFileEditor extends EditorPane {
 				turboFileLastActiveTerminalByPageId.delete(pageInstanceId);
 				turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
 			}
+		}
+	}
+
+	private disposeBoundTerminalsForPage(pageInstanceId: string): void {
+		const pageTerminals = this.getBoundTerminalsForPage(pageInstanceId);
+		turboFileLastActiveTerminalByPageId.delete(pageInstanceId);
+		turboFileTerminalPanelHiddenByPageId.delete(pageInstanceId);
+		for (const instance of pageTerminals) {
+			this.clearTerminalBindingForInstance(instance.instanceId);
+			void this.terminalService.safeDisposeTerminal(instance);
+		}
+		if (this.currentInput?.instanceId === pageInstanceId) {
+			this.restoreTaskbarAfterTerminal();
+			this.terminalGroupService.hidePanel();
 		}
 	}
 

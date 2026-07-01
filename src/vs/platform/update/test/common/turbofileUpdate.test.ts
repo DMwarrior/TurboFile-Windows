@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate } from '../../common/turbofileUpdate.js';
+import { resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate, shouldDisableWindowsUserSetupUpdatesAsAdmin } from '../../common/turbofileUpdate.js';
 import { UpdateType } from '../../common/update.js';
 
 suite('TurboFile GitHub Updates', () => {
@@ -140,6 +140,15 @@ suite('TurboFile GitHub Updates', () => {
 			shouldAutoInstallTurboFileSetupUpdate({ turboFileGitHubUpdatesEnabled: false, updateType: UpdateType.Setup, productTarget: 'user' }),
 			shouldAutoInstallTurboFileSetupUpdate({ turboFileGitHubUpdatesEnabled: true, updateType: UpdateType.Archive, productTarget: 'user' }),
 			shouldAutoInstallTurboFileSetupUpdate({ turboFileGitHubUpdatesEnabled: true, updateType: UpdateType.Setup, productTarget: 'system' }),
+		], [true, false, false, false]);
+	});
+
+	test('keeps TurboFile GitHub user setup updates enabled when running as administrator', () => {
+		assert.deepStrictEqual([
+			shouldDisableWindowsUserSetupUpdatesAsAdmin({ isAdmin: true, productTarget: 'user', turboFileGitHubUpdatesEnabled: false }),
+			shouldDisableWindowsUserSetupUpdatesAsAdmin({ isAdmin: true, productTarget: 'user', turboFileGitHubUpdatesEnabled: true }),
+			shouldDisableWindowsUserSetupUpdatesAsAdmin({ isAdmin: false, productTarget: 'user', turboFileGitHubUpdatesEnabled: true }),
+			shouldDisableWindowsUserSetupUpdatesAsAdmin({ isAdmin: true, productTarget: 'system', turboFileGitHubUpdatesEnabled: true }),
 		], [true, false, false, false]);
 	});
 });
