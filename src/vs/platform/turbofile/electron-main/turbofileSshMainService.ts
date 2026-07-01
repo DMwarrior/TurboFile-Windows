@@ -7430,18 +7430,41 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				inactivityTimer = setTimeout(() => abort(options.inactivityMessage ?? `Remote command produced no output for ${options.inactivityTimeoutMs} ms.`), options.inactivityTimeoutMs);
 			};
+			// Arm the timeouts BEFORE calling exec so a stalled channel grant can never hang forever.
+			// When the connection's MaxSessions pool is momentarily exhausted, ssh2 may not invoke the
+			// exec callback at all — with the timers armed only inside that callback (as before) the
+			// promise never settled, which left directory listings stuck on "正在加载目录..." until the
+			// window was reopened. Arming here bounds the whole operation, including the channel wait.
+			if (options.timeoutMs && options.timeoutMs > 0) {
+				totalTimeout = setTimeout(() => abort(`Remote command timed out after ${options.timeoutMs} ms.`), options.timeoutMs);
+			}
+			armInactivity();
 			client.exec(command, (error, stream) => {
 				if (error) {
 					finish(() => reject(error));
+					return;
+				}
+				// If a timeout already aborted this operation, immediately release the channel that was
+				// granted late instead of leaking it — a leaked channel would make MaxSessions exhaustion
+				// (the very cause of the stall) progressively worse.
+				if (settled) {
+					try {
+						stream.close?.();
+					} catch {
+						// Best-effort cleanup only.
+					}
+					try {
+						stream.destroy?.();
+					} catch {
+						// Best-effort cleanup only.
+					}
 					return;
 				}
 				activeStream = stream;
 
 				const chunks: Buffer[] = [];
 				let stderr = '';
-				if (options.timeoutMs && options.timeoutMs > 0) {
-					totalTimeout = setTimeout(() => abort(`Remote command timed out after ${options.timeoutMs} ms.`), options.timeoutMs);
-				}
+				// Reset the inactivity clock now that the channel is live and output can begin streaming.
 				armInactivity();
 				stream.on('data', data => {
 					armInactivity();

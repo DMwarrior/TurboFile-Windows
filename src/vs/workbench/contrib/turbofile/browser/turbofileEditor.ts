@@ -1047,6 +1047,7 @@ export class TurboFileEditor extends EditorPane {
 		shell.appendChild(content);
 		this.container.appendChild(shell);
 		this.registerWorkbenchKeyboardShortcuts();
+		this.registerWindowFileDropInterceptor();
 		this.ensureTitlebarChrome();
 
 		const previewState = this.getActiveImageGridPreviewState();
@@ -1099,6 +1100,97 @@ export class TurboFileEditor extends EditorPane {
 		ownerWindow.addEventListener('keydown', handleKeydown, true);
 		this.renderDisposables.add({ dispose: () => this.container?.removeEventListener('keydown', handleKeydown) });
 		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('keydown', handleKeydown, true) });
+	}
+
+	/**
+	 * Intercept EXTERNAL (OS) file drags at the window in the capture phase — i.e. before the VS Code
+	 * workbench's own editor drop target, which would otherwise open the dropped file as an editor
+	 * instead of transferring it. We only take over external file drops; internal pane-to-pane drags
+	 * keep flowing to the existing pane/list handlers. This guarantees dropping (or pasting) a local
+	 * file/folder onto the app always transfers and never opens the file.
+	 */
+	private registerWindowFileDropInterceptor(): void {
+		if (!this.container) {
+			return;
+		}
+		const ownerWindow = getWindow(this.container);
+		const onDragOver = (event: DragEvent) => this.handleWindowFileDragOver(event);
+		const onDrop = (event: DragEvent) => this.handleWindowFileDrop(event);
+		ownerWindow.addEventListener('dragover', onDragOver, true);
+		ownerWindow.addEventListener('drop', onDrop, true);
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('dragover', onDragOver, true) });
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('drop', onDrop, true) });
+	}
+
+	private shouldInterceptExternalFileDrop(event: DragEvent): boolean {
+		return this.isEditorVisible
+			&& (this.activePage === 'transfer' || this.activePage === 'images')
+			&& !this.dialogState && !this.isDeviceFormVisible && !this.isTaskLogVisible
+			&& !this.getTurboFileDragSourceSide(event)
+			&& this.hasExternalDropData(event);
+	}
+
+	private handleWindowFileDragOver(event: DragEvent): void {
+		if (!this.shouldInterceptExternalFileDrop(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		if (this.activePage === 'transfer') {
+			this.setExternalDropTargetSide(this.getExternalDropSideFromEvent(event));
+		}
+	}
+
+	private handleWindowFileDrop(event: DragEvent): void {
+		if (!this.shouldInterceptExternalFileDrop(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		const initiatedAt = Date.now();
+		const side = this.activePage === 'images'
+			? (this.imageGridState?.side ?? this.activeFilePaneSide)
+			: this.getExternalDropSideFromEvent(event);
+		this.setExternalDropTargetSide(undefined);
+		const externalPaths = this.extractExternalDropPaths(event);
+		this.clearCurrentFileDragState();
+		if (externalPaths.length) {
+			this.deferAfterDrag(() => void this.transferExternalPaths(side, externalPaths, 'copy', initiatedAt));
+		}
+	}
+
+	/**
+	 * Resolve which pane an external drop lands on. Prefer the pane under the drag target; fall back to
+	 * the pointer X position relative to the pane rectangles so a drop on a gap/header still routes to
+	 * the pane the user is clearly over (rather than defaulting to a stale "active" side).
+	 */
+	private getExternalDropSideFromEvent(event: DragEvent): 'left' | 'right' {
+		const bySide = this.getPaneSideFromElement(event.target instanceof HTMLElement ? event.target : undefined);
+		if (bySide) {
+			this.activeFilePaneSide = bySide;
+			return bySide;
+		}
+		const x = event.clientX;
+		const rightPane = this.container?.querySelector<HTMLElement>('.turbofile-pane[data-turbofile-side="right"]');
+		if (rightPane) {
+			const rect = rightPane.getBoundingClientRect();
+			if (rect.width > 0 && x >= rect.left) {
+				this.activeFilePaneSide = 'right';
+				return 'right';
+			}
+		}
+		const leftPane = this.container?.querySelector<HTMLElement>('.turbofile-pane[data-turbofile-side="left"]');
+		if (leftPane) {
+			const rect = leftPane.getBoundingClientRect();
+			if (rect.width > 0 && x <= rect.right) {
+				this.activeFilePaneSide = 'left';
+				return 'left';
+			}
+		}
+		return this.activeFilePaneSide;
 	}
 
 	private handleWorkbenchKeydown(event: KeyboardEvent): void {
@@ -7551,13 +7643,17 @@ export class TurboFileEditor extends EditorPane {
 
 		const promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
 			const isRemote = device.id !== LOCAL_WINDOWS_DEVICE_ID;
-			// Always fetch the FULL remote listing (name + type + size + modified) in a single `find`
-			// round trip. This makes a freshly opened folder appear already complete and sorted by the
-			// active sort key, with no lazy size/date "pop-in" and no later visible re-sort — which is the
-			// stable behaviour users expect after choosing a sort order. (`needsAttributes` is retained
-			// only for the cache/in-flight reuse checks above.)
+			// Remote directories load names + type only by default (one `find` round trip, NO per-file
+			// stat), so even a 30k-file directory lists near-instantly and its SSH channel is released in
+			// milliseconds. Holding channels open for a full stat of every entry (as an always-full load
+			// did) starves the connection's MaxSessions pool when combined with prefetch + image reads,
+			// which is what left directories intermittently stuck on "正在加载目录...". Size/modified are
+			// filled in lazily for the visible rows by enrichVisibleRemoteRows(); only a size/modified
+			// sort — which genuinely needs those attributes to order correctly — loads the full listing.
 			const listing = isRemote
-				? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
+				? (needsAttributes
+					? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
+					: await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force))
 				: await this.sshService.listLocalDirectory(path, force);
 			this.setDeviceRuntimeStatus(device, 'online');
 			const items = this.toFileItems(device, listing.path, listing.entries);
@@ -8086,11 +8182,21 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		// During `dragover` the browser withholds getData() and an empty files list for security, so the
+		// only reliable signals that an OS file/folder is being dragged are the type list and the item
+		// kinds. Check both (case-insensitively) plus the on-drop signals, so an external drag is
+		// detected the whole time and never falls through to the workbench's open-file behaviour.
 		const types = Array.from(dataTransfer.types || []);
-		return !!dataTransfer.getData(CodeDataTransfers.FILES)
-			|| !!dataTransfer.getData(DataTransfers.RESOURCES)
-			|| types.includes(DataTransfers.FILES)
-			|| dataTransfer.files.length > 0;
+		if (types.some(type => type === DataTransfers.FILES || type.toLowerCase() === 'files')) {
+			return true;
+		}
+		if (dataTransfer.items && Array.from(dataTransfer.items).some(item => item.kind === 'file')) {
+			return true;
+		}
+		if (dataTransfer.files && dataTransfer.files.length > 0) {
+			return true;
+		}
+		return !!dataTransfer.getData(CodeDataTransfers.FILES) || !!dataTransfer.getData(DataTransfers.RESOURCES);
 	}
 
 	private extractExternalDropPaths(event: DragEvent): string[] {

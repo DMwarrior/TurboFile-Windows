@@ -416,11 +416,28 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 	private async resolveTurboFileUpdate(currentVersion: string, token: CancellationToken): Promise<IUpdate | undefined> {
 		const manifestResult = await this.resolveTurboFileUpdateFromManifestUrls(currentVersion, token);
-		if (manifestResult.checked) {
+		if (manifestResult.checked && manifestResult.update) {
 			return manifestResult.update;
 		}
 
-		return this.resolveTurboFileUpdateFromGitHubReleaseUrl(currentVersion, token);
+		// Fall back to the latest GitHub release whenever the manifest is missing OR reports no update.
+		// Previously a readable-but-stale update.json short-circuited the whole check (checked === true),
+		// so publishing a new release without also refreshing the manifest meant only some clients ever
+		// saw the update. Checking the release here makes "just publish a versioned release with the
+		// installer asset" reliably reach every client, while a manifest that DOES carry an update still
+		// wins above (for controlled rollout / sha256 verification). Guarded so a transient GitHub API
+		// failure (e.g. rate limiting) never breaks the check — it simply retries on the next cycle.
+		try {
+			const releaseUpdate = await this.resolveTurboFileUpdateFromGitHubReleaseUrl(currentVersion, token);
+			if (releaseUpdate) {
+				return releaseUpdate;
+			}
+		} catch (error) {
+			this.logService.warn('update#resolveTurboFileUpdate(): GitHub release fallback failed');
+			this.logService.warn(error);
+		}
+
+		return manifestResult.checked ? manifestResult.update : undefined;
 	}
 
 	private async resolveTurboFileUpdateFromManifestUrls(currentVersion: string, token: CancellationToken): Promise<ITurboFileUpdateCheckResult> {
