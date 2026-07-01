@@ -450,11 +450,10 @@ const REMOTE_ENRICH_RETRY_BASE_MS = 350;
 const REMOTE_ENRICH_MAX_RETRIES = 6;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
-const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
-// Directory name listings are cheap (a single `find -printf` round trip), so a few can run in
-// parallel even on weak SSH boards. Draining the neighbour-prefetch backlog faster makes the
-// directory the user is about to open far more likely to be cached by double-click time.
-const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;
+const PANE_DIRECTORY_PREFETCH_LIMIT = 6;
+// Keep background directory lookups gentle: foreground navigation uses the same SSH device and
+// must never wait behind a pile of speculative neighbour prefetches on weaker boards.
+const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 1;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 // Grace period before showing the "正在加载目录" placeholder on a cache miss. A directory the user
 // navigates into is usually already in flight from hover/pointerdown prefetch and resolves within a
@@ -1863,14 +1862,14 @@ export class TurboFileEditor extends EditorPane {
 	private createTitlebarAppMenu(): HTMLElement {
 		const menu = $('.turbofile-titlebar-menu');
 		const updateActionKind = getTurboFileTitlebarUpdateActionKind(this.updateService.state);
-		if (updateActionKind !== 'hidden') {
-			menu.appendChild(this.createTitlebarUpdateButton(updateActionKind));
-		}
 		menu.appendChild(this.createTitlebarMenuButton('设置', button => this.showTitlebarMenu(button, '设置', [])));
 		menu.appendChild(this.createTitlebarMenuButton('视图', button => this.showTitlebarMenu(button, '视图', [])));
 		menu.appendChild(this.createTitlebarMenuButton('帮助', button => this.showTitlebarMenu(button, '帮助', [
 			toAction({ id: 'turbofile.help.about', label: '关于极速传', enabled: true, run: () => this.showAboutDialog() })
 		])));
+		if (updateActionKind !== 'hidden') {
+			menu.appendChild(this.createTitlebarUpdateButton(updateActionKind));
+		}
 		return menu;
 	}
 
@@ -1882,11 +1881,8 @@ export class TurboFileEditor extends EditorPane {
 		button.title = title;
 		button.setAttribute('aria-label', title);
 		button.disabled = !this.canRunTitlebarUpdateAction(kind);
-		button.appendChild(renderIcon(this.getTitlebarUpdateIcon(kind)));
 		const label = this.getTitlebarUpdateLabel(kind);
-		if (label) {
-			button.appendChild($('span.turbofile-titlebar-update-label', undefined, label));
-		}
+		button.appendChild($('span.turbofile-titlebar-update-label', undefined, label));
 		button.addEventListener('click', event => {
 			event.preventDefault();
 			event.stopPropagation();
@@ -1916,29 +1912,30 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private getTitlebarUpdateIcon(kind: TurboFileTitlebarUpdateActionKind): ThemeIcon {
+	private getTitlebarUpdateLabel(kind: TurboFileTitlebarUpdateActionKind): string {
+		const version = this.getTitlebarUpdateVersionLabel();
 		switch (kind) {
 			case 'checking':
-			case 'installing':
-				return Codicon.sync;
+				return '检查';
 			case 'downloading':
-				return Codicon.loading;
-			case 'install':
-			case 'restart':
-				return Codicon.download;
+				return version ? `更新 ${version} ${this.getTitlebarDownloadProgressLabel()}` : `更新 ${this.getTitlebarDownloadProgressLabel()}`;
+			case 'installing':
+				return version ? `更新 ${version} ${this.getTitlebarInstallProgressLabel()}` : `更新 ${this.getTitlebarInstallProgressLabel()}`;
 			default:
-				return Codicon.download;
+				return version ? `更新 ${version}` : '更新';
 		}
 	}
 
-	private getTitlebarUpdateLabel(kind: TurboFileTitlebarUpdateActionKind): string {
-		switch (kind) {
-			case 'checking':
-				return '...';
-			case 'downloading':
-				return this.getTitlebarDownloadProgressLabel();
-			case 'installing':
-				return this.getTitlebarInstallProgressLabel();
+	private getTitlebarUpdateVersionLabel(): string {
+		const state = this.updateService.state;
+		const update = (state as { readonly update?: { readonly productVersion?: string; readonly version?: string } }).update;
+		switch (state.type) {
+			case StateType.AvailableForDownload:
+			case StateType.Downloading:
+			case StateType.Downloaded:
+			case StateType.Updating:
+			case StateType.Ready:
+				return update?.productVersion ?? update?.version ?? '';
 			default:
 				return '';
 		}

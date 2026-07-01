@@ -111,7 +111,11 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 [Files]
 Source: "*"; Excludes: "\CodeSignSummary*.md,\tools,\tools\*,\policies,\policies\*,\appx,\appx\*,\resources\app\product.json,\resources\app\resources\turbofile\drag-ext,\resources\app\resources\turbofile\drag-ext\*,\{#ExeBasename}.exe,{#ifdef ProxyExeBasename}\{#ProxyExeBasename}.exe,{#endif}\{#ExeBasename}.VisualElementsManifest.xml,\bin,\bin\*"; DestDir: "{code:GetDestDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Explorer can keep the drag CopyHook DLL loaded. If it is locked, schedule replacement instead of prompting the user to skip the file.
+#if VersionedResourcesFolder != ""
+Source: "{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext\*"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
+#else
 Source: "resources\app\resources\turbofile\drag-ext\*"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
+#endif
 Source: "{#ExeBasename}.exe"; DestDir: "{code:GetDestDir}"; DestName: "{code:GetExeBasename}"; Flags: ignoreversion
 Source: "{#ExeBasename}.VisualElementsManifest.xml"; DestDir: "{code:GetDestDir}"; DestName: "{code:GetVisualElementsManifest}"; Flags: ignoreversion
 #ifdef ProxyExeBasename

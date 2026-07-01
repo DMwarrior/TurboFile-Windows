@@ -6,6 +6,7 @@
 	"dataFolderName": ".turbofile",
 	"sharedDataFolderName": ".turbofile-shared",
 	"win32MutexName": "turbofile",
+	"win32VersionedUpdate": true,
 	"licenseName": "MIT",
 	"licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
 	"downloadUrl": "https://github.com/DMwarrior/TurboFile-Windows/releases/latest",
