@@ -83,7 +83,7 @@ suite('TurboFileDefaultDevices', () => {
 		}
 	});
 
-	test('removes legacy embedded default devices when no defaults are shipped', async () => {
+	test('preserves legacy embedded default devices when no defaults are shipped', async () => {
 		const legacyDefaultId = `${legacyDefaultPrefix}64`;
 		const { store, storage, secrets } = createStore([
 			device('manual-64', '192.168.9.64', 'ubuntu', 'manual-64'),
@@ -93,13 +93,14 @@ suite('TurboFileDefaultDevices', () => {
 		await secrets.set('turbofile.device.secret.manual-64.password', 'old-manual-password');
 		await secrets.set(`turbofile.device.secret.${legacyDefaultId}.password`, 'old-default-password');
 
-		await store.ensureDefaultDevices();
+		const result = await store.ensureDefaultDevices();
 
 		const devices = JSON.parse(storage.get('turbofile.devices', undefined, '[]')) as TurboFileDevice[];
 		const ids = devices.map(device => device.id);
 		assert.ok(ids.includes('manual-64'));
-		assert.ok(!ids.includes(legacyDefaultId));
+		assert.ok(ids.includes(legacyDefaultId));
 		assert.strictEqual(await secrets.get('turbofile.device.secret.manual-64.password'), 'old-manual-password');
-		assert.strictEqual(await secrets.get(`turbofile.device.secret.${legacyDefaultId}.password`), undefined);
+		assert.strictEqual(await secrets.get(`turbofile.device.secret.${legacyDefaultId}.password`), 'old-default-password');
+		assert.deepStrictEqual(result, { added: 0, updated: 0, removed: 0 });
 	});
 });

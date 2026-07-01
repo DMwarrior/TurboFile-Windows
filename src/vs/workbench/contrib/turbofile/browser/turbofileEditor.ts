@@ -126,6 +126,13 @@ interface TurboFilePaneDoubleClickState {
 const turboFileTerminalPageByTerminalId = new Map<number, string>();
 const turboFileLastActiveTerminalByPageId = new Map<string, number>();
 const turboFileTerminalPanelHiddenByPageId = new Set<string>();
+let turboFileTerminalPanelVisibilityInProgress = false;
+let turboFileTerminalPanelVisibilityChangeDepth = 0;
+let turboFileTerminalPanelVisibilityResetHandle: number | undefined;
+
+function isTurboFileTerminalPanelVisibilityInProgress(): boolean {
+	return turboFileTerminalPanelVisibilityInProgress;
+}
 
 interface TurboFilePaneSelectionSide {
 	readonly deviceId: string;
@@ -764,9 +771,6 @@ export class TurboFileEditor extends EditorPane {
 	private remoteFileSystemProvider: TurboFileRemoteFileSystemProvider | undefined;
 	private taskbarHiddenForTerminal = false;
 	private terminalRevealInProgress = false;
-	private terminalPanelVisibilityInProgress = false;
-	private terminalPanelVisibilityChangeDepth = 0;
-	private terminalPanelVisibilityResetHandle: number | undefined;
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
@@ -855,7 +859,7 @@ export class TurboFileEditor extends EditorPane {
 		this._register(turboFileWorkbenchBridge.onDidRunCommand(command => this.handleWorkbenchCommand(command)));
 		this._register(this.terminalService.onDidDisposeInstance(instance => this.clearTerminalBindingForInstance(instance.instanceId)));
 		this._register(this.layoutService.onDidChangePartVisibility(event => {
-			if (event.partId === Parts.PANEL_PART && !event.visible && !this.terminalRevealInProgress && !this.terminalPanelVisibilityInProgress) {
+			if (event.partId === Parts.PANEL_PART && !event.visible && !this.terminalRevealInProgress && !isTurboFileTerminalPanelVisibilityInProgress()) {
 				this.rememberTerminalPanelHiddenForCurrentPage();
 				this.restoreTaskbarAfterTerminal();
 			}
@@ -993,10 +997,6 @@ export class TurboFileEditor extends EditorPane {
 		if (this.appearanceTransitionTimer !== undefined) {
 			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
 			this.appearanceTransitionTimer = undefined;
-		}
-		if (this.terminalPanelVisibilityResetHandle !== undefined) {
-			getWindow(this.container).clearTimeout(this.terminalPanelVisibilityResetHandle);
-			this.terminalPanelVisibilityResetHandle = undefined;
 		}
 		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
 		this.closeAboutDialog();
@@ -12061,17 +12061,21 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private isCurrentTransferEditorActive(): boolean {
+		return this.isEditorVisible
+			&& this.activePage === 'transfer'
+			&& !!this.currentInput
+			&& this.editorService.activeEditor === this.currentInput;
+	}
+
 	private rememberTerminalPanelHiddenForCurrentPage(): void {
-		if (!this.isEditorVisible) {
+		if (!this.isCurrentTransferEditorActive()) {
 			return;
 		}
 		// Only treat a panel hide as "the user hid this page's terminal" while the transfer page is
 		// actually showing. A hide triggered while on another in-app page (images, themes, tasks, …)
 		// must not mark the terminal hidden, otherwise it would appear to vanish when returning to the
 		// transfer page even though it is still open and bound.
-		if (this.activePage !== 'transfer') {
-			return;
-		}
 		const pageInstanceId = this.currentInput?.instanceId;
 		if (!pageInstanceId || this.getBoundTerminalsForPage(pageInstanceId).length === 0) {
 			return;
@@ -12080,23 +12084,23 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private beginTerminalPanelVisibilityChange(): void {
-		if (this.terminalPanelVisibilityResetHandle !== undefined) {
-			getWindow(this.container).clearTimeout(this.terminalPanelVisibilityResetHandle);
-			this.terminalPanelVisibilityResetHandle = undefined;
+		if (turboFileTerminalPanelVisibilityResetHandle !== undefined) {
+			getWindow(this.container).clearTimeout(turboFileTerminalPanelVisibilityResetHandle);
+			turboFileTerminalPanelVisibilityResetHandle = undefined;
 		}
-		this.terminalPanelVisibilityChangeDepth++;
-		this.terminalPanelVisibilityInProgress = true;
+		turboFileTerminalPanelVisibilityChangeDepth++;
+		turboFileTerminalPanelVisibilityInProgress = true;
 	}
 
 	private endTerminalPanelVisibilityChange(): void {
-		this.terminalPanelVisibilityChangeDepth = Math.max(0, this.terminalPanelVisibilityChangeDepth - 1);
-		if (this.terminalPanelVisibilityChangeDepth > 0) {
+		turboFileTerminalPanelVisibilityChangeDepth = Math.max(0, turboFileTerminalPanelVisibilityChangeDepth - 1);
+		if (turboFileTerminalPanelVisibilityChangeDepth > 0) {
 			return;
 		}
-		this.terminalPanelVisibilityResetHandle = getWindow(this.container).setTimeout(() => {
-			this.terminalPanelVisibilityResetHandle = undefined;
-			if (this.terminalPanelVisibilityChangeDepth === 0) {
-				this.terminalPanelVisibilityInProgress = false;
+		turboFileTerminalPanelVisibilityResetHandle = getWindow(this.container).setTimeout(() => {
+			turboFileTerminalPanelVisibilityResetHandle = undefined;
+			if (turboFileTerminalPanelVisibilityChangeDepth === 0) {
+				turboFileTerminalPanelVisibilityInProgress = false;
 			}
 		}, 100);
 	}

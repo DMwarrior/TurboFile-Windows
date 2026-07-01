@@ -137,19 +137,6 @@ export class TurboFileDeviceStore {
 		this.restoreRequiredDefaultDeviceDeleteMarkersOnce(deletedDefaultDeviceIds);
 		let added = 0;
 		let updated = 0;
-		const removedDeviceIds = devices
-			.filter(device => this.isLegacyDefaultDeviceId(device.id))
-			.map(device => device.id);
-
-		if (removedDeviceIds.length) {
-			devices = devices.filter(device => !this.isLegacyDefaultDeviceId(device.id));
-		}
-
-		for (const deviceId of removedDeviceIds) {
-			await this.secretStorageService.delete(this.getPasswordKey(deviceId));
-			await this.secretStorageService.delete(this.getPrivateKeyKey(deviceId));
-			await this.secretStorageService.delete(this.getPassphraseKey(deviceId));
-		}
 
 		for (const defaultDevice of TURBOFILE_DEFAULT_SSH_DEVICES) {
 			if (deletedDefaultDeviceIds.has(defaultDevice.id)) {
@@ -173,11 +160,11 @@ export class TurboFileDeviceStore {
 			await this.storeDefaultDeviceSecrets(defaultDevice, device.id);
 		}
 
-		if (added || updated || removedDeviceIds.length) {
+		if (added || updated) {
 			this.storeDevices(devices);
 		}
 
-		return { added, updated, removed: removedDeviceIds.length };
+		return { added, updated, removed: 0 };
 	}
 
 	private restoreRequiredDefaultDeviceDeleteMarkersOnce(deletedDefaultDeviceIds: Set<string>): void {
