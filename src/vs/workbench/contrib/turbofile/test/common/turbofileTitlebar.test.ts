@@ -58,7 +58,7 @@ suite('TurboFileTitlebar', () => {
 
 		assert.ok(product.includes('"checkIntervalMs": 60000'));
 		assert.ok(product.includes('"initialCheckDelayMs": 10000'));
-		assert.ok(product.includes('"win32VersionedUpdate": true'));
+		assert.ok(!product.includes('"win32VersionedUpdate": true'));
 		assert.ok(updateService.includes('getAutomaticUpdateCheckIntervalMs()'));
 		assert.ok(updateService.includes('getAutomaticUpdateInitialDelayMs()'));
 	});
@@ -80,11 +80,12 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(css.includes('height: var(--turbofile-taskbar-height);'));
 	});
 
-	test('packages the drag extension from the versioned resource folder when win32 versioned update is enabled', () => {
+	test('packages the drag extension with deferred replacement without enabling win32 versioned update', () => {
 		const inno = fs.readFileSync(path.join(process.cwd(), 'build/win32/code.iss'), 'utf8');
+		const product = fs.readFileSync(path.join(process.cwd(), 'product.json'), 'utf8');
 
-		assert.ok(inno.includes('#if VersionedResourcesFolder != ""'));
-		assert.ok(inno.includes('Source: "{#VersionedResourcesFolder}\\resources\\app\\resources\\turbofile\\drag-ext\\*"'));
+		assert.ok(!product.includes('"win32VersionedUpdate": true'));
+		assert.ok(inno.includes('Source: "resources\\app\\resources\\turbofile\\drag-ext\\*"'));
 		assert.ok(inno.includes('Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete'));
 	});
 });
