@@ -1,44 +1,45 @@
-function sortTurboFileItems(items, key, direction) {
-  return [...items].sort((left, right) => compareTurboFileItems(left, right, key, direction));
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+export function sortTurboFileItems(items, key, direction) {
+    return [...items].sort((left, right) => compareTurboFileItems(left, right, key, direction));
 }
 function compareTurboFileItems(left, right, key, direction) {
-  if (!!left.parent !== !!right.parent) {
-    return left.parent ? -1 : 1;
-  }
-  if (!!left.directory !== !!right.directory) {
-    return left.directory ? -1 : 1;
-  }
-  const comparison = compareTurboFileItemsByKey(left, right, key);
-  const directed = direction === "descending" ? -comparison : comparison;
-  return directed || compareNames(left.name, right.name);
+    if (!!left.parent !== !!right.parent) {
+        return left.parent ? -1 : 1;
+    }
+    if (!!left.directory !== !!right.directory) {
+        return left.directory ? -1 : 1;
+    }
+    const comparison = compareTurboFileItemsByKey(left, right, key);
+    const directed = direction === 'descending' ? -comparison : comparison;
+    return directed || compareNames(left.name, right.name);
 }
 function compareTurboFileItemsByKey(left, right, key) {
-  switch (key) {
-    case "modified":
-      return compareNumbers(left.rawModified, right.rawModified);
-    case "size":
-      return compareNumbers(left.rawSize, right.rawSize);
-    case "type":
-      return compareNames(getTypeSortKey(left), getTypeSortKey(right));
-    case "name":
-    default:
-      return compareNames(left.name, right.name);
-  }
+    switch (key) {
+        case 'modified':
+            return compareNumbers(left.rawModified, right.rawModified);
+        case 'size':
+            return compareNumbers(left.rawSize, right.rawSize);
+        case 'type':
+            return compareNames(getTypeSortKey(left), getTypeSortKey(right));
+        case 'name':
+        default:
+            return compareNames(left.name, right.name);
+    }
 }
 function compareNumbers(left, right) {
-  return (left || 0) - (right || 0);
+    return (left || 0) - (right || 0);
 }
 function compareNames(left, right) {
-  return left.localeCompare(right, void 0, { numeric: true, sensitivity: "base" });
+    return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
 }
 function getTypeSortKey(item) {
-  if (item.directory) {
-    return "directory";
-  }
-  const dotIndex = item.name.lastIndexOf(".");
-  return dotIndex >= 0 && dotIndex < item.name.length - 1 ? item.name.substring(dotIndex + 1).toLowerCase() : item.type;
+    if (item.directory) {
+        return 'directory';
+    }
+    const dotIndex = item.name.lastIndexOf('.');
+    return dotIndex >= 0 && dotIndex < item.name.length - 1 ? item.name.substring(dotIndex + 1).toLowerCase() : item.type;
 }
-export {
-  sortTurboFileItems
-};
-//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsiRDpcXFdvcmtcXENvZGVcXFR1cmJvRmlsZS1XaW5kb3dzXFxzcmNcXHZzXFx3b3JrYmVuY2hcXGNvbnRyaWJcXHR1cmJvZmlsZVxcY29tbW9uXFx0dXJib2ZpbGVGaWxlU29ydC50cyJdLAogICJtYXBwaW5ncyI6ICJBQW1CTyxTQUFTLG1CQUFvRCxPQUFxQixLQUF1QixXQUF3QztBQUN2SixTQUFPLENBQUMsR0FBRyxLQUFLLEVBQUUsS0FBSyxDQUFDLE1BQU0sVUFBVSxzQkFBc0IsTUFBTSxPQUFPLEtBQUssU0FBUyxDQUFDO0FBQzNGO0FBRUEsU0FBUyxzQkFBc0IsTUFBNkIsT0FBOEIsS0FBdUIsV0FBMkM7QUFDM0osTUFBSSxDQUFDLENBQUMsS0FBSyxXQUFXLENBQUMsQ0FBQyxNQUFNLFFBQVE7QUFDckMsV0FBTyxLQUFLLFNBQVMsS0FBSztBQUFBLEVBQzNCO0FBQ0EsTUFBSSxDQUFDLENBQUMsS0FBSyxjQUFjLENBQUMsQ0FBQyxNQUFNLFdBQVc7QUFDM0MsV0FBTyxLQUFLLFlBQVksS0FBSztBQUFBLEVBQzlCO0FBRUEsUUFBTSxhQUFhLDJCQUEyQixNQUFNLE9BQU8sR0FBRztBQUM5RCxRQUFNLFdBQVcsY0FBYyxlQUFlLENBQUMsYUFBYTtBQUM1RCxTQUFPLFlBQVksYUFBYSxLQUFLLE1BQU0sTUFBTSxJQUFJO0FBQ3REO0FBRUEsU0FBUywyQkFBMkIsTUFBNkIsT0FBOEIsS0FBK0I7QUFDN0gsVUFBUSxLQUFLO0FBQUEsSUFDWixLQUFLO0FBQ0osYUFBTyxlQUFlLEtBQUssYUFBYSxNQUFNLFdBQVc7QUFBQSxJQUMxRCxLQUFLO0FBQ0osYUFBTyxlQUFlLEtBQUssU0FBUyxNQUFNLE9BQU87QUFBQSxJQUNsRCxLQUFLO0FBQ0osYUFBTyxhQUFhLGVBQWUsSUFBSSxHQUFHLGVBQWUsS0FBSyxDQUFDO0FBQUEsSUFDaEUsS0FBSztBQUFBLElBQ0w7QUFDQyxhQUFPLGFBQWEsS0FBSyxNQUFNLE1BQU0sSUFBSTtBQUFBLEVBQzNDO0FBQ0Q7QUFFQSxTQUFTLGVBQWUsTUFBYyxPQUF1QjtBQUM1RCxVQUFRLFFBQVEsTUFBTSxTQUFTO0FBQ2hDO0FBRUEsU0FBUyxhQUFhLE1BQWMsT0FBdUI7QUFDMUQsU0FBTyxLQUFLLGNBQWMsT0FBTyxRQUFXLEVBQUUsU0FBUyxNQUFNLGFBQWEsT0FBTyxDQUFDO0FBQ25GO0FBRUEsU0FBUyxlQUFlLE1BQXFDO0FBQzVELE1BQUksS0FBSyxXQUFXO0FBQ25CLFdBQU87QUFBQSxFQUNSO0FBQ0EsUUFBTSxXQUFXLEtBQUssS0FBSyxZQUFZLEdBQUc7QUFDMUMsU0FBTyxZQUFZLEtBQUssV0FBVyxLQUFLLEtBQUssU0FBUyxJQUFJLEtBQUssS0FBSyxVQUFVLFdBQVcsQ0FBQyxFQUFFLFlBQVksSUFBSSxLQUFLO0FBQ2xIOyIsCiAgIm5hbWVzIjogW10KfQo=
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoidHVyYm9maWxlRmlsZVNvcnQuanMiLCJzb3VyY2VSb290IjoiZmlsZTovLy9EOi9Xb3JrL0NvZGUvVHVyYm9GaWxlLVdpbmRvd3Mvc3JjLyIsInNvdXJjZXMiOlsidnMvd29ya2JlbmNoL2NvbnRyaWIvdHVyYm9maWxlL2NvbW1vbi90dXJib2ZpbGVGaWxlU29ydC50cyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFBQTs7O2dHQUdnRztBQWdCaEcsTUFBTSxVQUFVLGtCQUFrQixDQUFrQyxLQUFtQixFQUFFLEdBQXFCLEVBQUUsU0FBaUM7SUFDaEosT0FBTyxDQUFDLEdBQUcsS0FBSyxDQUFDLENBQUMsSUFBSSxDQUFDLENBQUMsSUFBSSxFQUFFLEtBQUssRUFBRSxFQUFFLENBQUMscUJBQXFCLENBQUMsSUFBSSxFQUFFLEtBQUssRUFBRSxHQUFHLEVBQUUsU0FBUyxDQUFDLENBQUMsQ0FBQztBQUM3RixDQUFDO0FBRUQsU0FBUyxxQkFBcUIsQ0FBQyxJQUEyQixFQUFFLEtBQTRCLEVBQUUsR0FBcUIsRUFBRSxTQUFpQztJQUNqSixJQUFJLENBQUMsQ0FBQyxJQUFJLENBQUMsTUFBTSxLQUFLLENBQUMsQ0FBQyxLQUFLLENBQUMsTUFBTSxFQUFFLENBQUM7UUFDdEMsT0FBTyxJQUFJLENBQUMsTUFBTSxDQUFDLENBQUMsQ0FBQyxDQUFDLENBQUMsQ0FBQyxDQUFDLENBQUMsQ0FBQyxDQUFDO0lBQzdCLENBQUM7SUFDRCxJQUFJLENBQUMsQ0FBQyxJQUFJLENBQUMsU0FBUyxLQUFLLENBQUMsQ0FBQyxLQUFLLENBQUMsU0FBUyxFQUFFLENBQUM7UUFDNUMsT0FBTyxJQUFJLENBQUMsU0FBUyxDQUFDLENBQUMsQ0FBQyxDQUFDLENBQUMsQ0FBQyxDQUFDLENBQUMsQ0FBQyxDQUFDO0lBQ2hDLENBQUM7SUFFRCxNQUFNLFVBQVUsR0FBRywwQkFBMEIsQ0FBQyxJQUFJLEVBQUUsS0FBSyxFQUFFLEdBQUcsQ0FBQyxDQUFDO0lBQ2hFLE1BQU0sUUFBUSxHQUFHLFNBQVMsS0FBSyxZQUFZLENBQUMsQ0FBQyxDQUFDLENBQUMsVUFBVSxDQUFDLENBQUMsQ0FBQyxVQUFVLENBQUM7SUFDdkUsT0FBTyxRQUFRLElBQUksWUFBWSxDQUFDLElBQUksQ0FBQyxJQUFJLEVBQUUsS0FBSyxDQUFDLElBQUksQ0FBQyxDQUFDO0FBQ3hELENBQUM7QUFFRCxTQUFTLDBCQUEwQixDQUFDLElBQTJCLEVBQUUsS0FBNEIsRUFBRSxHQUFxQjtJQUNuSCxRQUFRLEdBQUcsRUFBRSxDQUFDO1FBQ2IsS0FBSyxVQUFVO1lBQ2QsT0FBTyxjQUFjLENBQUMsSUFBSSxDQUFDLFdBQVcsRUFBRSxLQUFLLENBQUMsV0FBVyxDQUFDLENBQUM7UUFDNUQsS0FBSyxNQUFNO1lBQ1YsT0FBTyxjQUFjLENBQUMsSUFBSSxDQUFDLE9BQU8sRUFBRSxLQUFLLENBQUMsT0FBTyxDQUFDLENBQUM7UUFDcEQsS0FBSyxNQUFNO1lBQ1YsT0FBTyxZQUFZLENBQUMsY0FBYyxDQUFDLElBQUksQ0FBQyxFQUFFLGNBQWMsQ0FBQyxLQUFLLENBQUMsQ0FBQyxDQUFDO1FBQ2xFLEtBQUssTUFBTSxDQUFDO1FBQ1o7WUFDQyxPQUFPLFlBQVksQ0FBQyxJQUFJLENBQUMsSUFBSSxFQUFFLEtBQUssQ0FBQyxJQUFJLENBQUMsQ0FBQztJQUM3QyxDQUFDO0FBQ0YsQ0FBQztBQUVELFNBQVMsY0FBYyxDQUFDLElBQVksRUFBRSxLQUFhO0lBQ2xELE9BQU8sQ0FBQyxJQUFJLElBQUksQ0FBQyxDQUFDLEdBQUcsQ0FBQyxLQUFLLElBQUksQ0FBQyxDQUFDLENBQUM7QUFDbkMsQ0FBQztBQUVELFNBQVMsWUFBWSxDQUFDLElBQVksRUFBRSxLQUFhO0lBQ2hELE9BQU8sSUFBSSxDQUFDLGFBQWEsQ0FBQyxLQUFLLEVBQUUsU0FBUyxFQUFFLEVBQUUsT0FBTyxFQUFFLElBQUksRUFBRSxXQUFXLEVBQUUsTUFBTSxFQUFFLENBQUMsQ0FBQztBQUNyRixDQUFDO0FBRUQsU0FBUyxjQUFjLENBQUMsSUFBMkI7SUFDbEQsSUFBSSxJQUFJLENBQUMsU0FBUyxFQUFFLENBQUM7UUFDcEIsT0FBTyxXQUFXLENBQUM7SUFDcEIsQ0FBQztJQUNELE1BQU0sUUFBUSxHQUFHLElBQUksQ0FBQyxJQUFJLENBQUMsV0FBVyxDQUFDLEdBQUcsQ0FBQyxDQUFDO0lBQzVDLE9BQU8sUUFBUSxJQUFJLENBQUMsSUFBSSxRQUFRLEdBQUcsSUFBSSxDQUFDLElBQUksQ0FBQyxNQUFNLEdBQUcsQ0FBQyxDQUFDLENBQUMsQ0FBQyxJQUFJLENBQUMsSUFBSSxDQUFDLFNBQVMsQ0FBQyxRQUFRLEdBQUcsQ0FBQyxDQUFDLENBQUMsV0FBVyxFQUFFLENBQUMsQ0FBQyxDQUFDLElBQUksQ0FBQyxJQUFJLENBQUM7QUFDdkgsQ0FBQyJ9
