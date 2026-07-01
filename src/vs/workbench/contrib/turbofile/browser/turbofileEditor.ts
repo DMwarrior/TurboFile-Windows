@@ -830,7 +830,7 @@ export class TurboFileEditor extends EditorPane {
 				scrollTop: 0,
 				viewportHeight: 0,
 				sortKey: 'name',
-				sortDirection: 'ascending'
+				sortDirection: 'descending'
 			},
 			right: {
 				deviceId: LOCAL_WINDOWS_DEVICE_ID,
@@ -841,7 +841,7 @@ export class TurboFileEditor extends EditorPane {
 				scrollTop: 0,
 				viewportHeight: 0,
 				sortKey: 'name',
-				sortDirection: 'ascending'
+				sortDirection: 'descending'
 			}
 		};
 	}
@@ -9324,6 +9324,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
+		// Folders report 0 bytes in the listing, so a multi-folder batch total would otherwise be far
+		// too low. Fill in each folder's real size in the background so the displayed total becomes
+		// accurate — this runs alongside the transfer and never delays its start or slows it down.
+		this.fillBatchDirectorySizesInBackground(task, sourceDevice, items);
 		try {
 			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path!);
 			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
@@ -9395,6 +9399,42 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			progressDisposable.dispose();
 		}
+	}
+
+	/**
+	 * Compute the real byte size of every folder in a batch in the background and feed it into the
+	 * matching transfer item's total, so the aggregate "total size" shown for a multi-folder transfer
+	 * is accurate. Directories are sized one at a time (a single `du` each) to keep the connection's
+	 * channel pressure low, and the whole thing runs concurrently with the transfer — it never blocks
+	 * the transfer start nor competes for its bandwidth.
+	 */
+	private fillBatchDirectorySizesInBackground(task: TurboFileTask, sourceDevice: TurboFileDevice, items: readonly TurboFileFileItem[]): void {
+		const directoryEntries = items
+			.map((item, index) => ({ item, index }))
+			.filter(entry => entry.item.directory && !!entry.item.path);
+		if (!directoryEntries.length) {
+			return;
+		}
+		void (async () => {
+			for (const { item, index } of directoryEntries) {
+				if (task.status !== 'running') {
+					return;
+				}
+				try {
+					const endpoint = await this.toTransferEndpoint(sourceDevice, item.path!);
+					const result = await this.sshService.calculatePathSize(endpoint);
+					const transferItem = task.transferItems?.[index];
+					if (result.ok && result.size > 0 && transferItem && transferItem.status !== 'success') {
+						transferItem.totalBytes = Math.max(transferItem.totalBytes, result.size);
+						if ((this.activePage === 'transfer' || this.isTaskLogVisible) && this.isEditorVisible) {
+							this.render();
+						}
+					}
+				} catch {
+					// Best-effort: keep the approximate total if a folder's size cannot be computed.
+				}
+			}
+		})();
 	}
 
 	/**

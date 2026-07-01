@@ -88,7 +88,12 @@ const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_SSH_CONNECT_TIMEOUT_MS = 5 * 1000;
-const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
+const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 3 * 60 * 1000;
+// A direct route is only cooled down (→ relay) after this many CONSECUTIVE failures. One transient
+// hiccup (a momentary network blip, a timeout, a brief auth stall) must never demote a genuinely
+// direct-reachable device pair to the slower relay for minutes — that was why direct devices were
+// intermittently mis-detected as 中转. Any success resets the counter.
+const DIRECT_SSH_ROUTE_FAILURE_THRESHOLD = 2;
 const DIRECT_SSH_ROUTE_CACHE_TTL_MS = 10 * 60 * 1000;
 const DIRECT_TRANSFER_STALL_TIMEOUT_MS = 10 * 1000;
 const DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS = 1000;
@@ -279,6 +284,12 @@ interface IRemoteExecOptions {
 	readonly inactivityTimeoutMs?: number;
 	readonly inactivityMessage?: string;
 	readonly getActivityTime?: () => number | undefined;
+	/**
+	 * When set, cancelling this transfer forcibly closes the exec channel. Closing the channel makes
+	 * the remote sshd send SIGHUP to the command, so a direct SSH→SSH `tar | ssh …` pipeline is truly
+	 * killed on the servers instead of being orphaned and left running after the user cancels.
+	 */
+	readonly progressId?: string;
 }
 
 interface IImageSize {
@@ -402,6 +413,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directSshRouteCache = new Map<string, { readonly routes: readonly TurboFileDirectSshRoute[]; readonly expiresAt: number }>();
 	private readonly directSshRouteFailureCooldowns = new Map<string, number>();
+	private readonly directSshRouteFailureCounts = new Map<string, number>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
@@ -3344,7 +3356,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.fireTransferProgress(request, transferredBytes, expectedBytes, 'transfer', 'Batch direct tar transfer in progress.', false, { strategy: 'tar-direct', route, completedItems: 0, totalItems: items.length });
 			});
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, command, { inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
+			await this.execRemote(client, command, { inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId: request.progressId });
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = expectedBytes > 0 ? expectedBytes : await this.getRemoteBatchTargetContentSize(request.targetDirectory, plan.targetNames).catch(() => 0);
 			await this.cleanupBatchSourcesAfterTar(request, items, operation);
@@ -4509,7 +4521,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await this.execRemote(client, command, {
 				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
 				inactivityMessage: `Direct tar ${route} produced no target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
-				getActivityTime: () => lastActivityAt
+				getActivityTime: () => lastActivityAt,
+				progressId: request.progressId
 			});
 			this.throwIfTransferCanceled(request.progressId);
 			const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => expectedBytes);
@@ -4687,7 +4700,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		this.directSshRouteFailureCooldowns.set(getDirectSshRouteFailureKey(cacheKey, route), Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
+		const failureKey = getDirectSshRouteFailureKey(cacheKey, route);
+		const count = (this.directSshRouteFailureCounts.get(failureKey) ?? 0) + 1;
+		this.directSshRouteFailureCounts.set(failureKey, count);
+		// Only demote the route to relay once it has failed repeatedly in a row; a lone transient
+		// failure is tolerated so direct-reachable devices keep using the fast direct path.
+		if (count >= DIRECT_SSH_ROUTE_FAILURE_THRESHOLD) {
+			this.directSshRouteFailureCooldowns.set(failureKey, Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
+		}
 	}
 
 	private clearDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
@@ -4695,7 +4715,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		this.directSshRouteFailureCooldowns.delete(getDirectSshRouteFailureKey(cacheKey, route));
+		const failureKey = getDirectSshRouteFailureKey(cacheKey, route);
+		this.directSshRouteFailureCounts.delete(failureKey);
+		this.directSshRouteFailureCooldowns.delete(failureKey);
 		this.directSshRouteCache.set(cacheKey, {
 			routes: [route],
 			expiresAt: Date.now() + DIRECT_SSH_ROUTE_CACHE_TTL_MS
@@ -7304,12 +7326,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			let inactivityTimer: ReturnType<typeof setInterval> | undefined;
 			let streamRef: (NodeJS.ReadWriteStream & { close?: () => void; destroy?: (error?: Error) => void }) | undefined;
+			let unregisterCancel: (() => void) | undefined;
 			let lastStreamActivityAt = Date.now();
 			const finish = (callback: () => void): void => {
 				if (settled) {
 					return;
 				}
 				settled = true;
+				unregisterCancel?.();
 				if (timeout) {
 					clearTimeout(timeout);
 					timeout = undefined;
@@ -7332,6 +7356,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					// Best-effort cleanup only.
 				}
 			};
+			// Cancelling the owning transfer forcibly closes this exec channel so the remote command is
+			// actually terminated (SIGHUP) rather than orphaned. Registered before exec so a cancel that
+			// arrives during the channel grant still settles the promise.
+			if (options.progressId) {
+				unregisterCancel = this.registerTransferCancelHandler(options.progressId, () => {
+					closeStream();
+					finish(() => reject(new TurboFileTransferCanceledError()));
+				});
+			}
 			client.exec(command, (error, stream) => {
 				if (error) {
 					finish(() => reject(error));
