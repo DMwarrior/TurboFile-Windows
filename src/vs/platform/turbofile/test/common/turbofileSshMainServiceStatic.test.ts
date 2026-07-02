@@ -10,17 +10,17 @@ import * as path from 'path';
 suite('TurboFileSshMainServiceStatic', () => {
 	const servicePath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 
-	test('lists remote directories through the shared SFTP session without opening a fresh SSH client first', () => {
+	test('lists remote directories with a fresh fast SSH command before falling back to shared SFTP', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const listCoreIndex = service.indexOf('private async listRemoteDirectoryCore');
-		const sharedSftpIndex = service.indexOf('this.getDirectorySftpSession', listCoreIndex);
-		const fallbackIndex = service.indexOf('this.readRemoteDirectoryWithFallback(session.sftp, session.client', sharedSftpIndex);
+		const fastClientIndex = service.indexOf('this.readRemoteDirectoryWithFreshFastClient', listCoreIndex);
+		const sharedSftpIndex = service.indexOf('this.getDirectorySftpSession', fastClientIndex);
+		const fastCommandIndex = service.indexOf('private async readRemoteDirectoryFastCommand');
 
 		assert.ok(listCoreIndex >= 0);
-		assert.ok(sharedSftpIndex > listCoreIndex);
-		assert.ok(fallbackIndex > sharedSftpIndex);
-		assert.ok(!service.includes('readRemoteDirectoryWithFreshFastClient'));
-		assert.ok(!service.includes('readRemoteDirectoryFastCommand'));
+		assert.ok(fastClientIndex > listCoreIndex);
+		assert.ok(sharedSftpIndex > fastClientIndex);
+		assert.ok(fastCommandIndex > listCoreIndex);
 	});
 
 	test('keeps batch direct tar transfers alive when target files are growing', () => {

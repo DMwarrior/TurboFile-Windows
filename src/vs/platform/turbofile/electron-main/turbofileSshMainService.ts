@@ -604,27 +604,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		let lastError: unknown;
+		if (!looksLikeWindowsPath(path)) {
+			try {
+				const listing = await this.readRemoteDirectoryWithFreshFastClient(configResult.config, options, path, namesOnly);
+				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
+			} catch (error) {
+				lastError = error;
+			}
+		}
+
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const session = await this.getDirectorySftpSession(options, configResult.config);
 			try {
 				const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
 				this.touchDirectorySftpSession(session.key);
-				const result = {
-					path: listing.path,
-					entries: listing.entries
-						.filter(entry => entry.filename !== '.' && entry.filename !== '..')
-						.map(entry => this.toRemoteEntry(listing.path, entry))
-						.sort(compareFileEntries)
-				};
-				// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
-				// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
-				if (!namesOnly) {
-					this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
-					if (listing.path === path) {
-						this.setRemoteDirectoryListingCache(cacheKey, result);
-					}
-				}
-				return result;
+				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
 			} catch (error) {
 				lastError = error;
 				this.remoteDirectoryListingCache.delete(cacheKey);
@@ -636,6 +630,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		throw lastError;
+	}
+
+	private createRemoteDirectoryListingResult(options: ITurboFileSshConnectionOptions, requestedPath: string, requestedCacheKey: string, namesOnly: boolean, listing: IRemoteDirectoryReadResult): ITurboFileDirectoryListing {
+		const result: ITurboFileDirectoryListing = {
+			path: listing.path,
+			entries: listing.entries
+				.filter(entry => entry.filename !== '.' && entry.filename !== '..')
+				.map(entry => this.toRemoteEntry(listing.path, entry))
+				.sort(compareFileEntries)
+		};
+		// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
+		// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
+		if (!namesOnly) {
+			this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+			if (listing.path === requestedPath) {
+				this.setRemoteDirectoryListingCache(requestedCacheKey, result);
+			}
+		}
+		return result;
 	}
 
 	private remoteListingHasAttributes(listing: ITurboFileDirectoryListing): boolean {
@@ -7636,19 +7649,46 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async readRemoteDirectoryWithFreshFastClient(config: ConnectConfig, options: ITurboFileSshConnectionOptions, remotePath: string, namesOnly = false): Promise<IRemoteDirectoryReadResult> {
+		let client: ISSHClient | undefined;
+		try {
+			client = await this.connectDirectSsh(config);
+			return { path: remotePath, entries: await this.readRemoteDirectoryFastCommand(client, remotePath, namesOnly) };
+		} catch (firstError) {
+			if (!client) {
+				throw firstError;
+			}
+			for (const fallbackPath of getRemoteDirectoryFallbackPaths(options, remotePath)) {
+				if (looksLikeWindowsPath(fallbackPath)) {
+					continue;
+				}
+				try {
+					return { path: fallbackPath, entries: await this.readRemoteDirectoryFastCommand(client, fallbackPath, namesOnly) };
+				} catch {
+					// Try the next SSH-visible spelling for devices with chrooted home paths.
+				}
+			}
+			throw firstError;
+		} finally {
+			client?.end();
+		}
+	}
+
+	private async readRemoteDirectoryFastCommand(client: ISSHClient, remotePath: string, namesOnly = false): Promise<ISFTPFileEntry[]> {
+		// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
+		// of entries streams output for many seconds and must be allowed to finish. Only callers decide
+		// whether to fall back to slow SFTP readdir.
+		const command = namesOnly ? buildPosixNamesAndTypesListCommand(remotePath) : buildPosixFastDirectoryListCommand(remotePath);
+		return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, command, {
+			inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+			inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
+			timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
+		}), namesOnly);
+	}
+
 	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string, namesOnly = false): Promise<ISFTPFileEntry[]> {
 		try {
-			// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
-			// of entries streams output for many seconds and must be allowed to finish (this is the path
-			// that loads large directories quickly in one round trip). A generous total cap still guards
-			// against a wedged channel. Only on a genuine error do we drop to the slow SFTP readdir.
-			// `namesOnly` skips the per-file stat entirely so even huge directories list instantly.
-			const command = namesOnly ? buildPosixNamesAndTypesListCommand(remotePath) : buildPosixFastDirectoryListCommand(remotePath);
-			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, command, {
-				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
-				inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
-				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
-			}), namesOnly);
+			return await this.readRemoteDirectoryFastCommand(client, remotePath, namesOnly);
 		} catch {
 			return this.readRemoteDirectory(sftp, remotePath);
 		}

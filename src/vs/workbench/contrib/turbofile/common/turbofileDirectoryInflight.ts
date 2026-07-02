@@ -15,11 +15,9 @@ export class TurboFileDirectoryInflightTracker<T> {
 	private readonly entries = new Map<string, TurboFileDirectoryInflightEntry<T>>();
 
 	getReusable(key: string, purpose: TurboFileDirectoryLoadPurpose): Promise<T> | undefined {
+		void purpose;
 		const entry = this.entries.get(key);
 		if (!entry) {
-			return undefined;
-		}
-		if (purpose === 'foreground' && entry.purpose !== 'foreground') {
 			return undefined;
 		}
 		return entry.promise;

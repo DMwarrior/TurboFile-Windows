@@ -459,11 +459,6 @@ const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
 // directory the user is about to open far more likely to be cached by double-click time.
 const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
-// Grace period before showing the "正在加载目录" placeholder on a cache miss. A directory the user
-// navigates into is usually already in flight from hover/pointerdown prefetch and resolves within a
-// frame or two, so deferring the placeholder keeps navigation feeling instant; the placeholder only
-// appears if the load genuinely takes longer.
-const NAV_LOADING_PLACEHOLDER_DELAY_MS = 140;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
@@ -3581,7 +3576,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async openPanePath(side: 'left' | 'right', path: string): Promise<void> {
-		await this.refreshPane(side, { path, force: true });
+		await this.navigatePaneDirectory(side, path);
 	}
 
 	private async navigatePaneDirectory(side: 'left' | 'right', path: string): Promise<void> {
@@ -3596,7 +3591,7 @@ export class TurboFileEditor extends EditorPane {
 		const cached = this.getCachedPaneDirectory(device, path);
 		state.path = path;
 		state.error = undefined;
-		state.loading = true;
+		state.loading = false;
 		this.resetPaneScroll(side);
 		this.clearPaneSelection(side);
 		// Only take the instant cached path when the cached listing can satisfy the current sort. A
@@ -3607,17 +3602,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		state.items = [];
-		// Defer the "正在加载目录" placeholder: the directory is usually already in flight from
-		// hover/pointerdown prefetch and resolves within a frame or two, so showing the old rows for
-		// a moment and then swapping straight to the loaded directory keeps navigation feeling
-		// instant. The placeholder only renders if the load genuinely takes longer than the grace
-		// period.
-		const placeholderTimer = setTimeout(() => {
-			if (this.paneRequestSeq[side] === requestId && this.paneStates[side].loading) {
-				this.render();
-			}
-		}, NAV_LOADING_PLACEHOLDER_DELAY_MS);
+		this.render();
 		try {
 			const listing = await this.loadPaneDirectory(device, path, false, 'foreground', needsAttributes);
 			if (this.paneRequestSeq[side] !== requestId || this.paneStates[side].path !== path) {
@@ -3632,7 +3617,6 @@ export class TurboFileEditor extends EditorPane {
 				this.statusMessage = `${device.name} 目录刷新失败：${message}`;
 			}
 		} finally {
-			clearTimeout(placeholderTimer);
 			if (this.paneRequestSeq[side] === requestId) {
 				state.loading = false;
 				this.render();
@@ -3649,18 +3633,6 @@ export class TurboFileEditor extends EditorPane {
 			list.appendChild(this.renderFileRow(side, { name: state.error, size: '', rawSize: 0, modified: '', rawModified: 0, type: 'unknown' }, false));
 			return;
 		}
-		if (state.loading && state.items.length === 0) {
-			this.fileListRenderedRange[side] = undefined;
-			const row = $('.turbofile-file-row');
-			const name = $('.turbofile-file-name');
-			name.textContent = '正在加载目录...';
-			row.appendChild(name);
-			row.appendChild($('.turbofile-file-meta'));
-			row.appendChild($('.turbofile-file-meta'));
-			list.appendChild(row);
-			return;
-		}
-
 		const range = this.getFileListRange(state);
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = state.scrollTop;
@@ -7649,7 +7621,7 @@ export class TurboFileEditor extends EditorPane {
 			// stat), so even a 30k-file directory lists near-instantly and its SSH channel is released in
 			// milliseconds. Holding channels open for a full stat of every entry (as an always-full load
 			// did) starves the connection's MaxSessions pool when combined with prefetch + image reads,
-			// which is what left directories intermittently stuck on "正在加载目录...". Size/modified are
+			// which is what left directories intermittently stuck on a blocking loading row. Size/modified are
 			// filled in lazily for the visible rows by enrichVisibleRemoteRows(); only a size/modified
 			// sort — which genuinely needs those attributes to order correctly — loads the full listing.
 			const listing = isRemote

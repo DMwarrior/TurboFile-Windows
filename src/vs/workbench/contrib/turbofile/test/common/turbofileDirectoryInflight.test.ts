@@ -7,13 +7,13 @@ import * as assert from 'assert';
 import { TurboFileDirectoryInflightTracker } from '../../common/turbofileDirectoryInflight.js';
 
 suite('TurboFileDirectoryInflightTracker', () => {
-	test('foreground directory loads do not reuse background prefetch requests', () => {
+	test('foreground directory loads reuse background prefetch requests', () => {
 		const tracker = new TurboFileDirectoryInflightTracker<string>();
 		const prefetch = new Promise<string>(() => undefined);
 
 		tracker.set('device:/path', 'prefetch', prefetch);
 
-		assert.strictEqual(tracker.getReusable('device:/path', 'foreground'), undefined);
+		assert.strictEqual(tracker.getReusable('device:/path', 'foreground'), prefetch);
 	});
 
 	test('foreground directory loads reuse foreground requests', () => {
