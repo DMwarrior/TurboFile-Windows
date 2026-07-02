@@ -29,6 +29,8 @@ export interface ITurboFileSshService {
 	 */
 	statRemoteEntries(options: ITurboFileSshConnectionOptions, directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]>;
 	listLocalDirectory(path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
+	listLocalDirectoryNames(path: string, refresh?: boolean): Promise<ITurboFileDirectoryListing>;
+	statLocalEntries(directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]>;
 	normalizeLocalWindowsPaths(paths: readonly string[]): Promise<string[]>;
 	/**
 	 * Resolves the real local Desktop directory, honoring a Desktop relocated to another drive

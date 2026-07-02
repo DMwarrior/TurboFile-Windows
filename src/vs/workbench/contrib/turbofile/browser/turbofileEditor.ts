@@ -70,8 +70,8 @@ import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLoca
 
 interface TurboFileFileItem {
 	readonly name: string;
-	// size/modified are mutable so a names-only (instant) remote listing can be enriched in place once
-	// the lazily-fetched size + modified time for the visible rows arrives.
+	// size/modified are mutable so a names-only (instant) listing can be enriched in place once the
+	// lazily-fetched size + modified time for the visible rows arrives.
 	size: string;
 	rawSize: number;
 	modified: string;
@@ -735,12 +735,12 @@ export class TurboFileEditor extends EditorPane {
 	private readonly fileListScrollRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRestoreRaf: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly fileListRenderedRange: Record<'left' | 'right', { startIndex: number; endIndex: number; total: number } | undefined> = { left: undefined, right: undefined };
-	// Lazy size/date enrichment of names-only remote listings: serialize per side and remember if more
+	// Lazy size/date enrichment of names-only listings: serialize per side and remember if more
 	// rows scrolled into view while a batch was in flight so they get picked up right after.
-	private readonly remoteEnrichInFlight: Record<'left' | 'right', boolean> = { left: false, right: false };
-	private readonly remoteEnrichAgain: Record<'left' | 'right', boolean> = { left: false, right: false };
-	private readonly remoteEnrichRetryHandle: Record<'left' | 'right', number | undefined> = { left: undefined, right: undefined };
-	private readonly remoteEnrichRetryState: Record<'left' | 'right', { path: string; count: number } | undefined> = { left: undefined, right: undefined };
+	private readonly attrsEnrichInFlight: Record<'left' | 'right', boolean> = { left: false, right: false };
+	private readonly attrsEnrichAgain: Record<'left' | 'right', boolean> = { left: false, right: false };
+	private readonly attrsEnrichRetryHandle: Record<'left' | 'right', number | undefined> = { left: undefined, right: undefined };
+	private readonly attrsEnrichRetryState: Record<'left' | 'right', { path: string; count: number } | undefined> = { left: undefined, right: undefined };
 	private readonly paneDirectoryCache = new Map<string, TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryInflight = new TurboFileDirectoryInflightTracker<TurboFileDirectoryCacheEntry>();
 	private readonly paneDirectoryPrefetchQueue = new TurboFileDirectoryPrefetchQueue(PANE_DIRECTORY_PREFETCH_CONCURRENCY);
@@ -1007,9 +1007,9 @@ export class TurboFileEditor extends EditorPane {
 		this.clearFileListRestoreRaf('left');
 		this.clearFileListRestoreRaf('right');
 		for (const side of ['left', 'right'] as const) {
-			if (this.remoteEnrichRetryHandle[side] !== undefined) {
-				getWindow(this.container).clearTimeout(this.remoteEnrichRetryHandle[side]);
-				this.remoteEnrichRetryHandle[side] = undefined;
+			if (this.attrsEnrichRetryHandle[side] !== undefined) {
+				getWindow(this.container).clearTimeout(this.attrsEnrichRetryHandle[side]);
+				this.attrsEnrichRetryHandle[side] = undefined;
 			}
 		}
 		this.releaseAllImageGridStates();
@@ -3637,7 +3637,7 @@ export class TurboFileEditor extends EditorPane {
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = state.scrollTop;
 		this.restoreRenderedFileListScroll(side, list);
-		this.scheduleEnrichVisibleRemoteRows(side);
+		this.scheduleEnrichVisibleRows(side);
 	}
 
 	private renderFileListSlice(side: 'left' | 'right', list: HTMLElement, range: TurboFileFileListRange): void {
@@ -3724,10 +3724,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	/**
-	 * Sorting by size or modified time needs the per-file attributes a fast names-only remote listing
+	 * Sorting by size or modified time needs the per-file attributes a fast names-only listing
 	 * does not carry. When the active sort needs them we must load the full listing up front so the
 	 * directory opens already in the correct, stable order — otherwise the names-only listing renders
-	 * in name order first and then visibly re-sorts as {@link enrichVisibleRemoteRows} fills in sizes.
+	 * in name order first and then visibly re-sorts as {@link enrichVisibleRows} fills in sizes.
 	 */
 	private paneSortNeedsAttributes(side: 'left' | 'right'): boolean {
 		const key = this.paneStates[side].sortKey;
@@ -3783,7 +3783,7 @@ export class TurboFileEditor extends EditorPane {
 		const scrollTop = list.scrollTop;
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = scrollTop;
-		this.scheduleEnrichVisibleRemoteRows(side);
+		this.scheduleEnrichVisibleRows(side);
 	}
 
 	/**
@@ -3809,27 +3809,27 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	/**
-	 * Kicks off lazy size/date enrichment for the rows currently in view after a names-only remote
-	 * listing. Serialized per side; if more rows scroll in while a batch is running, it re-runs once.
+	 * Kicks off lazy size/date enrichment for the rows currently in view after a names-only listing.
+	 * Serialized per side; if more rows scroll in while a batch is running, it re-runs once.
 	 */
-	private scheduleEnrichVisibleRemoteRows(side: 'left' | 'right'): void {
+	private scheduleEnrichVisibleRows(side: 'left' | 'right'): void {
 		const device = this.getPaneDevice(side);
-		if (!device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
+		if (!device) {
 			return;
 		}
 		if (!this.paneStates[side].items.some(item => item.attrsPending)) {
 			return;
 		}
-		if (this.remoteEnrichInFlight[side]) {
-			this.remoteEnrichAgain[side] = true;
+		if (this.attrsEnrichInFlight[side]) {
+			this.attrsEnrichAgain[side] = true;
 			return;
 		}
-		void this.enrichVisibleRemoteRows(side);
+		void this.enrichVisibleRows(side);
 	}
 
-	private async enrichVisibleRemoteRows(side: 'left' | 'right'): Promise<void> {
+	private async enrichVisibleRows(side: 'left' | 'right'): Promise<void> {
 		const device = this.getPaneDevice(side);
-		if (!device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
+		if (!device) {
 			return;
 		}
 		const state = this.paneStates[side];
@@ -3842,10 +3842,12 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		this.remoteEnrichInFlight[side] = true;
+		this.attrsEnrichInFlight[side] = true;
 		try {
-			const options = await this.getSshConnectionOptions(device);
-			const stats = await this.sshService.statRemoteEntries(options, path, pending.map(item => item.name));
+			const names = pending.map(item => item.name);
+			const stats = device.id === LOCAL_WINDOWS_DEVICE_ID
+				? await this.sshService.statLocalEntries(path, names)
+				: await this.sshService.statRemoteEntries(await this.getSshConnectionOptions(device), path, names);
 			if (this.paneStates[side].path !== path || this.getPaneDevice(side)?.id !== device.id) {
 				return;
 			}
@@ -3865,7 +3867,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 			if (changed) {
 				// Progress was made: give the directory a fresh retry budget for any rows still pending.
-				this.remoteEnrichRetryState[side] = undefined;
+				this.attrsEnrichRetryState[side] = undefined;
 				if (state.sortKey === 'modified' || state.sortKey === 'size') {
 					state.items = this.sortPaneItems(side, state.items);
 					this.fileListRenderedRange[side] = undefined;
@@ -3879,23 +3881,23 @@ export class TurboFileEditor extends EditorPane {
 		} catch {
 			// Enrichment is best-effort; a transient failure is retried below instead of leaving the rows blank.
 		} finally {
-			this.remoteEnrichInFlight[side] = false;
-			if (this.remoteEnrichAgain[side]) {
-				this.remoteEnrichAgain[side] = false;
-				this.scheduleEnrichVisibleRemoteRows(side);
+			this.attrsEnrichInFlight[side] = false;
+			if (this.attrsEnrichAgain[side]) {
+				this.attrsEnrichAgain[side] = false;
+				this.scheduleEnrichVisibleRows(side);
 			} else {
 				// If any visible row is still missing size/date (a failed or partial stat), retry with
 				// backoff so the columns reliably fill in rather than staying blank.
-				this.scheduleRemoteEnrichRetryIfNeeded(side, path);
+				this.scheduleEnrichRetryIfNeeded(side, path);
 			}
 		}
 	}
 
-	private scheduleRemoteEnrichRetryIfNeeded(side: 'left' | 'right', path: string): void {
+	private scheduleEnrichRetryIfNeeded(side: 'left' | 'right', path: string): void {
 		const state = this.paneStates[side];
 		const device = this.getPaneDevice(side);
-		if (state.path !== path || !device || device.id === LOCAL_WINDOWS_DEVICE_ID) {
-			this.remoteEnrichRetryState[side] = undefined;
+		if (state.path !== path || !device) {
+			this.attrsEnrichRetryState[side] = undefined;
 			return;
 		}
 		const range = this.getFileListRange(state);
@@ -3903,25 +3905,25 @@ export class TurboFileEditor extends EditorPane {
 			.slice(range.startIndex, range.endIndex)
 			.some(item => item.attrsPending && !!item.path && !item.parent);
 		if (!stillPending) {
-			this.remoteEnrichRetryState[side] = undefined;
+			this.attrsEnrichRetryState[side] = undefined;
 			return;
 		}
-		const current = this.remoteEnrichRetryState[side];
+		const current = this.attrsEnrichRetryState[side];
 		const count = current && current.path === path ? current.count : 0;
 		if (count >= REMOTE_ENRICH_MAX_RETRIES) {
 			// Give up after a few attempts: the remote likely cannot stat these entries at all.
 			return;
 		}
-		this.remoteEnrichRetryState[side] = { path, count: count + 1 };
+		this.attrsEnrichRetryState[side] = { path, count: count + 1 };
 		const delay = REMOTE_ENRICH_RETRY_BASE_MS * Math.pow(2, Math.min(count, 4));
 		const targetWindow = getWindow(this.container);
-		if (this.remoteEnrichRetryHandle[side] !== undefined) {
-			targetWindow.clearTimeout(this.remoteEnrichRetryHandle[side]);
+		if (this.attrsEnrichRetryHandle[side] !== undefined) {
+			targetWindow.clearTimeout(this.attrsEnrichRetryHandle[side]);
 		}
-		this.remoteEnrichRetryHandle[side] = targetWindow.setTimeout(() => {
-			this.remoteEnrichRetryHandle[side] = undefined;
+		this.attrsEnrichRetryHandle[side] = targetWindow.setTimeout(() => {
+			this.attrsEnrichRetryHandle[side] = undefined;
 			if (this.paneStates[side].path === path) {
-				this.scheduleEnrichVisibleRemoteRows(side);
+				this.scheduleEnrichVisibleRows(side);
 			}
 		}, delay);
 	}
@@ -7479,9 +7481,9 @@ export class TurboFileEditor extends EditorPane {
 
 	private applyPaneSortChange(side: 'left' | 'right'): void {
 		const state = this.paneStates[side];
-		// Switching to a size/modified sort on a remote names-only listing needs the full attributes to
+		// Switching to a size/modified sort on a names-only listing needs the full attributes to
 		// sort stably: reload the directory so it comes back already sorted, instead of re-sorting blank
-		// rows and then jumping as enrichVisibleRemoteRows() fills them in.
+		// rows and then jumping as enrichVisibleRows() fills them in.
 		if (this.paneSortNeedsAttributes(side) && state.items.some(item => item.attrsPending)) {
 			void this.refreshPane(side, { silent: true });
 			return;
@@ -7622,16 +7624,18 @@ export class TurboFileEditor extends EditorPane {
 			// milliseconds. Holding channels open for a full stat of every entry (as an always-full load
 			// did) starves the connection's MaxSessions pool when combined with prefetch + image reads,
 			// which is what left directories intermittently stuck on a blocking loading row. Size/modified are
-			// filled in lazily for the visible rows by enrichVisibleRemoteRows(); only a size/modified
+			// filled in lazily for the visible rows by enrichVisibleRows(); only a size/modified
 			// sort — which genuinely needs those attributes to order correctly — loads the full listing.
 			const listing = isRemote
 				? (needsAttributes
 					? await this.sshService.listRemoteDirectory(await this.getSshConnectionOptions(device), path, force)
 					: await this.sshService.listRemoteDirectoryNames(await this.getSshConnectionOptions(device), path, force))
-				: await this.sshService.listLocalDirectory(path, force);
+				: (needsAttributes
+					? await this.sshService.listLocalDirectory(path, force)
+					: await this.sshService.listLocalDirectoryNames(path, force));
 			this.setDeviceRuntimeStatus(device, 'online');
 			const items = this.toFileItems(device, listing.path, listing.entries);
-			if (isRemote) {
+			if (!needsAttributes) {
 				for (const item of items) {
 					// A names-only listing carries no modified time (sentinel 0); blank those rows and
 					// flag them for lazy enrichment. Rows that already have a real time (e.g. served from

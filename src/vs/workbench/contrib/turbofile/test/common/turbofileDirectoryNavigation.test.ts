@@ -43,4 +43,12 @@ suite('TurboFileDirectoryNavigation', () => {
 		assert.ok(!source.includes(loadingText));
 		assert.ok(!source.includes('NAV_LOADING_PLACEHOLDER_DELAY_MS'));
 	});
+
+	test('local directory navigation uses names-only listing when attributes are not needed', () => {
+		const source = readEditor();
+		const block = methodBlock(source, 'private async loadPaneDirectory', 'private async recoverMissingPanePath');
+
+		assert.ok(block.includes('this.sshService.listLocalDirectoryNames(path, force)'));
+		assert.ok(block.includes('this.sshService.listLocalDirectory(path, force)'));
+	});
 });

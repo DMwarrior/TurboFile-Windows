@@ -728,6 +728,45 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 	}
 
+	async listLocalDirectoryNames(path: string, _refresh = false): Promise<ITurboFileDirectoryListing> {
+		const dirents = await fsp.readdir(path, { withFileTypes: true });
+		const visibleNames = await getWindowsExplorerVisibleLocalNames(path);
+		const entries = dirents
+			.filter(dirent => !visibleNames || visibleNames.has(dirent.name))
+			.map(dirent => {
+				const type: TurboFileFileType = dirent.isDirectory() ? 'directory' : dirent.isFile() ? 'file' : dirent.isSymbolicLink() ? 'symlink' : 'unknown';
+				return {
+					name: dirent.name,
+					path: join(path, dirent.name),
+					type,
+					size: 0,
+					modified: 0
+				};
+			});
+
+		return {
+			path,
+			entries: entries.sort(compareFileEntries)
+		};
+	}
+
+	async statLocalEntries(directoryPath: string, names: readonly string[]): Promise<ITurboFileEntryStat[]> {
+		const uniqueNames = Array.from(new Set(names.filter(name => !!name)));
+		const stats = await mapLimit(uniqueNames, LOCAL_DIRECTORY_STAT_CONCURRENCY, async name => {
+			try {
+				const stat = await fsp.lstat(join(directoryPath, name));
+				return {
+					name,
+					size: stat.size,
+					modified: stat.mtimeMs
+				};
+			} catch {
+				return undefined;
+			}
+		});
+		return stats.filter((stat): stat is ITurboFileEntryStat => !!stat);
+	}
+
 	async normalizeLocalWindowsPaths(paths: readonly string[]): Promise<string[]> {
 		return normalizeWindowsTransferPaths(paths, resolveLocalWindowsRealPath);
 	}

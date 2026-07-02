@@ -23,6 +23,18 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(fastCommandIndex > listCoreIndex);
 	});
 
+	test('lists local directory names without per-entry lstat', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const namesIndex = service.indexOf('async listLocalDirectoryNames');
+		const nextMethodIndex = service.indexOf('async statLocalEntries', namesIndex);
+
+		assert.ok(namesIndex >= 0);
+		assert.ok(nextMethodIndex > namesIndex);
+		const block = service.slice(namesIndex, nextMethodIndex);
+		assert.ok(block.includes('dirent.isDirectory()'));
+		assert.ok(!block.includes('fsp.lstat'));
+	});
+
 	test('keeps batch direct tar transfers alive when target files are growing', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const batchDirectIndex = service.indexOf('private async tryDirectBatchTarTransferRoute');
