@@ -63,11 +63,11 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(updateService.includes('getAutomaticUpdateInitialDelayMs()'));
 	});
 
-	test('keeps background directory prefetch gentle so foreground navigation is not starved', () => {
+	test('prefetches nearby SSH directories eagerly enough for fast double-click navigation', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 
-		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_LIMIT = 6;'));
-		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 1;'));
+		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_LIMIT = 12;'));
+		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;'));
 	});
 
 	test('reserves the TurboFile bottom taskbar height for the terminal panel', () => {

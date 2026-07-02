@@ -60,6 +60,7 @@ import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
+import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { sortTurboFileItems, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
@@ -172,6 +173,8 @@ interface TurboFileImageGridImage {
 	previewImageLoadingKey?: string;
 	width?: number;
 	height?: number;
+	originalWidth?: number;
+	originalHeight?: number;
 }
 
 type TurboFileImageGridColumns = number;
@@ -450,10 +453,11 @@ const REMOTE_ENRICH_RETRY_BASE_MS = 350;
 const REMOTE_ENRICH_MAX_RETRIES = 6;
 const PANE_DIRECTORY_CACHE_TTL_MS = 120000;
 const PANE_DIRECTORY_CACHE_MAX_ENTRIES = 256;
-const PANE_DIRECTORY_PREFETCH_LIMIT = 6;
-// Keep background directory lookups gentle: foreground navigation uses the same SSH device and
-// must never wait behind a pile of speculative neighbour prefetches on weaker boards.
-const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 1;
+const PANE_DIRECTORY_PREFETCH_LIMIT = 12;
+// Directory name listings are cheap (a single `find -printf` round trip), so a few can run in
+// parallel even on weak SSH boards. Draining the neighbour-prefetch backlog faster makes the
+// directory the user is about to open far more likely to be cached by double-click time.
+const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 // Grace period before showing the "正在加载目录" placeholder on a cache miss. A directory the user
 // navigates into is usually already in flight from hover/pointerdown prefetch and resolves within a
@@ -6022,7 +6026,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getImageGridCardDimensionsLabel(image: TurboFileImageGridImage): string {
-		return image.width && image.height ? `${image.width}×${image.height}` : '';
+		return formatTurboFileImageDimensions(image, '×');
 	}
 
 	private renderImagePreviewOverlay(state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): HTMLElement {
@@ -6214,7 +6218,7 @@ export class TurboFileEditor extends EditorPane {
 		info.appendChild(name);
 
 		const dimensions = $('span.turbofile-image-preview-info-dimensions');
-		dimensions.textContent = image.width && image.height ? `${image.width} × ${image.height}` : image.previewLoading ? 'Loading original' : 'Original image';
+		dimensions.textContent = formatTurboFileImageDimensions(image) || (image.previewLoading ? 'Loading original' : 'Original image');
 		info.appendChild(dimensions);
 	}
 
@@ -10530,7 +10534,8 @@ export class TurboFileEditor extends EditorPane {
 		if (!image) {
 			return '';
 		}
-		const sizeText = image.width && image.height ? `原图 ${image.width}x${image.height}` : image.previewLoading ? '正在加载原图' : '原图';
+		const dimensions = formatTurboFileImageDimensions(image, 'x');
+		const sizeText = dimensions ? `原图 ${dimensions}` : image.previewLoading ? '正在加载原图' : '原图';
 		return `${image.item.name} (${state.selectedIndex + 1}/${state.images.length}) | ${sizeText}`;
 	}
 
@@ -11079,6 +11084,8 @@ export class TurboFileEditor extends EditorPane {
 			image.thumbnailError = result.ok ? undefined : result.message;
 			image.width = result.width ?? resolvedWidth;
 			image.height = result.height ?? resolvedHeight;
+			image.originalWidth = result.originalWidth ?? image.originalWidth;
+			image.originalHeight = result.originalHeight ?? image.originalHeight;
 			if (result.ok) {
 				image.thumbnailDecodeFailures = 0;
 				state.loadedThumbnailIndexes.add(index);
@@ -11195,6 +11202,8 @@ export class TurboFileEditor extends EditorPane {
 			image.previewError = result.ok ? undefined : result.message;
 			image.width = result.width ?? image.width;
 			image.height = result.height ?? image.height;
+			image.originalWidth = result.originalWidth ?? image.originalWidth;
+			image.originalHeight = result.originalHeight ?? image.originalHeight;
 			if (result.ok) {
 				state.loadedPreviewIndexes.add(index);
 				await this.ensureImagePreviewElementLoaded(state, index);

@@ -88,12 +88,7 @@ const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_SSH_CONNECT_TIMEOUT_MS = 5 * 1000;
-const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 3 * 60 * 1000;
-// A direct route is only cooled down (→ relay) after this many CONSECUTIVE failures. One transient
-// hiccup (a momentary network blip, a timeout, a brief auth stall) must never demote a genuinely
-// direct-reachable device pair to the slower relay for minutes — that was why direct devices were
-// intermittently mis-detected as 中转. Any success resets the counter.
-const DIRECT_SSH_ROUTE_FAILURE_THRESHOLD = 2;
+const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
 const DIRECT_SSH_ROUTE_CACHE_TTL_MS = 10 * 60 * 1000;
 const DIRECT_TRANSFER_STALL_TIMEOUT_MS = 10 * 1000;
 const DIRECT_TRANSFER_STALL_CHECK_INTERVAL_MS = 1000;
@@ -413,7 +408,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directSshRouteCache = new Map<string, { readonly routes: readonly TurboFileDirectSshRoute[]; readonly expiresAt: number }>();
 	private readonly directSshRouteFailureCooldowns = new Map<string, number>();
-	private readonly directSshRouteFailureCounts = new Map<string, number>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
@@ -610,21 +604,27 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		let lastError: unknown;
-		if (!looksLikeWindowsPath(path)) {
-			try {
-				const listing = await this.readRemoteDirectoryWithFreshFastClient(configResult.config, options, path, namesOnly);
-				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
-			} catch (error) {
-				lastError = error;
-			}
-		}
-
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const session = await this.getDirectorySftpSession(options, configResult.config);
 			try {
 				const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
 				this.touchDirectorySftpSession(session.key);
-				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
+				const result = {
+					path: listing.path,
+					entries: listing.entries
+						.filter(entry => entry.filename !== '.' && entry.filename !== '..')
+						.map(entry => this.toRemoteEntry(listing.path, entry))
+						.sort(compareFileEntries)
+				};
+				// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
+				// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
+				if (!namesOnly) {
+					this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
+					if (listing.path === path) {
+						this.setRemoteDirectoryListingCache(cacheKey, result);
+					}
+				}
+				return result;
 			} catch (error) {
 				lastError = error;
 				this.remoteDirectoryListingCache.delete(cacheKey);
@@ -636,25 +636,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		throw lastError;
-	}
-
-	private createRemoteDirectoryListingResult(options: ITurboFileSshConnectionOptions, requestedPath: string, requestedCacheKey: string, namesOnly: boolean, listing: IRemoteDirectoryReadResult): ITurboFileDirectoryListing {
-		const result: ITurboFileDirectoryListing = {
-			path: listing.path,
-			entries: listing.entries
-				.filter(entry => entry.filename !== '.' && entry.filename !== '..')
-				.map(entry => this.toRemoteEntry(listing.path, entry))
-				.sort(compareFileEntries)
-		};
-		// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
-		// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
-		if (!namesOnly) {
-			this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
-			if (listing.path === requestedPath) {
-				this.setRemoteDirectoryListingCache(requestedCacheKey, result);
-			}
-		}
-		return result;
 	}
 
 	private remoteListingHasAttributes(listing: ITurboFileDirectoryListing): boolean {
@@ -4720,14 +4701,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		const failureKey = getDirectSshRouteFailureKey(cacheKey, route);
-		const count = (this.directSshRouteFailureCounts.get(failureKey) ?? 0) + 1;
-		this.directSshRouteFailureCounts.set(failureKey, count);
-		// Only demote the route to relay once it has failed repeatedly in a row; a lone transient
-		// failure is tolerated so direct-reachable devices keep using the fast direct path.
-		if (count >= DIRECT_SSH_ROUTE_FAILURE_THRESHOLD) {
-			this.directSshRouteFailureCooldowns.set(failureKey, Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
-		}
+		this.directSshRouteFailureCooldowns.set(getDirectSshRouteFailureKey(cacheKey, route), Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
 	}
 
 	private clearDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
@@ -4735,9 +4709,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return;
 		}
 		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		const failureKey = getDirectSshRouteFailureKey(cacheKey, route);
-		this.directSshRouteFailureCounts.delete(failureKey);
-		this.directSshRouteFailureCooldowns.delete(failureKey);
+		this.directSshRouteFailureCooldowns.delete(getDirectSshRouteFailureKey(cacheKey, route));
 		this.directSshRouteCache.set(cacheKey, {
 			routes: [route],
 			expiresAt: Date.now() + DIRECT_SSH_ROUTE_CACHE_TTL_MS
@@ -7664,48 +7636,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async readRemoteDirectoryWithFreshFastClient(config: ConnectConfig, options: ITurboFileSshConnectionOptions, remotePath: string, namesOnly = false): Promise<IRemoteDirectoryReadResult> {
-		let client: ISSHClient | undefined;
-		try {
-			client = await this.connectDirectSsh(config);
-			return { path: remotePath, entries: await this.readRemoteDirectoryFastCommand(client, remotePath, namesOnly) };
-		} catch (firstError) {
-			if (!client) {
-				throw firstError;
-			}
-			for (const fallbackPath of getRemoteDirectoryFallbackPaths(options, remotePath)) {
-				if (looksLikeWindowsPath(fallbackPath)) {
-					continue;
-				}
-				try {
-					return { path: fallbackPath, entries: await this.readRemoteDirectoryFastCommand(client, fallbackPath, namesOnly) };
-				} catch {
-					// Try the next SSH-visible spelling for devices with chrooted home paths.
-				}
-			}
-			throw firstError;
-		} finally {
-			client?.end();
-		}
-	}
-
-	private async readRemoteDirectoryFastCommand(client: ISSHClient, remotePath: string, namesOnly = false): Promise<ISFTPFileEntry[]> {
-		// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
-		// of entries streams output for many seconds and must be allowed to finish (this is the path
-		// that loads large directories quickly in one round trip). A generous total cap still guards
-		// against a wedged channel; callers decide whether to fall back to slow SFTP readdir.
-		// `namesOnly` skips the per-file stat entirely so even huge directories list instantly.
-		const command = namesOnly ? buildPosixNamesAndTypesListCommand(remotePath) : buildPosixFastDirectoryListCommand(remotePath);
-		return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, command, {
-			inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
-			inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
-			timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
-		}), namesOnly);
-	}
-
 	private async readRemoteDirectoryFast(client: ISSHClient, sftp: ISFTPWrapper, remotePath: string, namesOnly = false): Promise<ISFTPFileEntry[]> {
 		try {
-			return await this.readRemoteDirectoryFastCommand(client, remotePath, namesOnly);
+			// Bound by inactivity, not total duration: a `find` over a directory with tens of thousands
+			// of entries streams output for many seconds and must be allowed to finish (this is the path
+			// that loads large directories quickly in one round trip). A generous total cap still guards
+			// against a wedged channel. Only on a genuine error do we drop to the slow SFTP readdir.
+			// `namesOnly` skips the per-file stat entirely so even huge directories list instantly.
+			const command = namesOnly ? buildPosixNamesAndTypesListCommand(remotePath) : buildPosixFastDirectoryListCommand(remotePath);
+			return this.parseFastRemoteDirectoryEntries(await this.execRemoteBytes(client, command, {
+				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+				inactivityMessage: `Remote directory read produced no output for ${REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS} ms: ${remotePath}`,
+				timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS
+			}), namesOnly);
 		} catch {
 			return this.readRemoteDirectory(sftp, remotePath);
 		}
