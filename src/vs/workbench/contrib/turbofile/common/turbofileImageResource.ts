@@ -38,11 +38,11 @@ export function createTurboFileImageGridResourceOptions(width: number, sourceSiz
 	};
 }
 
-export function createTurboFileImagePreviewResourceOptions(isWindowsSsh: boolean, request: ITurboFileImagePreviewResourceSize, sourceSize: number, sourceModified: number): ITurboFileImageResourceOptions {
+export function createTurboFileImagePreviewResourceOptions(_isWindowsSsh: boolean, request: ITurboFileImagePreviewResourceSize, sourceSize: number, sourceModified: number): ITurboFileImageResourceOptions {
 	// Read the true original only when it is small enough to be both transferred quickly and
-	// rasterized by the renderer. Windows SSH and very large sources are downscaled to a display
-	// bound so the preview always loads regardless of source dimensions.
-	const mustDownscale = isWindowsSsh || (Number.isFinite(sourceSize) && sourceSize > TURBOFILE_IMAGE_PREVIEW_ORIGINAL_MAX_BYTES);
+	// rasterized by the renderer. Very large sources are still downscaled to a display bound so the
+	// preview always loads regardless of source dimensions.
+	const mustDownscale = Number.isFinite(sourceSize) && sourceSize > TURBOFILE_IMAGE_PREVIEW_ORIGINAL_MAX_BYTES;
 	if (!mustDownscale) {
 		return {
 			forceOriginal: true,

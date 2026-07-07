@@ -62,6 +62,7 @@ import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
 import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns, ITurboFileImageGridCardSize } from '../common/turbofileImageGridSizing.js';
+import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { sortTurboFileItems, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
@@ -276,6 +277,17 @@ interface TurboFileImagePreviewRender {
 	height: number;
 	ready: boolean;
 	requestSeq: number;
+}
+
+interface TurboFileImagePreviewDrawRects {
+	readonly sourceX: number;
+	readonly sourceY: number;
+	readonly sourceWidth: number;
+	readonly sourceHeight: number;
+	readonly destX: number;
+	readonly destY: number;
+	readonly destWidth: number;
+	readonly destHeight: number;
 }
 
 interface TurboFileFileListRange {
@@ -707,7 +719,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly paneImageGridStates: Record<'left' | 'right', TurboFileImageGridState | undefined> = { left: undefined, right: undefined };
 	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
 	private imageGridSortDescending = false;
-	private imagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';
+	private readonly defaultImagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';
 	private syncPreviewState: TurboFileSyncPreviewState | undefined;
 	private dialogState: TurboFileDialogState | undefined;
 	private imageGridObserver: IntersectionObserver | undefined;
@@ -6522,15 +6534,44 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.limitImagePreviewOffset(state, render, cssWidth, cssHeight);
-		const shouldSmooth = state.previewSamplingMode === 'smooth' || state.previewZoom < 1;
+		const shouldSmooth = state.previewSamplingMode === 'smooth';
 		render.context.imageSmoothingEnabled = shouldSmooth;
-		render.context.imageSmoothingQuality = shouldSmooth ? 'high' : 'low';
-		const drawX = Math.trunc(state.previewPanX);
-		const drawY = Math.trunc(state.previewPanY);
-		const drawWidth = render.width * state.previewZoom;
-		const drawHeight = render.height * state.previewZoom;
-		render.context.drawImage(render.image, drawX, drawY, drawWidth, drawHeight);
+		render.context.imageSmoothingQuality = 'low';
+		const draw = this.getImagePreviewDrawRects(state, render, cssWidth, cssHeight);
+		if (draw) {
+			render.context.drawImage(render.image, draw.sourceX, draw.sourceY, draw.sourceWidth, draw.sourceHeight, draw.destX, draw.destY, draw.destWidth, draw.destHeight);
+		}
 		this.updateImagePreviewZoomValue(state);
+	}
+
+	private getImagePreviewDrawRects(state: TurboFileImageGridState, render: TurboFileImagePreviewRender, viewportWidth: number, viewportHeight: number): TurboFileImagePreviewDrawRects | undefined {
+		const scale = Math.max(IMAGE_PREVIEW_ZOOM_MIN, state.previewZoom);
+		const scaledWidth = render.width * scale;
+		const scaledHeight = render.height * scale;
+		const imageLeft = state.previewPanX;
+		const imageTop = state.previewPanY;
+		const imageRight = imageLeft + scaledWidth;
+		const imageBottom = imageTop + scaledHeight;
+		const destX = Math.max(0, imageLeft);
+		const destY = Math.max(0, imageTop);
+		const destRight = Math.min(viewportWidth, imageRight);
+		const destBottom = Math.min(viewportHeight, imageBottom);
+		const destWidth = destRight - destX;
+		const destHeight = destBottom - destY;
+		if (destWidth <= 0 || destHeight <= 0) {
+			return undefined;
+		}
+
+		return {
+			sourceX: (destX - imageLeft) / scale,
+			sourceY: (destY - imageTop) / scale,
+			sourceWidth: destWidth / scale,
+			sourceHeight: destHeight / scale,
+			destX,
+			destY,
+			destWidth,
+			destHeight
+		};
 	}
 
 	private resetImagePreviewViewToFit(state: TurboFileImageGridState, render: TurboFileImagePreviewRender, viewportWidth: number, viewportHeight: number): void {
@@ -6643,11 +6684,13 @@ export class TurboFileEditor extends EditorPane {
 
 		const canvasRect = render.canvas.getBoundingClientRect();
 		const stageRect = stage.getBoundingClientRect();
-		const scale = Math.max(IMAGE_PREVIEW_ZOOM_MIN, state.previewZoom);
-		const drawX = Math.trunc(state.previewPanX);
-		const drawY = Math.trunc(state.previewPanY);
-		const imageX = (event.clientX - canvasRect.left - drawX) / scale;
-		const imageY = (event.clientY - canvasRect.top - drawY) / scale;
+		const draw = this.getImagePreviewDrawRects(state, render, canvasRect.width, canvasRect.height);
+		if (!draw) {
+			tooltip.classList.remove('is-visible');
+			return;
+		}
+		const imageX = draw.sourceX + (event.clientX - canvasRect.left - draw.destX) * (draw.sourceWidth / draw.destWidth);
+		const imageY = draw.sourceY + (event.clientY - canvasRect.top - draw.destY) * (draw.sourceHeight / draw.destHeight);
 		const x = Math.max(0, Math.min(Math.max(0, analysis.width - 1), Math.floor(imageX)));
 		const y = Math.max(0, Math.min(Math.max(0, analysis.height - 1), Math.floor(imageY)));
 		tooltip.style.left = `${event.clientX - stageRect.left + 12}px`;
@@ -9821,7 +9864,7 @@ export class TurboFileEditor extends EditorPane {
 			previewPanX: 0,
 			previewPanY: 0,
 			previewFitPending: true,
-			previewSamplingMode: this.imagePreviewSamplingMode,
+			previewSamplingMode: this.defaultImagePreviewSamplingMode,
 			pixelInspectorVisible: false,
 			histogramVisible: false,
 			histogramX: 104,
@@ -10012,7 +10055,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.imagePreviewSamplingMode;
+		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewPendingIndex = undefined;
 		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
@@ -10040,7 +10083,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.imagePreviewSamplingMode;
+		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewPendingIndex = undefined;
 		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
@@ -10069,7 +10112,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.imagePreviewSamplingMode;
+		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewPendingIndex = undefined;
 		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
@@ -10104,7 +10147,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.setActiveImageGridState(state);
 		state.previewSamplingMode = state.previewSamplingMode === 'lossless' ? 'smooth' : 'lossless';
-		this.imagePreviewSamplingMode = state.previewSamplingMode;
 		this.updateImagePreviewToggleButton('lossless-sampling', state.previewSamplingMode === 'lossless');
 		this.renderImagePreviewCanvas(state);
 	}
@@ -10308,7 +10350,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.imagePreviewSamplingMode;
+		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewVisible = keepPreviewVisible && state.images.length > 0;
 		state.scrollTop = scrollTop;
 		this.imageGridPreviewRequestSeq++;
@@ -10372,7 +10414,7 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.imagePreviewSamplingMode;
+		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewVisible = state.images.length > 0;
 		this.imageGridPreviewRequestSeq++;
 		state.renderedRange = undefined;
@@ -11157,17 +11199,7 @@ export class TurboFileEditor extends EditorPane {
 				return;
 			}
 
-			const result = await this.readImageGridImage(device, image.item.path, {
-				encoding: 'base64',
-				width: request.width,
-				height: request.height,
-				quality: request.quality,
-				format: 'jpeg',
-				interpolation: 'lanczos',
-				maxBytes: 128 * 1024 * 1024,
-				sourceSize: image.item.rawSize,
-				sourceModified: image.item.rawModified
-			});
+			const result = await this.readImageGridImage(device, image.item.path, createTurboFileImagePreviewReadOptions(image.item.rawSize, image.item.rawModified));
 			if (!this.isImageGridSurfaceActive(state) || !this.shouldKeepImageGridPreview(state, index)) {
 				return;
 			}

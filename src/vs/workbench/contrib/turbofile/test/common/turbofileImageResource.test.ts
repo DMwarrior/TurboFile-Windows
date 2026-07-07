@@ -40,13 +40,9 @@ suite('TurboFileImageResource', () => {
 		});
 	});
 
-	test('Windows SSH previews request a display-sized jpeg transform', () => {
+	test('Windows SSH previews stream the original image when it is small enough to rasterize', () => {
 		assert.deepStrictEqual(createTurboFileImagePreviewResourceOptions(true, { width: 1536, height: 1024, quality: 82 }, 1234, 5678), {
-			width: 1536,
-			height: 1024,
-			quality: 82,
-			format: 'jpeg',
-			interpolation: 'lanczos',
+			forceOriginal: true,
 			maxBytes: 128 * 1024 * 1024,
 			sourceSize: 1234,
 			sourceModified: 5678

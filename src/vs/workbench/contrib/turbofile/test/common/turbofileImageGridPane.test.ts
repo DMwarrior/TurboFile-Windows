@@ -95,4 +95,30 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('private moveImageGridPreview(delta: number, state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): void'));
 		assert.ok(editor.includes('private toggleImagePreviewPixelInspector(state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): void'));
 	});
+
+	test('keeps single-image preview smoothing as the default while preserving current-preview pixel mode', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes("private readonly defaultImagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';"));
+		assert.ok(editor.includes('state.previewSamplingMode = this.defaultImagePreviewSamplingMode;'));
+		assert.ok(!editor.includes('this.imagePreviewSamplingMode = state.previewSamplingMode;'));
+		assert.ok(editor.includes("render.context.imageSmoothingQuality = 'low';"));
+	});
+
+	test('draws single-image previews with ImageGlass-style clipped source rects and linear sampling', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private getImagePreviewDrawRects('));
+		assert.ok(editor.includes("render.context.imageSmoothingQuality = 'low';"));
+		assert.ok(editor.includes('render.context.drawImage(render.image, draw.sourceX, draw.sourceY, draw.sourceWidth, draw.sourceHeight, draw.destX, draw.destY, draw.destWidth, draw.destHeight);'));
+		assert.ok(editor.includes('const imageX = draw.sourceX + (event.clientX - canvasRect.left - draw.destX) * (draw.sourceWidth / draw.destWidth);'));
+	});
+
+	test('loads Windows single-image previews through the same original-first options as SSH previews', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes("import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';"));
+		assert.ok(editor.includes('await this.readImageGridImage(device, image.item.path, createTurboFileImagePreviewReadOptions(image.item.rawSize, image.item.rawModified));'));
+		assert.ok(!editor.includes('width: request.width,\n\t\t\t\theight: request.height,\n\t\t\t\tquality: request.quality,\n\t\t\t\tformat: \'jpeg\','));
+	});
 });
