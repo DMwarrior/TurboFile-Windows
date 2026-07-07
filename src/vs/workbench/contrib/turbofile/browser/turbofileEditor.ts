@@ -3576,7 +3576,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async openPanePath(side: 'left' | 'right', path: string): Promise<void> {
-		await this.navigatePaneDirectory(side, path);
+		await this.refreshPane(side, { path, force: true });
 	}
 
 	private async navigatePaneDirectory(side: 'left' | 'right', path: string): Promise<void> {
@@ -3591,18 +3591,19 @@ export class TurboFileEditor extends EditorPane {
 		const cached = this.getCachedPaneDirectory(device, path);
 		state.path = path;
 		state.error = undefined;
-		state.loading = false;
+		state.loading = true;
 		this.resetPaneScroll(side);
 		this.clearPaneSelection(side);
 		// Only take the instant cached path when the cached listing can satisfy the current sort. A
 		// names-only listing cannot be shown stably under a size/modified sort.
 		if (cached && (!needsAttributes || this.cachedListingHasAttributes(cached))) {
 			this.applyPaneDirectoryEntry(side, device, cached);
+			state.loading = false;
 			this.render();
 			return;
 		}
 
-		this.render();
+		state.items = [];
 		try {
 			const listing = await this.loadPaneDirectory(device, path, false, 'foreground', needsAttributes);
 			if (this.paneRequestSeq[side] !== requestId || this.paneStates[side].path !== path) {

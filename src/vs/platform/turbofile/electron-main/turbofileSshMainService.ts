@@ -604,15 +604,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		let lastError: unknown;
-		if (!looksLikeWindowsPath(path)) {
-			try {
-				const listing = await this.readRemoteDirectoryWithFreshFastClient(configResult.config, options, path, namesOnly);
-				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
-			} catch (error) {
-				lastError = error;
-			}
-		}
-
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const session = await this.getDirectorySftpSession(options, configResult.config);
 			try {
@@ -7510,7 +7501,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			// Arm the timeouts BEFORE calling exec so a stalled channel grant can never hang forever.
 			// When the connection's MaxSessions pool is momentarily exhausted, ssh2 may not invoke the
 			// exec callback at all — with the timers armed only inside that callback (as before) the
-			// promise never settled, which left directory listings stuck on "正在加载目录..." until the
+			// promise never settled, which left directory listings stuck waiting until the
 			// window was reopened. Arming here bounds the whole operation, including the channel wait.
 			if (options.timeoutMs && options.timeoutMs > 0) {
 				totalTimeout = setTimeout(() => abort(`Remote command timed out after ${options.timeoutMs} ms.`), options.timeoutMs);
@@ -7685,31 +7676,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 			throw firstError;
-		}
-	}
-
-	private async readRemoteDirectoryWithFreshFastClient(config: ConnectConfig, options: ITurboFileSshConnectionOptions, remotePath: string, namesOnly = false): Promise<IRemoteDirectoryReadResult> {
-		let client: ISSHClient | undefined;
-		try {
-			client = await this.connectDirectSsh(config);
-			return { path: remotePath, entries: await this.readRemoteDirectoryFastCommand(client, remotePath, namesOnly) };
-		} catch (firstError) {
-			if (!client) {
-				throw firstError;
-			}
-			for (const fallbackPath of getRemoteDirectoryFallbackPaths(options, remotePath)) {
-				if (looksLikeWindowsPath(fallbackPath)) {
-					continue;
-				}
-				try {
-					return { path: fallbackPath, entries: await this.readRemoteDirectoryFastCommand(client, fallbackPath, namesOnly) };
-				} catch {
-					// Try the next SSH-visible spelling for devices with chrooted home paths.
-				}
-			}
-			throw firstError;
-		} finally {
-			client?.end();
 		}
 	}
 

@@ -18,21 +18,20 @@ suite('TurboFileDirectoryNavigation', () => {
 		return source.slice(startIndex, endIndex);
 	};
 
-	test('ordinary path opens use optimistic navigation instead of force refresh', () => {
+	test('ordinary path opens use the 1.124 fast refresh path', () => {
 		const source = readEditor();
 		const block = methodBlock(source, 'private async openPanePath', 'private async navigatePaneDirectory');
 
-		assert.ok(block.includes('this.navigatePaneDirectory(side, path)'));
-		assert.ok(!block.includes('force: true'));
-		assert.ok(!block.includes('refreshPane(side'));
+		assert.ok(block.includes('this.refreshPane(side, { path, force: true })'));
+		assert.ok(!block.includes('this.navigatePaneDirectory(side, path)'));
 	});
 
-	test('directory navigation keeps existing rows stable while fetching uncached paths', () => {
+	test('double-click directory navigation uses the 1.124 fast loading state without delayed placeholder', () => {
 		const source = readEditor();
 		const block = methodBlock(source, 'private async navigatePaneDirectory', 'private renderFileList');
 
-		assert.ok(block.includes('this.render();'));
-		assert.ok(!block.includes('state.items = [];'));
+		assert.ok(block.includes('state.loading = true;'));
+		assert.ok(block.includes('state.items = [];'));
 		assert.ok(!block.includes('NAV_LOADING_PLACEHOLDER_DELAY_MS'));
 	});
 
@@ -50,5 +49,15 @@ suite('TurboFileDirectoryNavigation', () => {
 
 		assert.ok(block.includes('this.sshService.listLocalDirectoryNames(path, force)'));
 		assert.ok(block.includes('this.sshService.listLocalDirectory(path, force)'));
+	});
+
+	test('remote directory listing uses the reused SFTP session path from 1.124', () => {
+		const servicePath = path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
+		const source = fs.readFileSync(servicePath, 'utf8');
+		const block = methodBlock(source, 'private async listRemoteDirectoryCore', 'private createRemoteDirectoryListingResult');
+
+		assert.ok(block.includes('this.getDirectorySftpSession(options, configResult.config)'));
+		assert.ok(block.includes('this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly)'));
+		assert.ok(!block.includes('readRemoteDirectoryWithFreshFastClient'));
 	});
 });
