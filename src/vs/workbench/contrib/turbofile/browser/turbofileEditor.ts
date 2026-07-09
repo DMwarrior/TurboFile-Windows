@@ -179,7 +179,7 @@ interface TurboFileImageGridImage {
 }
 
 type TurboFileImageGridColumns = number;
-type TurboFileImageGridSortKey = 'name' | 'date' | 'type' | 'size' | 'dimensions';
+type TurboFileImageGridSortKey = 'name' | 'date' | 'type' | 'size';
 type TurboFileImagePreviewSamplingMode = 'smooth' | 'lossless';
 type TurboFileImageGridDisplayMode = 'page' | 'pane';
 
@@ -519,8 +519,11 @@ const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKe
 	{ key: 'name', label: '名称' },
 	{ key: 'date', label: '修改日期' },
 	{ key: 'type', label: '类型' },
-	{ key: 'size', label: '大小' },
-	{ key: 'dimensions', label: '尺寸' }
+	{ key: 'size', label: '大小' }
+];
+const IMAGE_GRID_SORT_DIRECTION_OPTIONS: readonly { readonly descending: boolean; readonly label: string }[] = [
+	{ descending: false, label: '\u9012\u589e' },
+	{ descending: true, label: '\u9012\u51cf' }
 ];
 const IMAGE_GRID_SORT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const IMAGE_GRID_COLUMN_MIN = 4;
@@ -718,7 +721,7 @@ export class TurboFileEditor extends EditorPane {
 	private imageGridState: TurboFileImageGridState | undefined;
 	private readonly paneImageGridStates: Record<'left' | 'right', TurboFileImageGridState | undefined> = { left: undefined, right: undefined };
 	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
-	private imageGridSortDescending = false;
+	private imageGridSortDescending = true;
 	private readonly defaultImagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';
 	private syncPreviewState: TurboFileSyncPreviewState | undefined;
 	private dialogState: TurboFileDialogState | undefined;
@@ -3296,14 +3299,14 @@ export class TurboFileEditor extends EditorPane {
 		select.classList.toggle('is-open', isOpen);
 		button.type = 'button';
 		button.title = '选择设备';
-		button.setAttribute('aria-haspopup', 'listbox');
+		button.setAttribute('aria-haspopup', 'menu');
 		button.setAttribute('aria-expanded', String(isOpen));
 		button.setAttribute('aria-label', `${this.getSideLabel(side)}设备选择`);
 		button.appendChild(this.renderDeviceSelectIcon(currentDevice));
 		button.appendChild($('span.turbofile-device-select-label', undefined, currentDevice ? this.getDeviceDisplayLabel(currentDevice) : 'Windows'));
 		button.appendChild(renderIcon(Codicon.chevronDown));
 
-		menu.setAttribute('role', 'listbox');
+		menu.setAttribute('role', 'menu');
 		menu.setAttribute('aria-label', `${this.getSideLabel(side)}设备列表`);
 		for (const device of devices) {
 			const option = $('button.turbofile-device-select-option') as HTMLButtonElement;
@@ -5569,7 +5572,7 @@ export class TurboFileEditor extends EditorPane {
 		button.appendChild($('span.turbofile-image-page-scale-label', undefined, this.getImageGridScaleLabel(state.thumbnailScale)));
 		button.appendChild(renderIcon(Codicon.chevronDown));
 
-		menu.setAttribute('role', 'listbox');
+		menu.setAttribute('role', 'menu');
 		menu.setAttribute('aria-label', '图片放大倍率');
 		for (const scale of IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS) {
 			const isActive = state.thumbnailScale === scale;
@@ -5648,7 +5651,7 @@ export class TurboFileEditor extends EditorPane {
 		const menu = $('.turbofile-image-page-sort-menu');
 		button.type = 'button';
 		button.title = '排序方式';
-		button.setAttribute('aria-haspopup', 'listbox');
+		button.setAttribute('aria-haspopup', 'menu');
 		button.setAttribute('aria-expanded', 'false');
 		button.setAttribute('aria-label', '排序方式');
 		button.appendChild(renderIcon(Codicon.listOrdered));
@@ -5656,14 +5659,14 @@ export class TurboFileEditor extends EditorPane {
 		button.appendChild(renderIcon(state.sortDescending ? Codicon.arrowDown : Codicon.arrowUp));
 		button.appendChild(renderIcon(Codicon.chevronDown));
 
-		menu.setAttribute('role', 'listbox');
+		menu.setAttribute('role', 'menu');
 		menu.setAttribute('aria-label', '图片排序方式');
 		for (const option of IMAGE_GRID_SORT_OPTIONS) {
 			const isActive = state.sortKey === option.key;
 			const item = $('button.turbofile-image-page-sort-option') as HTMLButtonElement;
 			item.type = 'button';
-			item.setAttribute('role', 'option');
-			item.setAttribute('aria-selected', isActive ? 'true' : 'false');
+			item.setAttribute('role', 'menuitemradio');
+			item.setAttribute('aria-checked', isActive ? 'true' : 'false');
 			if (isActive) {
 				item.classList.add('is-active');
 			}
@@ -5673,16 +5676,43 @@ export class TurboFileEditor extends EditorPane {
 			}
 			item.appendChild(check);
 			item.appendChild($('span.turbofile-image-page-sort-option-label', undefined, option.label));
-			if (isActive) {
-				item.appendChild(renderIcon(state.sortDescending ? Codicon.arrowDown : Codicon.arrowUp));
-			}
 			item.addEventListener('click', event => {
 				event.preventDefault();
 				event.stopPropagation();
 				select.classList.remove('is-open');
 				button.setAttribute('aria-expanded', 'false');
 				this.setActiveImageGridState(state);
-				this.setImageGridSort(state, option.key);
+				this.setImageGridSortKey(state, option.key);
+			});
+			menu.appendChild(item);
+		}
+
+		const divider = $('.turbofile-image-page-sort-divider');
+		divider.setAttribute('role', 'separator');
+		menu.appendChild(divider);
+
+		for (const option of IMAGE_GRID_SORT_DIRECTION_OPTIONS) {
+			const isActive = state.sortDescending === option.descending;
+			const item = $('button.turbofile-image-page-sort-option') as HTMLButtonElement;
+			item.type = 'button';
+			item.setAttribute('role', 'menuitemradio');
+			item.setAttribute('aria-checked', isActive ? 'true' : 'false');
+			if (isActive) {
+				item.classList.add('is-active');
+			}
+			const check = $('span.turbofile-image-page-sort-check');
+			if (isActive) {
+				check.appendChild(renderIcon(Codicon.check));
+			}
+			item.appendChild(check);
+			item.appendChild($('span.turbofile-image-page-sort-option-label', undefined, option.label));
+			item.addEventListener('click', event => {
+				event.preventDefault();
+				event.stopPropagation();
+				select.classList.remove('is-open');
+				button.setAttribute('aria-expanded', 'false');
+				this.setActiveImageGridState(state);
+				this.setImageGridSortDirection(state, option.descending);
 			});
 			menu.appendChild(item);
 		}
@@ -5812,6 +5842,17 @@ export class TurboFileEditor extends EditorPane {
 			thumb.loading = 'eager';
 			thumb.decoding = 'async';
 			this.applyImageGridCardImageSize(thumb, cardSize);
+			thumb.addEventListener('load', () => {
+				const previousArea = getImageGridPixelArea(image);
+				image.width = Math.max(1, thumb.naturalWidth || image.width || 1);
+				image.height = Math.max(1, thumb.naturalHeight || image.height || 1);
+				if (!this.resortImageGridAfterSizeUpdate(state, image, previousArea) && getImageGridPixelArea(image) !== previousArea) {
+					const currentIndex = state.images.indexOf(image);
+					if (currentIndex >= 0) {
+						this.updateImageGridCard(state, currentIndex);
+					}
+				}
+			});
 			thumb.addEventListener('error', () => this.handleImageGridThumbnailError(state, index));
 			thumb.src = thumbnailSrc;
 			thumb.alt = image.item.name;
@@ -6357,8 +6398,10 @@ export class TurboFileEditor extends EditorPane {
 			image.previewImage = loader;
 			image.previewImageKey = key;
 			image.previewDecodeFailures = 0;
+			const previousArea = getImageGridPixelArea(image);
 			image.width = render.width;
 			image.height = render.height;
+			this.resortImageGridAfterSizeUpdate(state, image, previousArea);
 			this.renderImagePreviewCanvas(state);
 		};
 		loader.onerror = () => {
@@ -6403,8 +6446,10 @@ export class TurboFileEditor extends EditorPane {
 			image.previewImage = loader;
 			image.previewImageKey = key;
 			image.previewDecodeFailures = 0;
+			const previousArea = getImageGridPixelArea(image);
 			image.width = Math.max(1, loader.naturalWidth || image.width || 1);
 			image.height = Math.max(1, loader.naturalHeight || image.height || 1);
+			this.resortImageGridAfterSizeUpdate(state, image, previousArea);
 			return true;
 		} catch (error) {
 			if (this.isImageGridSurfaceActive(state) && this.shouldKeepImageGridPreview(state, index)) {
@@ -10502,24 +10547,40 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private setImageGridSort(state: TurboFileImageGridState | undefined, key: TurboFileImageGridSortKey): void {
+	private setImageGridSortKey(state: TurboFileImageGridState | undefined, key: TurboFileImageGridSortKey): void {
 		if (!state) {
 			return;
 		}
-		// Match Windows Explorer: clicking the active field flips the direction, picking a
-		// different field switches to it in ascending order.
-		const nextDescending = state.sortKey === key ? !state.sortDescending : false;
-		state.sortKey = key;
-		state.sortDescending = nextDescending;
-		this.imageGridSortKey = key;
-		this.imageGridSortDescending = nextDescending;
+		const nextDescending = state.sortKey === key ? state.sortDescending : true;
+		this.applyImageGridSort(state, key, nextDescending);
+	}
 
+	private setImageGridSortDirection(state: TurboFileImageGridState | undefined, descending: boolean): void {
+		if (!state) {
+			return;
+		}
+		this.applyImageGridSort(state, state.sortKey, descending);
+	}
+
+	private applyImageGridSort(state: TurboFileImageGridState, key: TurboFileImageGridSortKey, descending: boolean): void {
+		state.sortKey = key;
+		state.sortDescending = descending;
+		this.imageGridSortKey = key;
+		this.imageGridSortDescending = descending;
+
+		this.resortImageGridState(state);
+		this.clearImageGridThumbnailQueue();
+		this.clearImageGridLoadedImageIndexes(state);
+		this.render();
+	}
+
+	private resortImageGridState(state: TurboFileImageGridState): void {
 		const selectedPath = state.images[state.selectedIndex]?.item.path;
 		const selectedPaths = new Set(this.getImageGridSelectedImages(state)
 			.map(({ image }) => image.item.path)
 			.filter((path): path is string => !!path));
 		const anchorPath = state.selectionAnchorIndex !== undefined ? state.images[state.selectionAnchorIndex]?.item.path : undefined;
-		sortImageGridImages(state.images, key, nextDescending);
+		sortImageGridImages(state.images, state.sortKey, state.sortDescending);
 		state.selectedIndexes.clear();
 		for (const [index, image] of state.images.entries()) {
 			if (image.item.path && selectedPaths.has(image.item.path)) {
@@ -10538,9 +10599,18 @@ export class TurboFileEditor extends EditorPane {
 		const nextAnchorIndex = anchorPath ? state.images.findIndex(image => image.item.path === anchorPath) : -1;
 		state.selectionAnchorIndex = nextAnchorIndex >= 0 ? nextAnchorIndex : state.selectedIndex;
 		state.renderedRange = undefined;
+	}
+
+	private resortImageGridAfterSizeUpdate(state: TurboFileImageGridState, image: TurboFileImageGridImage, previousArea: number): boolean {
+		if (state.sortKey !== 'size' || getImageGridPixelArea(image) === previousArea) {
+			return false;
+		}
+
+		this.resortImageGridState(state);
 		this.clearImageGridThumbnailQueue();
 		this.clearImageGridLoadedImageIndexes(state);
 		this.render();
+		return true;
 	}
 
 	private getImageGridSortLabel(state: TurboFileImageGridState): string {
@@ -11100,6 +11170,7 @@ export class TurboFileEditor extends EditorPane {
 			image.thumbnailUrl = thumbnailUrl;
 			image.thumbnailMime = result.mime || getMimeType(image.item.name);
 			image.thumbnailError = result.ok ? undefined : result.message;
+			const previousArea = getImageGridPixelArea(image);
 			image.width = result.width ?? resolvedWidth;
 			image.height = result.height ?? resolvedHeight;
 			image.originalWidth = result.originalWidth ?? image.originalWidth;
@@ -11107,6 +11178,9 @@ export class TurboFileEditor extends EditorPane {
 			if (result.ok) {
 				image.thumbnailDecodeFailures = 0;
 				state.loadedThumbnailIndexes.add(index);
+			}
+			if (this.resortImageGridAfterSizeUpdate(state, image, previousArea)) {
+				return;
 			}
 			this.updateImageGridCard(state, index);
 		} catch (error) {
@@ -11208,10 +11282,12 @@ export class TurboFileEditor extends EditorPane {
 			image.previewUrl = previewUrl;
 			image.previewMime = result.mime || getMimeType(image.item.name);
 			image.previewError = result.ok ? undefined : result.message;
+			const previousArea = getImageGridPixelArea(image);
 			image.width = result.width ?? image.width;
 			image.height = result.height ?? image.height;
 			image.originalWidth = result.originalWidth ?? image.originalWidth;
 			image.originalHeight = result.originalHeight ?? image.originalHeight;
+			this.resortImageGridAfterSizeUpdate(state, image, previousArea);
 			if (result.ok) {
 				state.loadedPreviewIndexes.add(index);
 				await this.ensureImagePreviewElementLoaded(state, index);
@@ -14489,17 +14565,21 @@ function getFileExtensionLower(name: string): string {
 function compareImageGridImagesBy(a: TurboFileImageGridImage, b: TurboFileImageGridImage, key: TurboFileImageGridSortKey): number {
 	switch (key) {
 		case 'size':
-			return (a.item.rawSize || 0) - (b.item.rawSize || 0);
+			return getImageGridPixelArea(a) - getImageGridPixelArea(b);
 		case 'date':
 			return (a.item.rawModified || 0) - (b.item.rawModified || 0);
 		case 'type':
 			return IMAGE_GRID_SORT_COLLATOR.compare(getFileExtensionLower(a.item.name), getFileExtensionLower(b.item.name));
-		case 'dimensions':
-			return ((a.width || 0) * (a.height || 0)) - ((b.width || 0) * (b.height || 0));
 		case 'name':
 		default:
 			return IMAGE_GRID_SORT_COLLATOR.compare(a.item.name, b.item.name);
 	}
+}
+
+function getImageGridPixelArea(image: TurboFileImageGridImage): number {
+	const width = image.originalWidth || image.width || 0;
+	const height = image.originalHeight || image.height || 0;
+	return width > 0 && height > 0 ? width * height : 0;
 }
 
 function sortImageGridImages(images: TurboFileImageGridImage[], key: TurboFileImageGridSortKey, descending: boolean): void {

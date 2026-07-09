@@ -46,4 +46,45 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(batchDirectBlock.includes('getActivityTime: () => lastActivityAt'));
 		assert.ok(batchDirectBlock.includes('Direct batch tar'));
 	});
+
+	test('does not delete existing target directories before tar or scp directory transfers', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const dangerousDirectoryDeletion = /rm -rf -- [^;\n]*(?:targetPath|request\.target\.path|target|\$target\/\$name|cleanupTargets|cleanupTargetArgs)/;
+		const methodBlock = (methodName: string) => {
+			const start = service.indexOf(`private async ${methodName}`);
+			assert.ok(start >= 0, `${methodName} should exist`);
+			const next = service.indexOf('\n\tprivate async ', start + 1);
+			return service.slice(start, next === -1 ? service.length : next);
+		};
+
+		for (const functionName of [
+			'buildTarExtractToExactDirectoryCommand',
+			'buildPrepareTarExtractToExactDirectoryCommand',
+			'buildPrepareTarZstdExtractToExactDirectoryCommand',
+			'buildTarExtractToDirectoryCommand',
+			'buildPrepareTarExtractToDirectoryFromListCommand',
+			'buildTarSourcePushCommand',
+			'buildTarItemsSourcePushCommand',
+			'buildTarTargetPullCommand',
+			'buildTarItemsTargetPullCommand'
+		]) {
+			const start = service.indexOf(`function ${functionName}`);
+			assert.ok(start >= 0, `${functionName} should exist`);
+			const next = service.indexOf('\nfunction ', start + 1);
+			const block = service.slice(start, next === -1 ? service.length : next);
+			assert.ok(!dangerousDirectoryDeletion.test(block), `${functionName} should not delete target directories`);
+		}
+
+		const directScpStart = service.indexOf('private async tryDirectScpTransferRoute');
+		const directScpEnd = service.indexOf('private async prepareRemoteScpCredential', directScpStart);
+		const directScpBlock = service.slice(directScpStart, directScpEnd);
+		assert.ok(!dangerousDirectoryDeletion.test(directScpBlock), 'direct scp directory preparation should not delete target directories');
+
+		const localScpUploadBlock = methodBlock('runLocalScpUpload');
+		assert.ok(!dangerousDirectoryDeletion.test(localScpUploadBlock), 'local scp upload directory preparation should not delete target directories');
+
+		const localScpDownloadBlock = methodBlock('runLocalScpDownload');
+		assert.ok(!localScpDownloadBlock.includes('fsp.rm(request.target.path, { recursive, force: true })'), 'local scp download should not delete existing target directories');
+		assert.ok(service.includes('Target directory already exists'), 'directory transfer should report existing target directory conflicts');
+	});
 });

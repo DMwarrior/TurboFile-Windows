@@ -1527,8 +1527,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const sizePromise = bytes <= 0 ? this.getRemotePathContentSizeByCommand(request.source).catch(() => 0) : undefined;
 
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing tar download.', true, { strategy: 'tar-download' });
-			await fsp.rm(request.target.path, { recursive: true, force: true }).catch(() => undefined);
-			await ensureLocalDirectory(request.target.path);
+			await ensureLocalDirectoryTransferTargetAvailable(request.target.path);
 			let archiveBytes = 0;
 			const onArchiveDelta = (delta: number): void => {
 				this.throwIfTransferCanceled(request.progressId);
@@ -1737,9 +1736,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async runParallelLocalDirectoryTarUpload(localDirectory: string, connection: ITurboFileSshConnectionOptions, prepareRemoteCommand: string, extractRemoteCommand: string, progressId: string | undefined, onArchiveDelta?: (delta: number) => void): Promise<void> {
-		// Kick off the remote rm+mkdir over its own ssh connection *concurrently* with the local
-		// tree walk, so its handshake and (potentially large) remote cleanup latency overlaps the
-		// collection instead of adding a serial ~1s round trip before any byte is sent.
+		// Kick off the remote target preparation over its own ssh connection *concurrently* with the
+		// local tree walk, so its handshake overlaps the collection instead of adding a serial ~1s
+		// round trip before any byte is sent.
 		const sshTool = await resolveLocalSshTool();
 		const preparePromise = this.runNativeSshCommand(connection, sshTool, prepareRemoteCommand, progressId);
 		let entries: readonly string[];
@@ -2179,9 +2178,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const initialRemoteSize = await this.withDirectorySftp(request.target, async sftp => {
 			this.throwIfTransferCanceled(request.progressId);
 			if (recursive) {
-				await this.withDirectorySshClient(request.target, client => this.execRemote(client, `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}`)).catch(async () => {
-					await this.ensureRemoteDirectory(sftp, request.target.path);
-				});
+				await this.withDirectorySshClient(request.target, client => this.execRemote(client, buildPrepareDirectoryTransferTargetCommand(request.target.path)));
 			} else {
 				await this.ensureRemoteDirectory(sftp, getRemoteParentPath(request.target.path));
 				await this.unlinkRemote(sftp, request.target.path).catch(() => undefined);
@@ -2213,9 +2210,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 		const recursive = sourceType === 'directory';
 		if (canUseNativeOpenSshScpCommand(request.source.connection)) {
-			await fsp.rm(request.target.path, { recursive, force: true }).catch(() => undefined);
 			if (recursive) {
-				await ensureLocalDirectory(request.target.path);
+				await ensureLocalDirectoryTransferTargetAvailable(request.target.path);
+			} else {
+				await fsp.rm(request.target.path, { force: true }).catch(() => undefined);
 			}
 			const initialLocalSize = 0;
 			try {
@@ -3222,7 +3220,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async prepareLocalBatchTarTarget(targetDirectory: string, targetNames: readonly string[]): Promise<void> {
 		await ensureLocalDirectory(targetDirectory);
-		await Promise.all(targetNames.map(targetName => fsp.rm(join(targetDirectory, targetName), { recursive: true, force: true }).catch(() => undefined)));
+		for (const targetName of targetNames) {
+			await throwIfLocalTargetDirectoryExists(join(targetDirectory, targetName));
+		}
 	}
 
 	private async cleanupBatchSourcesAfterTar(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move'): Promise<void> {
@@ -4867,9 +4867,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const remoteUserHost = `${remote.username}@${remote.host}`;
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
 			const targetParentPath = getRemoteParentPath(request.target.path);
+			const prepareDirectoryTargetCommand = buildPrepareDirectoryTransferTargetCommand(request.target.path);
+			const prepareFileTargetCommand = `mkdir -p -- ${quotePosixShellArg(targetParentPath)} && rm -f -- ${quotePosixShellArg(request.target.path)}`;
 			const mkdirCommand = route === 'source-push'
-				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)} && rm -f -- ${quotePosixShellArg(request.target.path)}`)}`
-				: sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)} && rm -f -- ${quotePosixShellArg(request.target.path)}`;
+				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? prepareDirectoryTargetCommand : prepareFileTargetCommand)}`
+				: sourceIsDirectory ? prepareDirectoryTargetCommand : prepareFileTargetCommand;
 			const sourcePath = sourceIsDirectory ? getRemoteDirectoryContentsPath(request.source.path) : request.source.path;
 			const targetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
 			const sourceArg = route === 'source-push' ? sourcePath : `${remoteUserHost}:${sourcePath}`;
@@ -9223,14 +9225,35 @@ function buildTarCreateFromItemsCommand(parentPath: string, names: readonly stri
 	return `command -v tar >/dev/null 2>&1 && tar -cf - -C ${quotePosixShellArg(parentPath)} -- ${itemArgs}`;
 }
 
+function buildRejectExistingDirectoryTransferTargetCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	const message = quotePosixShellArg(`Target directory already exists: ${path}`);
+	return `if [ -e ${target} ]; then printf '%s\\n' ${message} >&2; exit 73; fi`;
+}
+
+function buildPrepareDirectoryTransferTargetCommand(path: string): string {
+	const target = quotePosixShellArg(path);
+	return `${buildRejectExistingDirectoryTransferTargetCommand(path)} && mkdir -p -- ${target}`;
+}
+
+function buildRejectExistingTargetDirectoriesCommand(targetDirectory: string, targetNames: readonly string[]): string {
+	return targetNames
+		.map(name => {
+			const path = joinRemotePath(targetDirectory, name);
+			const target = quotePosixShellArg(path);
+			const message = quotePosixShellArg(`Target directory already exists: ${path}`);
+			return `if [ -d ${target} ]; then printf '%s\\n' ${message} >&2; exit 73; fi`;
+		})
+		.join(' && ');
+}
+
 function buildTarExtractToExactDirectoryCommand(path: string): string {
 	const target = quotePosixShellArg(path);
-	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target} && tar -xf - -C ${target}`;
+	return `command -v tar >/dev/null 2>&1 && ${buildPrepareDirectoryTransferTargetCommand(path)} && tar -xf - -C ${target}`;
 }
 
 function buildPrepareTarExtractToExactDirectoryCommand(path: string): string {
-	const target = quotePosixShellArg(path);
-	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target}`;
+	return `command -v tar >/dev/null 2>&1 && ${buildPrepareDirectoryTransferTargetCommand(path)}`;
 }
 
 function buildTarExtractStreamToDirectoryCommand(path: string): string {
@@ -9239,8 +9262,7 @@ function buildTarExtractStreamToDirectoryCommand(path: string): string {
 }
 
 function buildPrepareTarZstdExtractToExactDirectoryCommand(path: string): string {
-	const target = quotePosixShellArg(path);
-	return `command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1 && rm -rf -- ${target} && mkdir -p -- ${target}`;
+	return `command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1 && ${buildPrepareDirectoryTransferTargetCommand(path)}`;
 }
 
 function buildTarZstdExtractToDirectoryCommand(path: string): string {
@@ -9250,9 +9272,8 @@ function buildTarZstdExtractToDirectoryCommand(path: string): string {
 
 function buildTarExtractToDirectoryCommand(targetDirectory: string, targetNames: readonly string[]): string {
 	const target = quotePosixShellArg(targetDirectory);
-	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
-	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
-	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}tar -xf - -C ${target}`;
+	const conflictCheck = buildRejectExistingTargetDirectoriesCommand(targetDirectory, targetNames);
+	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${conflictCheck ? `${conflictCheck} && ` : ''}tar -xf - -C ${target}`;
 }
 
 function buildPrepareTarExtractToDirectoryFromListCommand(targetDirectory: string, requireZstd: boolean): string {
@@ -9263,13 +9284,13 @@ function buildPrepareTarExtractToDirectoryFromListCommand(targetDirectory: strin
 		requireZstd ? 'command -v zstd >/dev/null 2>&1' : undefined,
 		`target=${target}`,
 		'mkdir -p -- "$target"',
-		'while IFS= read -r -d \'\' name; do if [ -n "$name" ]; then rm -rf -- "$target/$name"; fi; done'
+		'while IFS= read -r -d \'\' name; do if [ -n "$name" ] && [ -d "$target/$name" ]; then printf \'%s\\n\' "Target directory already exists: $target/$name" >&2; exit 73; fi; done'
 	].filter((command): command is string => !!command);
 	return `bash -lc ${quotePosixShellArg(commands.join('; '))}`;
 }
 
 function buildTarSourcePushCommand(sourcePath: string, targetPath: string, targetUserHost: string, sshCommand: string, sshpassPrefix: string): string {
-	const prepareTarget = `rm -rf -- ${quotePosixShellArg(targetPath)} && mkdir -p -- ${quotePosixShellArg(targetPath)} && command -v tar >/dev/null 2>&1`;
+	const prepareTarget = `command -v tar >/dev/null 2>&1 && ${buildPrepareDirectoryTransferTargetCommand(targetPath)}`;
 	const extractTarget = `tar -xf - -C ${quotePosixShellArg(targetPath)}`;
 	const remoteShell = `${sshpassPrefix}${sshCommand} ${quotePosixShellArg(targetUserHost)}`;
 	return `command -v tar >/dev/null 2>&1 && ${remoteShell} ${quotePosixShellArg(prepareTarget)} && tar -cf - -C ${quotePosixShellArg(sourcePath)} . | ${remoteShell} ${quotePosixShellArg(extractTarget)}`;
@@ -9277,9 +9298,8 @@ function buildTarSourcePushCommand(sourcePath: string, targetPath: string, targe
 
 function buildTarItemsSourcePushCommand(parentPath: string, names: readonly string[], targetDirectory: string, targetNames: readonly string[], targetUserHost: string, sshCommand: string, sshpassPrefix: string): string {
 	const target = quotePosixShellArg(targetDirectory);
-	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
-	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
-	const prepareTarget = `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}true`;
+	const conflictCheck = buildRejectExistingTargetDirectoriesCommand(targetDirectory, targetNames);
+	const prepareTarget = `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${conflictCheck ? `${conflictCheck} && ` : ''}true`;
 	const extractTarget = `tar -xf - -C ${target}`;
 	const remoteShell = `${sshpassPrefix}${sshCommand} ${quotePosixShellArg(targetUserHost)}`;
 	return `${remoteShell} ${quotePosixShellArg(prepareTarget)} && ${buildTarCreateFromItemsCommand(parentPath, names)} | ${remoteShell} ${quotePosixShellArg(extractTarget)}`;
@@ -9287,15 +9307,14 @@ function buildTarItemsSourcePushCommand(parentPath: string, names: readonly stri
 
 function buildTarTargetPullCommand(sourcePath: string, targetPath: string, sourceUserHost: string, sshCommand: string, sshpassPrefix: string): string {
 	const createSource = `command -v tar >/dev/null 2>&1 && tar -cf - -C ${quotePosixShellArg(sourcePath)} .`;
-	return `command -v tar >/dev/null 2>&1 && rm -rf -- ${quotePosixShellArg(targetPath)} && mkdir -p -- ${quotePosixShellArg(targetPath)} && ${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${quotePosixShellArg(targetPath)}`;
+	return `command -v tar >/dev/null 2>&1 && ${buildPrepareDirectoryTransferTargetCommand(targetPath)} && ${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${quotePosixShellArg(targetPath)}`;
 }
 
 function buildTarItemsTargetPullCommand(parentPath: string, names: readonly string[], targetDirectory: string, targetNames: readonly string[], sourceUserHost: string, sshCommand: string, sshpassPrefix: string): string {
 	const target = quotePosixShellArg(targetDirectory);
-	const cleanupTargets = targetNames.map(name => quotePosixShellArg(joinRemotePath(targetDirectory, name))).join(' ');
-	const cleanup = cleanupTargets ? `rm -rf -- ${cleanupTargets} && ` : '';
+	const conflictCheck = buildRejectExistingTargetDirectoriesCommand(targetDirectory, targetNames);
 	const createSource = buildTarCreateFromItemsCommand(parentPath, names);
-	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${cleanup}${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${target}`;
+	return `command -v tar >/dev/null 2>&1 && mkdir -p -- ${target} && ${conflictCheck ? `${conflictCheck} && ` : ''}${sshpassPrefix}${sshCommand} ${quotePosixShellArg(sourceUserHost)} ${quotePosixShellArg(createSource)} | tar -xf - -C ${target}`;
 }
 
 function waitForLocalProcessClose(child: ReturnType<typeof spawn>, context: string): Promise<void> {
@@ -9419,6 +9438,39 @@ function runLocalRobocopyCommandBuffer(args: string[]): Promise<string> {
 async function ensureLocalParentDirectory(path: string): Promise<void> {
 	const parent = dirname(path);
 	await ensureLocalDirectory(parent);
+}
+
+async function ensureLocalDirectoryTransferTargetAvailable(path: string): Promise<void> {
+	await throwIfLocalPathExists(path);
+	await ensureLocalDirectory(path);
+}
+
+async function throwIfLocalPathExists(path: string): Promise<void> {
+	const stat = await fsp.stat(path).catch(error => {
+		if (isFileNotFoundError(error)) {
+			return undefined;
+		}
+		throw error;
+	});
+	if (stat) {
+		throw new Error(`Target directory already exists: ${path}`);
+	}
+}
+
+async function throwIfLocalTargetDirectoryExists(path: string): Promise<void> {
+	const stat = await fsp.stat(path).catch(error => {
+		if (isFileNotFoundError(error)) {
+			return undefined;
+		}
+		throw error;
+	});
+	if (stat?.isDirectory()) {
+		throw new Error(`Target directory already exists: ${path}`);
+	}
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
 async function ensureLocalDirectory(path: string): Promise<void> {

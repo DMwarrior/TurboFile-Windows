@@ -34,11 +34,50 @@ suite('TurboFileImageGridPane', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		assert.ok(editor.includes('this.setImageGridColumns(state, option);'));
 		assert.ok(editor.includes('this.setImageGridThumbnailScale(state, scale);'));
-		assert.ok(editor.includes('this.setImageGridSort(state, option.key);'));
+		assert.ok(editor.includes('this.setImageGridSortKey(state, option.key);'));
 		assert.ok(editor.includes('void this.deleteSelectedImageGridItems(state);'));
 		assert.ok(editor.includes('this.selectAllImageGridItems(state);'));
 		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns - 1);'));
 		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns + 1);'));
+	});
+
+	test('sorts image grid size by pixel area and removes the separate dimensions option', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const sortOptions = editor.slice(
+			editor.indexOf('const IMAGE_GRID_SORT_OPTIONS'),
+			editor.indexOf('const IMAGE_GRID_SORT_COLLATOR')
+		);
+		const comparator = editor.slice(
+			editor.indexOf('function compareImageGridImagesBy'),
+			editor.indexOf('function sortImageGridImages')
+		);
+		const setSortKey = editor.slice(
+			editor.indexOf('private setImageGridSortKey('),
+			editor.indexOf('private setImageGridSortDirection(')
+		);
+
+		assert.ok(sortOptions.includes("{ key: 'size',"));
+		assert.ok(!sortOptions.includes("'dimensions'"));
+		assert.ok(editor.includes('private imageGridSortDescending = true;'));
+		assert.ok(comparator.includes("case 'size':"));
+		assert.ok(comparator.includes('getImageGridPixelArea(a) - getImageGridPixelArea(b)'));
+		assert.ok(!comparator.includes('a.item.rawSize'));
+		assert.ok(setSortKey.includes('state.sortKey === key ? state.sortDescending : true'));
+	});
+
+	test('renders image-grid sort fields and direction as separate menu groups', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderSort = editor.slice(
+			editor.indexOf('private renderImageGridSortControl('),
+			editor.indexOf('private renderImageGridSlice(')
+		);
+
+		assert.ok(editor.includes('const IMAGE_GRID_SORT_DIRECTION_OPTIONS'));
+		assert.ok(renderSort.includes('turbofile-image-page-sort-divider'));
+		assert.ok(renderSort.includes('for (const option of IMAGE_GRID_SORT_DIRECTION_OPTIONS)'));
+		assert.ok(renderSort.includes('this.setImageGridSortKey(state, option.key);'));
+		assert.ok(renderSort.includes('this.setImageGridSortDirection(state, option.descending);'));
+		assert.ok(!renderSort.includes('item.appendChild(renderIcon(state.sortDescending ? Codicon.arrowDown : Codicon.arrowUp));'));
 	});
 
 	test('updates image-grid deletion in place instead of re-rendering the whole editor', () => {

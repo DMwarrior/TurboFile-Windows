@@ -3697,7 +3697,8 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-image-page-sort-option {
 	width: 100%;
 	min-height: 30px;
-	display: flex;
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
 	align-items: center;
 	gap: 6px;
 	padding: 4px 8px;
@@ -3708,6 +3709,12 @@ body.hc-black .turbofile-live-transfer-panel {
 	font-weight: 600;
 	text-align: left;
 	cursor: pointer;
+}
+
+.turbofile-image-page-sort-divider {
+	height: 1px;
+	margin: 4px 0;
+	background: var(--tf-image-border);
 }
 
 .turbofile-image-page-scale-option {
@@ -3735,7 +3742,7 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 .turbofile-image-page-sort-check {
-	width: 12px;
+	width: 18px;
 	flex: 0 0 auto;
 	display: inline-flex;
 	align-items: center;
@@ -3762,6 +3769,7 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-image-page-sort-option-label {
 	flex: 1;
+	min-width: 0;
 	white-space: nowrap;
 }
 
