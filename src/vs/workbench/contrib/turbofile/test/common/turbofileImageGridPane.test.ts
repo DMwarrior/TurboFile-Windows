@@ -96,12 +96,17 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('private toggleImagePreviewPixelInspector(state: TurboFileImageGridState | undefined = this.getActiveImageGridPreviewState()): void'));
 	});
 
-	test('keeps single-image preview smoothing as the default while preserving current-preview pixel mode', () => {
+	test('keeps single-image preview smoothing as the default while preserving selected sampling across preview navigation', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const commitPreviewIndex = editor.slice(
+			editor.indexOf('private commitImageGridPreviewIndexIfReady('),
+			editor.indexOf('private openImageGridPreview(')
+		);
 
 		assert.ok(editor.includes("private readonly defaultImagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';"));
 		assert.ok(editor.includes('state.previewSamplingMode = this.defaultImagePreviewSamplingMode;'));
 		assert.ok(!editor.includes('this.imagePreviewSamplingMode = state.previewSamplingMode;'));
+		assert.ok(!commitPreviewIndex.includes('state.previewSamplingMode = this.defaultImagePreviewSamplingMode;'));
 		assert.ok(editor.includes("render.context.imageSmoothingQuality = 'low';"));
 	});
 
@@ -112,6 +117,18 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes("render.context.imageSmoothingQuality = 'low';"));
 		assert.ok(editor.includes('render.context.drawImage(render.image, draw.sourceX, draw.sourceY, draw.sourceWidth, draw.sourceHeight, draw.destX, draw.destY, draw.destWidth, draw.destHeight);'));
 		assert.ok(editor.includes('const imageX = draw.sourceX + (event.clientX - canvasRect.left - draw.destX) * (draw.sourceWidth / draw.destWidth);'));
+	});
+
+	test('sizes grid thumbnail requests from the rendered preview box for high-DPI clarity', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const requestWidth = editor.slice(
+			editor.indexOf('private getImageGridThumbnailRequestWidth('),
+			editor.indexOf('private shouldUseOriginalImageGridCardSource(')
+		);
+
+		assert.ok(requestWidth.includes('this.getImageGridMaxCardWidth(state) - IMAGE_GRID_CARD_INLINE_CHROME'));
+		assert.ok(!requestWidth.includes('this.getImageGridMaxImageWidth(state)'));
+		assert.ok(requestWidth.includes('ownerWindow?.devicePixelRatio || 1'));
 	});
 
 	test('loads Windows single-image previews through the same original-first options as SSH previews', () => {

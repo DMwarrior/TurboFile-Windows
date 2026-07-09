@@ -5725,6 +5725,7 @@ body.turbofile-shell .turbofile-theme-toggle {
 	max-width: none;
 	max-height: none;
 	object-fit: contain;
+	image-rendering: auto;
 	border-radius: 0;
 	background: transparent;
 	transition: opacity 200ms ease;

@@ -10055,7 +10055,6 @@ export class TurboFileEditor extends EditorPane {
 		state.previewPanX = 0;
 		state.previewPanY = 0;
 		state.previewFitPending = true;
-		state.previewSamplingMode = this.defaultImagePreviewSamplingMode;
 		state.previewPendingIndex = undefined;
 		state.previewPendingRequestSeq = undefined;
 		this.imagePreviewAnalysis = undefined;
@@ -11381,10 +11380,6 @@ export class TurboFileEditor extends EditorPane {
 		return this.getImageGridLayoutMetrics(state).maxCardWidth;
 	}
 
-	private getImageGridMaxImageWidth(state: TurboFileImageGridState): number {
-		return this.getImageGridLayoutMetrics(state).maxImageWidth;
-	}
-
 	private getImageGridBaseCardWidth(state: TurboFileImageGridState): number {
 		const columns = Math.max(1, state.columns);
 		const width = this.getImageGridBodyWidth(state);
@@ -11457,7 +11452,8 @@ export class TurboFileEditor extends EditorPane {
 	private getImageGridThumbnailRequestWidth(state: TurboFileImageGridState): number {
 		const ownerWindow = this.container?.ownerDocument.defaultView;
 		const dpr = Math.min(IMAGE_DPR_CAP, ownerWindow?.devicePixelRatio || 1);
-		const scaled = Math.round(this.getImageGridMaxImageWidth(state) * dpr);
+		const previewBoxWidth = Math.max(1, this.getImageGridMaxCardWidth(state) - IMAGE_GRID_CARD_INLINE_CHROME);
+		const scaled = Math.round(previewBoxWidth * dpr);
 		return clampNumber(quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP), IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 	}
 
