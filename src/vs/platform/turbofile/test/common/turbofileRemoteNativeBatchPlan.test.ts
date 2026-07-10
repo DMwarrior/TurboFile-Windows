@@ -28,7 +28,7 @@ suite('TurboFileRemoteNativeBatchPlan', function () {
 		assert.ok(plan.command.includes('cp -a'), plan.command);
 		assert.ok(!plan.command.includes(items[0].sourcePath), 'source paths must be streamed through stdin');
 		assert.strictEqual(plan.input[plan.input.length - 1], 0);
-		assert.strictEqual(plan.input.toString('utf8').split('\0').filter(Boolean).length, items.length);
+		assert.strictEqual(plan.input.toString('utf8').split('\0').filter(Boolean).length, items.length * 3);
 	});
 
 	test('builds a stdin-driven POSIX move command', () => {
@@ -39,6 +39,20 @@ suite('TurboFileRemoteNativeBatchPlan', function () {
 
 		assert.ok(plan.command.includes('xargs -0'), plan.command);
 		assert.ok(plan.command.includes('mv -f'), plan.command);
-		assert.deepStrictEqual(plan.input.toString('utf8').split('\0'), ['/tmp/source/a.txt', '/tmp/source/b.txt', '']);
+		assert.deepStrictEqual(plan.input.toString('utf8').split('\0'), [
+			'/tmp/source/a.txt', 'a.txt', 'file',
+			'/tmp/source/b.txt', 'b.txt', 'file',
+			''
+		]);
+	});
+
+	test('merges directory contents into the exact same-name target', () => {
+		const plan = createPosixNativeBatchTransferPlan([
+			{ sourcePath: '/tmp/source/11', targetName: '11', sourceType: 'directory' }
+		], '/tmp/target', 'copy');
+
+		assert.ok(plan.command.includes('"$src"/.'), plan.command);
+		assert.ok(plan.command.includes('$target/$name'), plan.command);
+		assert.deepStrictEqual(plan.input.toString('utf8').split('\0'), ['/tmp/source/11', '11', 'directory', '']);
 	});
 });

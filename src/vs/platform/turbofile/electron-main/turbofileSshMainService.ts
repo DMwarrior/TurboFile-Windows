@@ -4574,7 +4574,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
 			? buildWindowsCopyCommand(request.source.path, request.target.path)
-			: buildPosixCopyCommand(request.source.path, request.target.path);
+			: buildPosixCopyCommand(request.source.path, request.target.path, sourceType);
 
 		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true);
 		await this.execRemoteCopyWithProgress(request, command, bytes, sourceType);
@@ -9815,10 +9815,14 @@ function buildWindowsMoveCommand(sourcePath: string, targetPath: string): string
 	return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`));
 }
 
-function buildPosixCopyCommand(sourcePath: string, targetPath: string): string {
+function buildPosixCopyCommand(sourcePath: string, targetPath: string, sourceType: TurboFileFileType): string {
 	const source = quotePosixShellArg(sourcePath);
 	const target = quotePosixShellArg(targetPath);
 	const parent = quotePosixShellArg(getRemoteParentPath(targetPath));
+	if (sourceType === 'directory') {
+		const conflictMessage = quotePosixShellArg(`Target directory conflicts with a file: ${targetPath}`);
+		return `mkdir -p ${parent} && if [ -e ${target} ] && [ ! -d ${target} ]; then printf '%s\\n' ${conflictMessage} >&2; exit 73; fi && mkdir -p -- ${target} && (cp -a --reflink=auto --sparse=always -- ${source}/. ${target}/ 2>/dev/null || cp -a -- ${source}/. ${target}/)`;
+	}
 	return `mkdir -p ${parent} && (cp -a --reflink=auto --sparse=always ${source} ${target} 2>/dev/null || cp -a ${source} ${target})`;
 }
 
