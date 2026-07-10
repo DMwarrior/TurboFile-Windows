@@ -7707,7 +7707,8 @@ export class TurboFileEditor extends EditorPane {
 			this.paneDirectoryInflight.delete(cacheKey);
 		}
 
-		const promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
+		let promise!: Promise<TurboFileDirectoryCacheEntry>;
+		promise = (async (): Promise<TurboFileDirectoryCacheEntry> => {
 			const isRemote = device.id !== LOCAL_WINDOWS_DEVICE_ID;
 			// Remote directories load names + type only by default (one `find` round trip, NO per-file
 			// stat), so even a 30k-file directory lists near-instantly and its SSH channel is released in
@@ -7742,11 +7743,10 @@ export class TurboFileEditor extends EditorPane {
 				path: listing.path,
 				items
 			};
-			this.paneDirectoryCache.set(this.getPaneDirectoryCacheKey(device, listing.path), entry);
-			if (listing.path === path) {
+			if (this.paneDirectoryInflight.isCurrent(cacheKey, promise)) {
 				this.paneDirectoryCache.set(cacheKey, entry);
+				this.trimPaneDirectoryCache();
 			}
-			this.trimPaneDirectoryCache();
 			return entry;
 		})();
 		this.paneDirectoryInflight.set(cacheKey, purpose, promise);

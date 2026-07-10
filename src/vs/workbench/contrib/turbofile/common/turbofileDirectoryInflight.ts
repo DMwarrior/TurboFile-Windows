@@ -27,6 +27,10 @@ export class TurboFileDirectoryInflightTracker<T> {
 		return this.entries.has(key);
 	}
 
+	isCurrent(key: string, promise: Promise<T>): boolean {
+		return this.entries.get(key)?.promise === promise;
+	}
+
 	set(key: string, purpose: TurboFileDirectoryLoadPurpose, promise: Promise<T>): void {
 		const entry = { purpose, promise };
 		this.entries.set(key, entry);

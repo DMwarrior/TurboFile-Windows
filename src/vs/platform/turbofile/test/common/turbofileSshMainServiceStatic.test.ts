@@ -30,6 +30,19 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(block.includes('await delay(retryDelayMs)'));
 	});
 
+	test('stale remote directory reads cannot repopulate an invalidated cache entry', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const listCoreIndex = service.indexOf('private async listRemoteDirectoryCore');
+		const resultIndex = service.indexOf('private createRemoteDirectoryListingResult', listCoreIndex);
+		const listCoreBlock = service.slice(listCoreIndex, resultIndex);
+		const clearIndex = service.indexOf('private clearRemoteDirectoryListingCache');
+		const clearBlock = service.slice(clearIndex, service.indexOf('\n\tprivate ', clearIndex + 1));
+
+		assert.ok(listCoreBlock.includes('this.remoteDirectoryListingGenerations.next(cacheKey)'));
+		assert.ok(service.includes('this.remoteDirectoryListingGenerations.isCurrent(requestedCacheKey, listingGeneration)'));
+		assert.ok(clearBlock.includes('this.remoteDirectoryListingGenerations.next(cacheKey)'));
+	});
+
 	test('lists local directory names without per-entry lstat', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const namesIndex = service.indexOf('async listLocalDirectoryNames');

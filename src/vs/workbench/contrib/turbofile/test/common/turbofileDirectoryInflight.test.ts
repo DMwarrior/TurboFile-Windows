@@ -40,4 +40,18 @@ suite('TurboFileDirectoryInflightTracker', () => {
 
 		assert.strictEqual(tracker.getReusable('device:/path', 'foreground'), foreground);
 	});
+
+	test('reports whether a promise is still the current request for a key', () => {
+		const tracker = new TurboFileDirectoryInflightTracker<string>();
+		const stale = new Promise<string>(() => undefined);
+		const current = new Promise<string>(() => undefined);
+
+		tracker.set('device:/path', 'prefetch', stale);
+		tracker.set('device:/path', 'foreground', current);
+
+		assert.strictEqual(tracker.isCurrent('device:/path', stale), false);
+		assert.strictEqual(tracker.isCurrent('device:/path', current), true);
+		tracker.delete('device:/path');
+		assert.strictEqual(tracker.isCurrent('device:/path', current), false);
+	});
 });

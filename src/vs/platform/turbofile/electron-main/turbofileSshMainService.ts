@@ -408,6 +408,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly directorySftpSessionGenerations = new TurboFileKeyedGeneration();
 	private readonly directorySftpIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
+	private readonly remoteDirectoryListingGenerations = new TurboFileKeyedGeneration();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directSshRouteCache = new Map<string, { readonly routes: readonly TurboFileDirectSshRoute[]; readonly expiresAt: number }>();
@@ -601,6 +602,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return cached;
 			}
 		}
+		const listingGeneration = this.remoteDirectoryListingGenerations.next(cacheKey);
 
 		const configResult = await this.createConnectConfig(options);
 		if (!configResult.ok) {
@@ -614,10 +616,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				session = await this.getDirectorySftpSession(options, configResult.config);
 				const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
 				this.touchDirectorySftpSession(session.key, session.generation);
-				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
+				return this.createRemoteDirectoryListingResult(cacheKey, listingGeneration, namesOnly, listing);
 			} catch (error) {
 				lastError = error;
-				this.remoteDirectoryListingCache.delete(cacheKey);
+				if (this.remoteDirectoryListingGenerations.isCurrent(cacheKey, listingGeneration)) {
+					this.remoteDirectoryListingCache.delete(cacheKey);
+				}
 				if (session) {
 					this.disposeDirectorySftpSession(session.key, session.generation);
 				}
@@ -631,7 +635,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		throw lastError;
 	}
 
-	private createRemoteDirectoryListingResult(options: ITurboFileSshConnectionOptions, requestedPath: string, requestedCacheKey: string, namesOnly: boolean, listing: IRemoteDirectoryReadResult): ITurboFileDirectoryListing {
+	private createRemoteDirectoryListingResult(requestedCacheKey: string, listingGeneration: number, namesOnly: boolean, listing: IRemoteDirectoryReadResult): ITurboFileDirectoryListing {
 		const result: ITurboFileDirectoryListing = {
 			path: listing.path,
 			entries: listing.entries
@@ -641,11 +645,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 		// Only cache full listings: a names-only listing has zeroed size/date and must not shadow a
 		// later full listing (it is cheap to recompute and gets enriched lazily on the client side).
-		if (!namesOnly) {
-			this.setRemoteDirectoryListingCache(this.getRemoteDirectoryListingCacheKey(options, listing.path), result);
-			if (listing.path === requestedPath) {
-				this.setRemoteDirectoryListingCache(requestedCacheKey, result);
-			}
+		if (!namesOnly && this.remoteDirectoryListingGenerations.isCurrent(requestedCacheKey, listingGeneration)) {
+			this.setRemoteDirectoryListingCache(requestedCacheKey, result);
 		}
 		return result;
 	}
@@ -5870,7 +5871,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		paths.add(path);
 		paths.add(getRemoteParentPath(path));
 		for (const candidate of paths) {
-			this.remoteDirectoryListingCache.delete(this.getRemoteDirectoryListingCacheKey(endpoint.connection, candidate));
+			const cacheKey = this.getRemoteDirectoryListingCacheKey(endpoint.connection, candidate);
+			this.remoteDirectoryListingGenerations.next(cacheKey);
+			this.remoteDirectoryListingCache.delete(cacheKey);
 		}
 	}
 
