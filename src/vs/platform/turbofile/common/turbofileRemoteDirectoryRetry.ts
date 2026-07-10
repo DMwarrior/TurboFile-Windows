@@ -7,6 +7,14 @@ const nonRetryableRemoteDirectoryErrors = /no such file|no such file or director
 
 const retryableRemoteDirectoryErrors = /no response from server|not connected|connection (?:lost|closed|reset|timed out)|econnreset|socket.*closed|channel.*(?:closed|not open|not available)|sftp.*(?:closed|ended|not connected)|remote directory read timed out|remote command (?:timed out|produced no progress)/i;
 
+const remoteDirectoryReadRetryDelays = [100, 250] as const;
+
+export const REMOTE_DIRECTORY_READ_MAX_ATTEMPTS = remoteDirectoryReadRetryDelays.length + 1;
+
+export function getRemoteDirectoryReadRetryDelay(attempt: number): number | undefined {
+	return remoteDirectoryReadRetryDelays[attempt];
+}
+
 export function shouldRetryRemoteDirectoryRead(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	if (nonRetryableRemoteDirectoryErrors.test(message)) {

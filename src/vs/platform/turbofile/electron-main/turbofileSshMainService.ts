@@ -21,7 +21,7 @@ import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } f
 import { createLocalBatchTarPlans, createTarNullListBuffer, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { shouldRejectDirectoryTargetConflict } from '../common/turbofileTransferConflictPolicy.js';
-import { shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
+import { getRemoteDirectoryReadRetryDelay, REMOTE_DIRECTORY_READ_MAX_ATTEMPTS, shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { createPosixNativeBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -608,20 +608,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		let lastError: unknown;
-		for (let attempt = 0; attempt < 2; attempt++) {
-			const session = await this.getDirectorySftpSession(options, configResult.config);
+		for (let attempt = 0; attempt < REMOTE_DIRECTORY_READ_MAX_ATTEMPTS; attempt++) {
+			let session: IRemoteDirectorySftpSession | undefined;
 			try {
+				session = await this.getDirectorySftpSession(options, configResult.config);
 				const listing = await this.readRemoteDirectoryWithFallback(session.sftp, session.client, options, path, namesOnly);
 				this.touchDirectorySftpSession(session.key, session.generation);
 				return this.createRemoteDirectoryListingResult(options, path, cacheKey, namesOnly, listing);
 			} catch (error) {
 				lastError = error;
 				this.remoteDirectoryListingCache.delete(cacheKey);
-				this.disposeDirectorySftpSession(session.key, session.generation);
-				if (attempt === 0 && shouldRetryRemoteDirectoryRead(error)) {
-					continue;
+				if (session) {
+					this.disposeDirectorySftpSession(session.key, session.generation);
 				}
-				throw error;
+				const retryDelayMs = getRemoteDirectoryReadRetryDelay(attempt);
+				if (!shouldRetryRemoteDirectoryRead(error) || retryDelayMs === undefined) {
+					throw error;
+				}
+				await delay(retryDelayMs);
 			}
 		}
 		throw lastError;

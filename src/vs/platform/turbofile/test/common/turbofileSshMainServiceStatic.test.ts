@@ -19,6 +19,17 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(service.includes('private disposeDirectorySftpSession(key: string, generation: number)'));
 	});
 
+	test('remote directory reads use bounded transient retries', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const listCoreIndex = service.indexOf('private async listRemoteDirectoryCore');
+		const nextMethodIndex = service.indexOf('private createRemoteDirectoryListingResult', listCoreIndex);
+		const block = service.slice(listCoreIndex, nextMethodIndex);
+
+		assert.ok(block.includes('attempt < REMOTE_DIRECTORY_READ_MAX_ATTEMPTS'));
+		assert.ok(block.includes('getRemoteDirectoryReadRetryDelay(attempt)'));
+		assert.ok(block.includes('await delay(retryDelayMs)'));
+	});
+
 	test('lists local directory names without per-entry lstat', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const namesIndex = service.indexOf('async listLocalDirectoryNames');
