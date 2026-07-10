@@ -10,17 +10,13 @@ import * as path from 'path';
 suite('TurboFileSshMainServiceStatic', () => {
 	const servicePath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 
-	test('lists remote directories with a fresh fast SSH command before falling back to shared SFTP', () => {
+	test('shared directory SFTP sessions are disposed only by their own generation', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const listCoreIndex = service.indexOf('private async listRemoteDirectoryCore');
-		const fastClientIndex = service.indexOf('this.readRemoteDirectoryWithFreshFastClient', listCoreIndex);
-		const sharedSftpIndex = service.indexOf('this.getDirectorySftpSession', fastClientIndex);
-		const fastCommandIndex = service.indexOf('private async readRemoteDirectoryFastCommand');
 
-		assert.ok(listCoreIndex >= 0);
-		assert.ok(fastClientIndex > listCoreIndex);
-		assert.ok(sharedSftpIndex > fastClientIndex);
-		assert.ok(fastCommandIndex > listCoreIndex);
+		assert.ok(service.includes('generation: number;'));
+		assert.ok(service.includes('this.touchDirectorySftpSession(session.key, session.generation)'));
+		assert.ok(service.includes('this.disposeDirectorySftpSession(session.key, session.generation)'));
+		assert.ok(service.includes('private disposeDirectorySftpSession(key: string, generation: number)'));
 	});
 
 	test('lists local directory names without per-entry lstat', () => {
