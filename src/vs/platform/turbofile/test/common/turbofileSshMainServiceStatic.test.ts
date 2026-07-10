@@ -87,4 +87,25 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!localScpDownloadBlock.includes('fsp.rm(request.target.path, { recursive, force: true })'), 'local scp download should not delete existing target directories');
 		assert.ok(service.includes('Target directory already exists'), 'directory transfer should report existing target directory conflicts');
 	});
+
+	test('preflights non-rsync directory target conflicts before transfer fallbacks', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+
+		const singleStart = service.indexOf('private async transferBetweenSshDevices');
+		const singleEnd = service.indexOf('\n\tprivate async trySameRemoteCopy', singleStart);
+		const singleBlock = service.slice(singleStart, singleEnd);
+		assert.ok(singleBlock.includes('rejectNonRsyncDirectoryTransferTargetConflict'), 'single SSH-to-SSH transfers should preflight directory target conflicts');
+		assert.ok(singleBlock.indexOf('rejectNonRsyncDirectoryTransferTargetConflict') < singleBlock.indexOf('for (const [index, attempt]'), 'single transfer conflict preflight should run before protocol attempts can fall back');
+
+		const batchStart = service.indexOf('async transferBatch');
+		const batchEnd = service.indexOf('\n\tprivate getBatchExpectedBytes', batchStart);
+		const batchBlock = service.slice(batchStart, batchEnd);
+		assert.ok(batchBlock.includes('rejectNonRsyncBatchDirectoryTargetConflicts'), 'batch transfers should preflight directory target conflicts');
+		assert.ok(batchBlock.indexOf('rejectNonRsyncBatchDirectoryTargetConflicts') < batchBlock.indexOf('const sameLocal'), 'batch conflict preflight should run before any transfer branch');
+
+		const directSftpStart = service.indexOf('private async tryDirectSftpTransferRoute');
+		const directSftpEnd = service.indexOf('private async tryTunneledRsyncRelayTransfer', directSftpStart);
+		const directSftpBlock = service.slice(directSftpStart, directSftpEnd);
+		assert.ok(!directSftpBlock.includes('rm -rf -- ${quotePosixShellArg(request.target.path)}'), 'direct SFTP fallback should not delete target directories');
+	});
 });

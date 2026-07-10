@@ -15,10 +15,11 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferPlan, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { createLocalBatchTarPlans, createTarNullListBuffer, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
+import { shouldRejectDirectoryTargetConflict } from '../common/turbofileTransferConflictPolicy.js';
 import { shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { createPosixNativeBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
@@ -790,10 +791,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (request.source.kind === 'local' && request.target.kind === 'ssh') {
 				this.throwIfTransferCanceled(request.progressId);
 				const stat = await fsp.stat(request.source.path);
+				const sourceType: TurboFileFileType = stat.isDirectory() ? 'directory' : 'file';
+				const effectiveRequest: ITurboFileTransferRequest = { ...request, sourceType };
+				const plan = resolveTransferPlan({
+					source: effectiveRequest.source,
+					target: effectiveRequest.target,
+					sourceType,
+					itemCount: 1,
+					strategyHint: effectiveRequest.strategyHint
+				});
+				await this.rejectNonRsyncDirectoryTransferTargetConflict(effectiveRequest, sourceType, plan);
 				let bytes = stat.isDirectory() ? Math.max(0, request.expectedBytes ?? 0) : stat.size;
-				if (stat.isDirectory()) {
+				if (sourceType === 'directory') {
 					if (shouldPreferTarForMultiItemTransfer(request.target.preferredProtocol)) {
-						const tarResult = await this.tryLocalToSshTarTransfer(request, bytes, startedAt);
+						const tarResult = await this.tryLocalToSshTarTransfer(effectiveRequest, bytes, startedAt);
 						if (tarResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return tarResult;
@@ -802,7 +813,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}
 					if (request.target.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.target.preferredProtocol);
-						const commandResult = await this.tryLocalToSshCommandTransfer(request, bytes, startedAt, commandOrder, false);
+						const commandResult = await this.tryLocalToSshCommandTransfer(effectiveRequest, bytes, startedAt, commandOrder, false);
 						if (commandResult?.ok) {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return commandResult;
@@ -848,12 +859,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await ensureLocalParentDirectory(request.target.path);
 				let bytes = 0;
 				const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+				const effectiveRequest: ITurboFileTransferRequest = { ...request, sourceType };
+				const plan = resolveTransferPlan({
+					source: effectiveRequest.source,
+					target: effectiveRequest.target,
+					sourceType,
+					itemCount: 1,
+					strategyHint: effectiveRequest.strategyHint
+				});
+				await this.rejectNonRsyncDirectoryTransferTargetConflict(effectiveRequest, sourceType, plan);
 				bytes = sourceType === 'directory'
 					? Math.max(0, request.expectedBytes ?? 0)
 					: Math.max(0, request.expectedBytes ?? 0);
 				if (sourceType === 'directory') {
 					if (shouldPreferTarForMultiItemTransfer(request.source.preferredProtocol)) {
-						const tarResult = await this.trySshToLocalTarTransfer(request, bytes, startedAt);
+						const tarResult = await this.trySshToLocalTarTransfer(effectiveRequest, bytes, startedAt);
 						if (tarResult?.ok) {
 							return tarResult;
 						}
@@ -861,7 +881,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}
 					if (request.source.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.source.preferredProtocol);
-						const commandResult = await this.trySshToLocalCommandTransfer(request, bytes, startedAt, commandOrder);
+						const commandResult = await this.trySshToLocalCommandTransfer(effectiveRequest, bytes, startedAt, commandOrder);
 						if (commandResult?.ok) {
 							return commandResult;
 						}
@@ -949,6 +969,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			itemCount: 1,
 			strategyHint: effectiveRequest.strategyHint
 		});
+		await this.rejectNonRsyncDirectoryTransferTargetConflict(effectiveRequest, sourceType, plan);
 		const failedStrategy = transferAttemptToStrategy(plan.attempts[0]);
 		const failures: string[] = [];
 
@@ -2452,8 +2473,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const initialAttempt = this.getInitialBatchTransferAttempt(request, items);
 		const initialStrategy = transferAttemptToDirectionalStrategy(request.source, request.targetDirectory, initialAttempt);
 		const initialIsRsync = initialAttempt?.protocol === 'rsync';
+		const sourceType: TurboFileFileType | undefined = items.some(item => item.sourceType === 'directory') ? 'directory' : items[0]?.sourceType;
+		const plan = resolveTransferPlan({
+			source: request.source,
+			target: request.targetDirectory,
+			sourceType,
+			itemCount: items.length,
+			strategyHint: request.strategyHint
+		});
 		try {
 			this.throwIfTransferCanceled(request.progressId);
+			await this.rejectNonRsyncBatchDirectoryTargetConflicts(request, items, plan);
 			this.fireTransferProgress(request, 0, initialIsRsync ? 0 : expectedBytes, initialIsRsync ? 'transfer' : 'prepare', initialIsRsync ? 'Starting batch rsync transfer.' : 'Preparing batch transfer.', true, {
 				...(initialIsRsync ? { strategy: initialStrategy } : {}),
 				completedItems: 0,
@@ -2613,6 +2643,84 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			...request,
 			strategyHint: attempt.route === 'relay' ? 'relay' : 'direct'
 		}, items, operation, expectedBytes, startedAt, false);
+	}
+
+	private async rejectNonRsyncDirectoryTransferTargetConflict(request: ITurboFileTransferRequest, sourceType: TurboFileFileType, plan: ITurboFileTransferPlan): Promise<void> {
+		if (!shouldRejectDirectoryTargetConflict({
+			source: request.source,
+			target: request.target,
+			sourceType,
+			operation: 'copy',
+			plan
+		})) {
+			return;
+		}
+		await this.rejectDirectoryTargetPathConflict(request.target);
+	}
+
+	private async rejectNonRsyncBatchDirectoryTargetConflicts(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITurboFileTransferPlan): Promise<void> {
+		const sourceType: TurboFileFileType | undefined = items.some(item => item.sourceType === 'directory') ? 'directory' : items[0]?.sourceType;
+		if (!shouldRejectDirectoryTargetConflict({
+			source: request.source,
+			target: request.targetDirectory,
+			sourceType,
+			operation: request.operation === 'move' ? 'move' : 'copy',
+			plan
+		})) {
+			return;
+		}
+		const directoryTargetPaths = items
+			.filter(item => item.sourceType === 'directory')
+			.map(item => this.joinBatchTargetPath(request.targetDirectory, item.targetName));
+		if (!directoryTargetPaths.length) {
+			return;
+		}
+		if (request.targetDirectory.kind === 'local') {
+			for (const targetPath of directoryTargetPaths) {
+				await throwIfLocalTargetDirectoryExists(targetPath);
+			}
+			return;
+		}
+		if (!request.targetDirectory.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		await this.withDirectorySftp(request.targetDirectory, async sftp => {
+			for (const targetPath of directoryTargetPaths) {
+				const stat = await this.remoteStat(sftp, targetPath).catch(error => {
+					if (isRemoteFileNotFoundError(error)) {
+						return undefined;
+					}
+					throw error;
+				});
+				if (stat && getFileTypeFromStats(stat) === 'directory') {
+					throw new Error(`Target directory already exists: ${targetPath}`);
+				}
+			}
+		});
+	}
+
+	private async rejectDirectoryTargetPathConflict(target: ITurboFileTransferEndpoint): Promise<void> {
+		if (target.kind === 'local') {
+			await throwIfLocalPathExists(target.path);
+			return;
+		}
+		if (!target.connection) {
+			throw new Error('Missing SSH target.');
+		}
+		const exists = await this.withDirectorySftp(target, async sftp => {
+			try {
+				await this.remoteStat(sftp, target.path);
+				return true;
+			} catch (error) {
+				if (isRemoteFileNotFoundError(error)) {
+					return false;
+				}
+				throw error;
+			}
+		});
+		if (exists) {
+			throw new Error(`Target directory already exists: ${target.path}`);
+		}
 	}
 
 	private async runLocalNativeBatchTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult> {
@@ -5020,9 +5128,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SFTP transfer.', true, { strategy: 'sftp-direct', route });
 			const targetParentPath = getRemoteParentPath(request.target.path);
 			const sourceIsDirectory = sourceType === 'directory';
+			const prepareDirectoryTargetCommand = buildPrepareDirectoryTransferTargetCommand(request.target.path);
+			const prepareFileTargetCommand = `mkdir -p -- ${quotePosixShellArg(targetParentPath)}`;
 			const mkdirCommand = route === 'source-push'
-				? `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)}`)}`
-				: sourceIsDirectory ? `rm -rf -- ${quotePosixShellArg(request.target.path)} && mkdir -p -- ${quotePosixShellArg(request.target.path)}` : `mkdir -p -- ${quotePosixShellArg(targetParentPath)}`;
+				? `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(sourceIsDirectory ? prepareDirectoryTargetCommand : prepareFileTargetCommand)}`
+				: sourceIsDirectory ? prepareDirectoryTargetCommand : prepareFileTargetCommand;
 			const batchVerb = sourceIsDirectory
 				? route === 'source-push' ? 'put -pr' : 'get -pr'
 				: route === 'source-push' ? 'put -p' : 'get -p';
@@ -9471,6 +9581,15 @@ async function throwIfLocalTargetDirectoryExists(path: string): Promise<void> {
 
 function isFileNotFoundError(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+function isRemoteFileNotFoundError(error: unknown): boolean {
+	const code = (error as { code?: unknown } | undefined)?.code;
+	if (code === 2 || code === 'ENOENT') {
+		return true;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	return /ENOENT|No such file|not found/i.test(message);
 }
 
 async function ensureLocalDirectory(path: string): Promise<void> {
