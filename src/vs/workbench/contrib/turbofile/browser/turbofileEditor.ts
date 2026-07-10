@@ -67,6 +67,7 @@ import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewRes
 import { sortTurboFileItems, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { createTurboFilePostTransferRefreshPlan } from '../common/turbofileTransferRefresh.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 
 interface TurboFileFileItem {
@@ -9281,10 +9282,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
-		await Promise.all([
-			this.refreshPane(sourceSide, { force: true }),
-			this.refreshPane(targetSide, { force: true })
-		]);
+		await this.refreshPanesAfterTransfer(sourceSide, targetSide, 'copy', sourceDevice, targetDevice);
 		const strategy = [...strategies].join(', ') || undefined;
 		if (failed > 0) {
 			this.finishTask(task, 'error', batch ? `批量传输完成 ${completed} 项，失败 ${failed} 项。` : `传输失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
@@ -9369,6 +9367,22 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private async refreshPanesAfterTransfer(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', operation: 'copy' | 'move', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice): Promise<void> {
+		const plan = createTurboFilePostTransferRefreshPlan(
+			operation,
+			sourceSide,
+			targetSide,
+			this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)
+		);
+		if (plan.sequential) {
+			for (const side of plan.sides) {
+				await this.refreshPane(side, { force: true });
+			}
+			return;
+		}
+		await Promise.all(plan.sides.map(side => this.refreshPane(side, { force: true })));
+	}
+
 	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move', initiatedAt?: number): Promise<boolean> {
 		const items = sourceItems.filter(item => !!item.path && !item.parent);
 		if (!items.length) {
@@ -9444,10 +9458,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
-			await Promise.all([
-				this.refreshPane(sourceSide, { force: true }),
-				this.refreshPane(targetSide, { force: true })
-			]);
+			await this.refreshPanesAfterTransfer(sourceSide, targetSide, operation, sourceDevice, targetDevice);
 
 			if (result.canceled) {
 				this.finishTask(task, 'canceled', `已取消批量传输：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
