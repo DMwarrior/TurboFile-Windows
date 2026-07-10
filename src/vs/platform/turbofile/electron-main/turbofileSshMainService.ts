@@ -838,6 +838,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Uploading over SFTP.', true, { strategy: 'sftp-upload' });
 				};
 				if (stat.isDirectory()) {
+					await this.rejectDirectoryTargetPathConflict(request.target);
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and uploading directory over SFTP.', true, { strategy: 'sftp-upload' });
 					await this.uploadDirectoryConcurrent(request.target, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
@@ -906,6 +907,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					this.fireTransferProgress(request, Math.min(transferredBytes, bytes), bytes, 'transfer', 'Downloading over SFTP.', true, { strategy: 'sftp-download' });
 				};
 				if (sourceType === 'directory') {
+					await this.rejectDirectoryTargetPathConflict(request.target);
 					this.fireTransferProgress(request, 0, bytes, 'transfer', 'Scanning and downloading directory over SFTP.', true, { strategy: 'sftp-download' });
 					await this.downloadDirectoryConcurrent(request.source, request.source.path, request.target.path, onTotal, onDelta, request.progressId);
 				} else {
@@ -2792,7 +2794,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const sources = items.map(item => item.sourcePath);
 		this.markTransferDataStarted(request.progressId);
 		if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
-			await this.withSshClient(request.source, client => this.execRemote(client, buildWindowsBatchCommand(sources, request.targetDirectory.path, operation)));
+			await this.withSshClient(request.source, client => this.execRemote(client, buildWindowsBatchCommand(items, request.targetDirectory.path, operation)));
 		} else {
 			const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
 			await this.withSshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input));
@@ -4573,7 +4575,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
 
 		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
-			? buildWindowsCopyCommand(request.source.path, request.target.path)
+			? buildWindowsCopyCommand(request.source.path, request.target.path, sourceType)
 			: buildPosixCopyCommand(request.source.path, request.target.path, sourceType);
 
 		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true);
@@ -5512,6 +5514,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await fsp.mkdir(relayRoot, { recursive: true });
 			let bytes = 0;
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			if (sourceType === 'directory') {
+				await this.rejectDirectoryTargetPathConflict(request.target);
+			}
 			bytes = await this.getRemotePathSizeByCommand(request.source).catch(() => 0);
 			await this.withSftp(request.source, async sftp => {
 				this.throwIfTransferCanceled(request.progressId);
@@ -9803,9 +9808,12 @@ function buildLocalWindowsBatchScript(sourcePaths: readonly string[], targetDire
 	return withPowerShellDefaults(`$srcs=@(${sources}); $dst=${target}; if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Force -Path $dst | Out-Null }; foreach ($src in $srcs) { ${command} -LiteralPath $src -Destination $dst -Force${recurse} }`);
 }
 
-function buildWindowsCopyCommand(sourcePath: string, targetPath: string): string {
+function buildWindowsCopyCommand(sourcePath: string, targetPath: string, sourceType: TurboFileFileType): string {
 	const source = quotePowerShellLiteral(sourcePath);
 	const target = quotePowerShellLiteral(targetPath);
+	if (sourceType === 'directory') {
+		return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; if ((Test-Path -LiteralPath $dst) -and -not (Test-Path -LiteralPath $dst -PathType Container)) { throw "Target directory conflicts with a file: $dst" }; if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Force -Path $dst | Out-Null }; Get-ChildItem -LiteralPath $src -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dst -Force -Recurse }`));
+	}
 	return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Copy-Item -LiteralPath $src -Destination $dst -Force -Recurse`));
 }
 
@@ -9826,12 +9834,12 @@ function buildPosixCopyCommand(sourcePath: string, targetPath: string, sourceTyp
 	return `mkdir -p ${parent} && (cp -a --reflink=auto --sparse=always ${source} ${target} 2>/dev/null || cp -a ${source} ${target})`;
 }
 
-function buildWindowsBatchCommand(sourcePaths: readonly string[], targetDirectory: string, operation: 'copy' | 'move'): string {
-	const sources = sourcePaths.map(path => quotePowerShellLiteral(path)).join(',');
+function buildWindowsBatchCommand(items: readonly ITurboFileBatchTransferItem[], targetDirectory: string, operation: 'copy' | 'move'): string {
+	const entries = items.map(item => `@{Source=${quotePowerShellLiteral(item.sourcePath)};Name=${quotePowerShellLiteral(item.targetName)};Type=${quotePowerShellLiteral(item.sourceType ?? 'unknown')}}`).join(',');
 	const target = quotePowerShellLiteral(targetDirectory);
-	const command = operation === 'move' ? 'Move-Item' : 'Copy-Item';
-	const recurse = operation === 'copy' ? ' -Recurse' : '';
-	return buildPowerShellCommand(withPowerShellDefaults(`$srcs=@(${sources}); $dst=${target}; if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Force -Path $dst | Out-Null }; foreach ($src in $srcs) { ${command} -LiteralPath $src -Destination $dst -Force${recurse} }`));
+	const moveCommand = 'Move-Item -LiteralPath $src -Destination $dst -Force';
+	const copyCommand = 'if ($item.Type -eq \'directory\') { if ((Test-Path -LiteralPath $dst) -and -not (Test-Path -LiteralPath $dst -PathType Container)) { throw "Target directory conflicts with a file: $dst" }; if (-not (Test-Path -LiteralPath $dst)) { New-Item -ItemType Directory -Force -Path $dst | Out-Null }; Get-ChildItem -LiteralPath $src -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dst -Force -Recurse } } else { Copy-Item -LiteralPath $src -Destination $dst -Force }';
+	return buildPowerShellCommand(withPowerShellDefaults(`$items=@(${entries}); $target=${target}; if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }; foreach ($item in $items) { $src=[string]$item.Source; $dst=Join-Path $target ([string]$item.Name); ${operation === 'move' ? moveCommand : copyCommand} }`));
 }
 
 function buildWindowsBatchDeleteCommand(sourcePaths: readonly string[]): string {
