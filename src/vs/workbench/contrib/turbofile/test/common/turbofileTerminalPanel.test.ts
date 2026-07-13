@@ -37,4 +37,26 @@ suite('TurboFileTerminalPanel', () => {
 		assert.ok(editor.includes('void this.terminalService.safeDisposeTerminal(instance);'));
 		assert.ok(!editor.includes('this.terminalService.safeDisposeTerminal(instance);') || editor.includes('void this.terminalService.safeDisposeTerminal(instance);'));
 	});
+
+	test('shows the taskbar for running tasks while the current page terminal is visible', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('private isTerminalPanelVisibleForCurrentPage(): boolean'));
+		assert.ok(editor.includes('private shouldRenderTaskbar(): boolean'));
+		assert.ok(editor.includes("return !this.isTerminalPanelVisibleForCurrentPage() || this.tasks.some(task => task.status === 'running');"));
+		assert.ok(editor.includes('const terminalPanelVisible = this.isTerminalPanelVisibleForCurrentPage();'));
+		assert.ok(editor.includes('const shouldRenderTaskbar = this.shouldRenderTaskbar();'));
+		assert.ok(editor.includes('if (terminalPanelVisible) {'));
+		assert.ok(editor.includes('if (shouldRenderTaskbar) {'));
+	});
+
+	test('creates, refreshes, and removes the taskbar as terminal task state changes', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+
+		assert.ok(editor.includes('if (!this.shouldRenderTaskbar()) {'));
+		assert.ok(editor.includes('current?.remove();'));
+		assert.ok(editor.includes("const transferPage = this.container.querySelector<HTMLElement>('.turbofile-transfer-page');"));
+		assert.ok(editor.includes('transferPage?.appendChild(this.renderTaskbar());'));
+		assert.ok(editor.includes('current.replaceWith(this.renderTaskbar());'));
+	});
 });

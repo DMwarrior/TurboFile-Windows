@@ -1691,8 +1691,9 @@ export class TurboFileEditor extends EditorPane {
 		if (hasLiveTransfer) {
 			page.classList.add('has-live-transfer');
 		}
-		const taskbarHidden = this.isTaskbarHiddenForTerminal();
-		if (taskbarHidden) {
+		const terminalPanelVisible = this.isTerminalPanelVisibleForCurrentPage();
+		const shouldRenderTaskbar = this.shouldRenderTaskbar();
+		if (terminalPanelVisible) {
 			page.classList.add('is-terminal-focused');
 		}
 		if (this.maximizedPane) {
@@ -1703,7 +1704,7 @@ export class TurboFileEditor extends EditorPane {
 		main.appendChild(this.renderPane('left'));
 		main.appendChild(this.renderPane('right'));
 		page.appendChild(main);
-		if (!taskbarHidden) {
+		if (shouldRenderTaskbar) {
 			page.appendChild(this.renderTaskbar());
 		}
 		return page;
@@ -4428,23 +4429,27 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private refreshTaskbar(): void {
-		if (!this.container || this.isTaskbarHiddenForTerminal() || this.activePage !== 'transfer') {
+		if (!this.container || this.activePage !== 'transfer') {
 			return;
 		}
 		const current = this.container.querySelector<HTMLElement>('.turbofile-taskbar');
+		if (!this.shouldRenderTaskbar()) {
+			current?.remove();
+			return;
+		}
 		if (!current) {
+			const transferPage = this.container.querySelector<HTMLElement>('.turbofile-transfer-page');
+			transferPage?.appendChild(this.renderTaskbar());
 			return;
 		}
 		current.replaceWith(this.renderTaskbar());
 	}
 
 	/**
-	 * The bottom taskbar must never render over a visible terminal panel (they share the window
-	 * bottom). Besides the explicit `taskbarHiddenForTerminal` flag, do a live check: if this page has
-	 * a bound terminal and the panel part is currently visible, keep the taskbar hidden — this guards
-	 * against task operations (rename/delete/transfer) that reset the flag while the terminal is open.
+	 * Keep terminal visibility independent from taskbar visibility. Running tasks may temporarily show
+	 * the taskbar while the terminal is open; CSS reserves the taskbar height inside the terminal.
 	 */
-	private isTaskbarHiddenForTerminal(): boolean {
+	private isTerminalPanelVisibleForCurrentPage(): boolean {
 		if (this.taskbarHiddenForTerminal) {
 			return true;
 		}
@@ -4456,6 +4461,10 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 		return this.layoutService.isVisible(Parts.PANEL_PART, getWindow(this.container));
+	}
+
+	private shouldRenderTaskbar(): boolean {
+		return !this.isTerminalPanelVisibleForCurrentPage() || this.tasks.some(task => task.status === 'running');
 	}
 
 	private renderStatusbarItem(icon: ThemeIcon, text: string, title?: string): HTMLElement {
