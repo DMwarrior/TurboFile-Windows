@@ -45,6 +45,12 @@ const glob = promisify(globCallback);
 const rcedit = promisify(rceditCallback);
 const root = path.dirname(import.meta.dirname);
 const commit = getVersion(root);
+interface TurboFileProductPolicy {
+	readonly excludedProductionDependencies: readonly string[];
+	readonly electronLocales: readonly string[];
+}
+const turboFileProductPolicy = JSON.parse(fs.readFileSync(path.join(root, 'build', 'turbofile-product.json'), 'utf8')) as TurboFileProductPolicy;
+const electronLocales = new Set(turboFileProductPolicy.electronLocales.map(locale => locale.toLowerCase()));
 
 // Build
 const vscodeEntryPoints = [
@@ -211,7 +217,7 @@ function runEsbuildBundle(outDir: string, minify: boolean, nls: boolean, target:
 const sourceMappingURLBase = `https://main.vscode-cdn.net/sourcemaps/${commit}`;
 const isCI = !!process.env['CI'] || !!process.env['BUILD_ARTIFACTSTAGINGDIRECTORY'] || !!process.env['GITHUB_WORKSPACE'];
 const useCdnSourceMapsForPackagingTasks = isCI;
-const stripSourceMapsInPackagingTasks = isCI;
+const stripSourceMapsInPackagingTasks = true;
 const minifyVSCodeTask = task.define('minify-vscode', task.series(
 	bundleVSCodeTask,
 	util.rimraf('out-vscode-min'),
@@ -323,7 +329,7 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		const extensions = gulp.src(['.build/extensions/**', ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
 
 		const sourceFilterPattern = stripSourceMapsInPackagingTasks
-			? ['**', '!**/*.{js,css}.map']
+			? ['**', '!**/*.map']
 			: ['**'];
 		const sources = es.merge(src, extensions)
 			.pipe(filter(sourceFilterPattern, { dot: true }));
@@ -411,9 +417,16 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		const productionDependencies = getProductionDependencies(root);
 		const dependenciesSrc = productionDependencies.map(d => path.relative(root, d)).map(d => [`${d}/**`, `!${d}/**/{test,tests}/**`]).flat().concat('!**/*.mk');
 
-		const depFilterPattern = ['**', `!**/${config.version}/**`, '!**/bin/darwin-arm64-87/**', '!**/package-lock.json', '!**/yarn.lock'];
+		const depFilterPattern = [
+			'**',
+			`!**/${config.version}/**`,
+			'!**/bin/darwin-arm64-87/**',
+			'!**/package-lock.json',
+			'!**/yarn.lock',
+			...turboFileProductPolicy.excludedProductionDependencies.map(dependency => `!node_modules/${dependency}/**`)
+		];
 		if (stripSourceMapsInPackagingTasks) {
-			depFilterPattern.push('!**/*.{js,css}.map');
+			depFilterPattern.push('!**/*.map');
 		}
 
 		const deps = gulp.src(dependenciesSrc, { base: '.', dot: true })
@@ -543,7 +556,19 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				'!version',
 				...(platform === 'darwin' && !isInsiderOrExploration ? ['!**/Contents/Applications', '!**/Contents/Applications/**'] : []),
 				...(platform === 'win32' && !isInsiderOrExploration ? ['!**/electron_proxy.exe'] : []),
-			], { dot: true }));
+			], { dot: true }))
+			.pipe(util.filter(file => {
+				if (platform !== 'win32') {
+					return true;
+				}
+
+				const relativePath = file.relative.replace(/\\/g, '/');
+				if (!relativePath.startsWith('locales/')) {
+					return true;
+				}
+
+				return electronLocales.has(path.posix.basename(relativePath).toLowerCase());
+			}));
 
 		if (platform === 'linux') {
 			result = es.merge(result, gulp.src('resources/completions/bash/code', { base: '.' })

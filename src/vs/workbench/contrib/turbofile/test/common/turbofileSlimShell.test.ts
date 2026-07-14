@@ -117,4 +117,20 @@ suite('TurboFileSlimShell', () => {
 			assert.ok(buildFiles.includes(requiredEntrypoint), `${requiredEntrypoint} must remain bundled`);
 		}
 	});
+
+	test('applies the TurboFile policy to packaged extensions, dependencies, maps, locales, and installer compression', () => {
+		const extensionBuild = fs.readFileSync(path.join(process.cwd(), 'build/lib/extensions.ts'), 'utf8');
+		const desktopPackaging = fs.readFileSync(path.join(process.cwd(), 'build/gulpfile.vscode.ts'), 'utf8');
+		const installer = fs.readFileSync(path.join(process.cwd(), 'build/win32/code.iss'), 'utf8');
+
+		assert.ok(extensionBuild.includes('turbofile-product.json'));
+		assert.ok(extensionBuild.includes('excludedLocalExtensions'));
+		assert.ok(extensionBuild.includes("filter(script => !excludedLocalExtensions.has(script.split('/')[0]))"));
+		assert.ok(desktopPackaging.includes('excludedProductionDependencies'));
+		assert.ok(desktopPackaging.includes('electronLocales'));
+		assert.ok(desktopPackaging.includes('const stripSourceMapsInPackagingTasks = true;'));
+		assert.ok(desktopPackaging.includes("'!**/*.map'"));
+		assert.ok(installer.includes('Compression=lzma2/ultra64'));
+		assert.ok(installer.includes('SolidCompression=yes'));
+	});
 });

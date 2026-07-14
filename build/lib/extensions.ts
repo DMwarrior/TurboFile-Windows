@@ -30,6 +30,11 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 const root = path.dirname(path.dirname(import.meta.dirname));
+interface TurboFileProductPolicy {
+	readonly excludedLocalExtensions: readonly string[];
+}
+const turboFileProductPolicy = JSON.parse(fs.readFileSync(path.join(root, 'build', 'turbofile-product.json'), 'utf8')) as TurboFileProductPolicy;
+const excludedLocalExtensions = new Set(turboFileProductPolicy.excludedLocalExtensions);
 // const commit = getVersion(root);
 // const sourceMappingURLBase = `https://main.vscode-cdn.net/sourcemaps/${commit}`;
 
@@ -427,6 +432,7 @@ function doPackageLocalExtensionsStream(forWeb: boolean, disableMangle: boolean,
 			})
 			.filter(({ name }) => native ? nativeExtensionsSet.has(name) : !nativeExtensionsSet.has(name))
 			.filter(({ name }) => excludedExtensions.indexOf(name) === -1)
+			.filter(({ name }) => !excludedLocalExtensions.has(name))
 			.filter(({ name }) => builtInExtensions.every(b => b.name !== name))
 			.filter(({ manifestPath }) => (forWeb ? isWebExtension(require(manifestPath)) : true))
 	);
@@ -633,7 +639,9 @@ const esbuildMediaScripts = [
 ];
 
 export function buildExtensionMedia(isWatch: boolean, outputRoot?: string): Promise<void> {
-	return esbuildExtensions('esbuilding extension media', isWatch, esbuildMediaScripts.map(p => ({
+	return esbuildExtensions('esbuilding extension media', isWatch, esbuildMediaScripts
+		.filter(script => !excludedLocalExtensions.has(script.split('/')[0]))
+		.map(p => ({
 		script: path.join(extensionsPath, p),
 		outputRoot: outputRoot ? path.join(root, outputRoot, path.dirname(p)) : undefined
 	})));
