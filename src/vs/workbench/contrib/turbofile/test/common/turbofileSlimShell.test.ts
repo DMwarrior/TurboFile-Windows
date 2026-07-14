@@ -53,13 +53,15 @@ suite('TurboFileSlimShell', () => {
 	test('does not register workbench features outside TurboFile and document workflows', () => {
 		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
 		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
-		const entrypoints = `${commonMain}\n${desktopMain}`;
+		const desktopContribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/electron-browser/desktop.contribution.ts'), 'utf8');
+		const entrypoints = `${commonMain}\n${desktopMain}\n${desktopContribution}`;
 		const forbiddenImports = [
 			'contrib/authentication',
 			'contrib/debug/electron-browser/extensionHostDebugService',
 			'contrib/emergencyAlert',
 			'contrib/issue',
 			'contrib/keybindingsExport',
+			'actions/openInAgentsAction',
 			'contrib/performance/electron-browser',
 			'contrib/policyExport',
 			'contrib/processExplorer',
@@ -83,6 +85,36 @@ suite('TurboFileSlimShell', () => {
 
 		for (const forbiddenImport of forbiddenImports) {
 			assert.ok(!entrypoints.includes(forbiddenImport), `${forbiddenImport} must not be registered`);
+		}
+	});
+
+	test('does not bundle sessions, agent hosts, debug telemetry, or profiling workers', () => {
+		const buildFiles = [
+			'build/buildfile.ts',
+			'build/next/index.ts',
+			'build/gulpfile.vscode.ts',
+			'build/gulpfile.vscode.web.ts',
+			'build/lib/mangle/index.ts'
+		].map(file => fs.readFileSync(path.join(process.cwd(), file), 'utf8')).join('\n');
+
+		for (const forbiddenEntrypoint of [
+			'vs/sessions/',
+			'vs/platform/agentHost/',
+			'vs/workbench/contrib/debug/node/telemetryApp',
+			'vs/platform/profiling/electron-browser/profileAnalysisWorkerMain'
+		]) {
+			assert.ok(!buildFiles.includes(forbiddenEntrypoint), `${forbiddenEntrypoint} must not be bundled`);
+		}
+
+		for (const requiredEntrypoint of [
+			'vs/workbench/workbench.desktop.main',
+			'vs/workbench/api/node/extensionHostProcess',
+			'vs/platform/files/node/watcher/watcherMain',
+			'vs/platform/terminal/node/ptyHostMain',
+			'vs/workbench/contrib/notebook/common/services/notebookWebWorkerMain',
+			'vs/workbench/services/search/worker/localFileSearchMain'
+		]) {
+			assert.ok(buildFiles.includes(requiredEntrypoint), `${requiredEntrypoint} must remain bundled`);
 		}
 	});
 });
