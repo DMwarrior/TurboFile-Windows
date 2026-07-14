@@ -61,10 +61,103 @@ suite('TurboFileSlimShell', () => {
 	test('registers services required by extension hosts and retained document contributions', () => {
 		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
 		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
+		const extensionHostContribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/api/browser/extensionHost.contribution.ts'), 'utf8');
+		const extensionHostApi = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/api/common/extHost.api.impl.ts'), 'utf8');
+		const abstractTaskService = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/tasks/browser/abstractTaskService.ts'), 'utf8');
+		const nativeTaskService = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/tasks/electron-browser/taskService.ts'), 'utf8');
+		const optionalServices = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileSlimOptionalServices.ts'), 'utf8');
+		const optionalExtensionHostCustomers = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/api/browser/mainThreadTurboFileOptionalServices.ts'), 'utf8');
+		const notebookContribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/notebook/browser/notebook.contribution.ts'), 'utf8');
+		const scmContribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/scm/browser/scm.contribution.ts'), 'utf8');
+		const scmInput = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/scm/browser/scmInput.ts'), 'utf8');
+		const mainThreadWebviewManager = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/api/browser/mainThreadWebviewManager.ts'), 'utf8');
+		const anythingQuickAccess = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/anythingQuickAccess.ts'), 'utf8');
+		const symbolsQuickAccess = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/symbolsQuickAccess.ts'), 'utf8');
+		const searchActionsTopBar = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/searchActionsTopBar.ts'), 'utf8');
+		const searchContribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/search.contribution.ts'), 'utf8');
+		const searchIcons = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/searchIcons.ts'), 'utf8');
+		const searchFindInput = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/searchFindInput.ts'), 'utf8');
+		const searchView = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/searchView.ts'), 'utf8');
+		const searchResult = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/search/browser/searchTreeModel/searchResult.ts'), 'utf8');
 
 		assert.ok(desktopMain.includes("import './contrib/debug/electron-browser/extensionHostDebugService.js';"));
 		assert.ok(desktopMain.includes("import '../platform/diagnostics/electron-browser/diagnosticsService.js';"));
 		assert.ok(commonMain.includes("import './contrib/speech/browser/speech.contribution.js';"));
+		assert.ok(commonMain.includes('registerSingleton(IExtensionsWorkbenchService, ExtensionsWorkbenchService'));
+		assert.ok(!commonMain.includes('registerSingleton(IChatAgentService, ChatAgentService'));
+		assert.ok(!commonMain.includes('registerSingleton(IChatOutputRendererService, ChatOutputRendererService'));
+		assert.ok(commonMain.includes("import './contrib/notebook/browser/notebook.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/interactive/browser/interactive.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/scm/browser/scm.service.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/scm/browser/quickDiff.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/tasks/browser/task.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/search/browser/search.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/searchEditor/browser/searchEditor.contribution.js';"));
+		assert.ok(commonMain.includes("import './contrib/turbofile/browser/turbofileSlimOptionalServices.js';"));
+		assert.ok(desktopMain.includes("import './contrib/tasks/electron-browser/taskService.js';"));
+		assert.ok(extensionHostApi.includes('const extHostLanguageModelTools = rpcProtocol.set(ExtHostContext.ExtHostLanguageModelTools, {'));
+		assert.ok(extensionHostContribution.includes("import './mainThreadTurboFileOptionalServices.js';"));
+		assert.ok(extensionHostContribution.includes("import './mainThreadDebugService.js';"));
+		assert.ok(!mainThreadWebviewManager.includes('MainThreadChatOutputRenderer'));
+		assert.ok(!abstractTaskService.includes('@IChatService'));
+		assert.ok(!abstractTaskService.includes('@IChatAgentService'));
+		assert.ok(!abstractTaskService.includes('Fix with AI'));
+		assert.ok(!nativeTaskService.includes('@IChatService'));
+		assert.ok(!nativeTaskService.includes('@IChatAgentService'));
+		assert.ok(!notebookContribution.includes("import './contrib/editorHint/emptyCellEditorHint.js';"));
+		assert.ok(!notebookContribution.includes("import './contrib/cellDiagnostics/cellDiagnostics.js';"));
+		assert.ok(!scmContribution.includes('SCMHistoryItemContextContribution'));
+		assert.ok(!scmContribution.includes('Resolve Conflicts with AI'));
+		assert.ok(!scmInput.includes('Generate Commit Message'));
+		assert.ok(!anythingQuickAccess.includes('IQuickChatService'));
+		assert.ok(!anythingQuickAccess.includes('IChatWidgetService'));
+		assert.ok(!anythingQuickAccess.includes('ASK_QUICK_QUESTION_ACTION_ID'));
+		assert.ok(!symbolsQuickAccess.includes('IChatWidgetService'));
+		assert.ok(!symbolsQuickAccess.includes('ISymbolVariableEntry'));
+		assert.ok(!searchActionsTopBar.includes('SearchWithAIAction'));
+		assert.ok(!searchContribution.includes('semanticSearchBehavior'));
+		assert.ok(!searchContribution.includes('keywordSuggestions'));
+		assert.ok(!searchIcons.includes('search-sparkle'));
+		assert.ok(!searchFindInput.includes('onDidChangeAIToggle'));
+		assert.ok(!searchView.includes("from './AISearch/"));
+		assert.ok(!searchResult.includes("from '../AISearch/"));
+		assert.ok(optionalServices.includes('registerSingleton(IInlineChatSessionService, TurboFileNullInlineChatSessionService'));
+		assert.ok(optionalServices.includes('registerSingleton(IChatEditingService, TurboFileNullChatEditingService'));
+		assert.ok(optionalServices.includes('registerSingleton(IDebugService, NullDebugService'));
+		assert.ok(optionalServices.includes('registerSingleton(IDebugVisualizerService, NullDebugVisualizerService'));
+		assert.ok(optionalExtensionHostCustomers.includes('@extHostNamedCustomer(MainContext.MainThreadLanguageModels)'));
+		assert.ok(optionalExtensionHostCustomers.includes('@extHostNamedCustomer(MainContext.MainThreadChatOutputRenderer)'));
+		assert.ok(optionalExtensionHostCustomers.includes('MainContext.MainThreadChatAgents2'));
+		assert.ok(optionalExtensionHostCustomers.includes('MainContext.MainThreadLanguageModelTools'));
+		assert.ok(optionalExtensionHostCustomers.includes('MainContext.MainThreadChatSessions'));
+		assert.ok(optionalExtensionHostCustomers.includes('MainContext.MainThreadAuthentication'));
+		assert.ok(optionalExtensionHostCustomers.includes('throw new Error(`Unsupported TurboFile extension host method: ${String(property)}`)'));
+		assert.ok(extensionHostApi.includes('getTools: () => []'));
+
+		for (const removedParticipant of [
+			'mainThreadLanguageModels',
+			'mainThreadChatAgents2',
+			'mainThreadChatCodeMapper',
+			'mainThreadLanguageModelTools',
+			'mainThreadEmbeddings',
+			'mainThreadTesting',
+			'mainThreadShare',
+			'mainThreadAuthentication',
+			'mainThreadAiRelatedInformation',
+			'mainThreadAiEmbeddingVector',
+			'mainThreadAiSettingsSearch',
+			'mainThreadMcp',
+			'mainThreadChatContext',
+			'mainThreadChatStatus',
+			'mainThreadChatInputNotification',
+			'mainThreadChatDebug',
+			'mainThreadChatOutputRenderer',
+			'mainThreadChatSessions',
+			'mainThreadGitExtensionService',
+			'mainThreadBrowsers'
+		]) {
+			assert.ok(!extensionHostContribution.includes(`import './${removedParticipant}.js';`), `${removedParticipant} must not be registered`);
+		}
 	});
 
 	test('does not register workbench features outside TurboFile and document workflows', () => {

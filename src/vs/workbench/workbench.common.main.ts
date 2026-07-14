@@ -153,6 +153,8 @@ import { UserDataSyncLogService } from '../platform/userDataSync/common/userData
 import { AllowedExtensionsService } from '../platform/extensionManagement/common/allowedExtensionsService.js';
 import { IWebWorkerService } from '../platform/webWorker/browser/webWorkerService.js';
 import { WebWorkerService } from '../platform/webWorker/browser/webWorkerServiceImpl.js';
+import { IExtensionsWorkbenchService } from './contrib/extensions/common/extensions.js';
+import { ExtensionsWorkbenchService } from './contrib/extensions/browser/extensionsWorkbenchService.js';
 
 registerSingleton(IUserDataSyncLogService, UserDataSyncLogService, InstantiationType.Delayed);
 registerSingleton(IAllowedExtensionsService, AllowedExtensionsService, InstantiationType.Delayed);
@@ -168,6 +170,7 @@ registerSingleton(ITextResourceConfigurationService, TextResourceConfigurationSe
 registerSingleton(IDownloadService, DownloadService, InstantiationType.Delayed);
 registerSingleton(IOpenerService, OpenerService, InstantiationType.Delayed);
 registerSingleton(IWebWorkerService, WebWorkerService, InstantiationType.Delayed);
+registerSingleton(IExtensionsWorkbenchService, ExtensionsWorkbenchService, InstantiationType.Eager);
 
 //#endregion
 
@@ -175,6 +178,7 @@ registerSingleton(IWebWorkerService, WebWorkerService, InstantiationType.Delayed
 //#region --- workbench contributions
 
 // TurboFile slim shell: Default AI account contribution is intentionally disabled.
+import './contrib/turbofile/browser/turbofileSlimOptionalServices.js';
 
 // Preferences
 import './contrib/preferences/browser/preferences.contribution.js';
@@ -184,12 +188,14 @@ import './contrib/preferences/browser/preferencesSearch.js';
 // Performance
 import './contrib/performance/browser/performance.contribution.js';
 
-// TurboFile slim shell: Notebook UI is intentionally disabled.
+// Notebook documents, editors, renderers and diff support.
+import './contrib/notebook/browser/notebook.contribution.js';
 
 // TurboFile slim shell: Chat, Inline Chat and MCP UI contributions are intentionally disabled.
 import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
 
-// TurboFile slim shell: Interactive Notebook UI is intentionally disabled.
+// Interactive notebook documents.
+import './contrib/interactive/browser/interactive.contribution.js';
 
 // TurboFile slim shell: REPL Notebook UI is intentionally disabled.
 
@@ -213,14 +219,19 @@ import './contrib/bulkEdit/browser/preview/bulkEdit.contribution.js';
 // Rename Symbol Tracker for Inline completions.
 import './contrib/inlineCompletions/browser/renameSymbolTrackerService.js';
 
-// TurboFile slim shell: Workbench Search UI is intentionally disabled.
+// Workbench Search
+import './contrib/search/browser/search.contribution.js';
 
-// TurboFile slim shell: Search Editor UI is intentionally disabled.
+// Search Editor
+import './contrib/searchEditor/browser/searchEditor.contribution.js';
 
 // Sash
 import './contrib/sash/browser/sash.contribution.js';
 
-// TurboFile slim shell: Git, SCM and Debug workbench contributions are intentionally disabled.
+// Source control and quick diff services used by editor history integrations.
+import './contrib/scm/browser/scm.service.contribution.js';
+import './contrib/scm/browser/quickDiff.contribution.js';
+import './contrib/scm/browser/scm.contribution.js';
 
 // Markers
 import './contrib/markers/browser/markers.contribution.js';
@@ -248,7 +259,10 @@ import './contrib/customEditor/browser/customEditor.contribution.js';
 // External Uri Opener
 import './contrib/externalUriOpener/common/externalUriOpener.contribution.js';
 
-// TurboFile slim shell: Extensions Management UI is intentionally disabled.
+// Extensions workbench service is registered above without the marketplace UI contributions.
+
+// Task extension point and commands are required by packaged build-tool extensions.
+import './contrib/tasks/browser/task.contribution.js';
 
 // Output View
 import './contrib/output/browser/output.contribution.js';

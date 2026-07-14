@@ -90,23 +90,18 @@ export interface ISearchModel {
 	location: SearchModelLocation;
 	id(): string;
 
-	getAITextResultProviderName(): Promise<string>;
 	isReplaceActive(): boolean;
 	replaceActive: boolean;
 	replacePattern: ReplacePattern | null;
 	replaceString: string;
 	preserveCase: boolean;
 	searchResult: ISearchResult;
-	aiSearch(onResultReported: (result: ISearchProgressItem | undefined) => void): Promise<ISearchComplete>;
-	hasAIResults: boolean;
 	hasPlainResults: boolean;
 	search(query: ITextQuery, onProgress?: (result: ISearchProgressItem) => void, callerToken?: CancellationToken): {
 		asyncResults: Promise<ISearchComplete>;
 		syncResults: IFileMatch<URI>[];
 	};
 	cancelSearch(cancelledForNewSearch?: boolean): boolean;
-	cancelAISearch(cancelledForNewSearch?: boolean): boolean;
-	clearAiSearchResults(): void;
 	dispose(): void;
 }
 
@@ -115,7 +110,6 @@ export interface ISearchResult {
 	readonly onChange: Event<IChangeEvent>;
 	readonly searchModel: ISearchModel;
 	readonly plainTextSearchResult: IPlainTextSearchHeading;
-	readonly aiTextSearchResult: ITextSearchHeading;
 	readonly children: ITextSearchHeading[];
 	readonly hasChildren: boolean;
 	readonly isDirty: boolean;
@@ -123,22 +117,21 @@ export interface ISearchResult {
 
 	batchReplace(elementsToReplace: RenderableMatch[]): Promise<void>;
 	batchRemove(elementsToRemove: RenderableMatch[]): void;
-	folderMatches(ai?: boolean): ISearchTreeFolderMatch[];
-	add(allRaw: IFileMatch[], searchInstanceID: string, ai: boolean, silent?: boolean): void;
+	folderMatches(): ISearchTreeFolderMatch[];
+	add(allRaw: IFileMatch[], searchInstanceID: string, silent?: boolean): void;
 	clear(): void;
-	remove(matches: ISearchTreeFileMatch | ISearchTreeFolderMatch | (ISearchTreeFileMatch | ISearchTreeFolderMatch)[], ai?: boolean): void;
+	remove(matches: ISearchTreeFileMatch | ISearchTreeFolderMatch | (ISearchTreeFileMatch | ISearchTreeFolderMatch)[]): void;
 	replace(match: ISearchTreeFileMatch): Promise<any>;
-	matches(ai?: boolean): ISearchTreeFileMatch[];
+	matches(): ISearchTreeFileMatch[];
 	isEmpty(): boolean;
-	fileCount(ignoreSemanticSearchResults?: boolean): number;
-	count(ignoreSemanticSearchResults?: boolean): number;
+	fileCount(): number;
+	count(): number;
 	id(): string;
-	setCachedSearchComplete(cachedSearchComplete: ISearchComplete | undefined, ai: boolean): void;
-	getCachedSearchComplete(ai: boolean): ISearchComplete | undefined;
-	toggleHighlights(value: boolean, ai?: boolean): void;
-	getRangeHighlightDecorations(ai?: boolean): RangeHighlightDecorations;
+	setCachedSearchComplete(cachedSearchComplete: ISearchComplete | undefined): void;
+	getCachedSearchComplete(): ISearchComplete | undefined;
+	toggleHighlights(value: boolean): void;
+	getRangeHighlightDecorations(): RangeHighlightDecorations;
 	replaceAll(progress: IProgress<IProgressStep>): Promise<any>;
-	setAIQueryUsingTextQuery(query?: ITextQuery | null): void;
 	dispose(): void;
 }
 

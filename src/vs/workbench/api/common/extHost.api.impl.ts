@@ -7,7 +7,7 @@ import type * as vscode from 'vscode';
 import { CancellationTokenSource } from '../../../base/common/cancellation.js';
 import * as errors from '../../../base/common/errors.js';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { combinedDisposable } from '../../../base/common/lifecycle.js';
+import { combinedDisposable, Disposable } from '../../../base/common/lifecycle.js';
 import { Schemas, matchesScheme } from '../../../base/common/network.js';
 import Severity from '../../../base/common/severity.js';
 import { URI } from '../../../base/common/uri.js';
@@ -69,7 +69,6 @@ import { IExtHostInitDataService } from './extHostInitDataService.js';
 import { ExtHostInteractive } from './extHostInteractive.js';
 import { ExtHostLabelService } from './extHostLabelService.js';
 import { ExtHostLanguageFeatures } from './extHostLanguageFeatures.js';
-import { ExtHostLanguageModelTools } from './extHostLanguageModelTools.js';
 import { IExtHostLanguageModels } from './extHostLanguageModels.js';
 import { ExtHostLanguages } from './extHostLanguages.js';
 import { IExtHostLocalizationService } from './extHostLocalizationService.js';
@@ -238,7 +237,17 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 	const extHostProfileContentHandlers = rpcProtocol.set(ExtHostContext.ExtHostProfileContentHandlers, new ExtHostProfileContentHandlers(rpcProtocol));
 	const extHostChatOutputRenderer = rpcProtocol.set(ExtHostContext.ExtHostChatOutputRenderer, new ExtHostChatOutputRenderer(rpcProtocol, extHostWebviews));
 	rpcProtocol.set(ExtHostContext.ExtHostInteractive, new ExtHostInteractive(rpcProtocol, extHostNotebook, extHostDocumentsAndEditors, extHostCommands, extHostLogService));
-	const extHostLanguageModelTools = rpcProtocol.set(ExtHostContext.ExtHostLanguageModelTools, new ExtHostLanguageModelTools(rpcProtocol, extHostLanguageModels));
+	const extHostLanguageModelTools = rpcProtocol.set(ExtHostContext.ExtHostLanguageModelTools, {
+		$onDidChangeTools: () => { },
+		$countTokensForInvocation: async () => 0,
+		$invokeTool: async () => { throw new Error('Language model tools are not available in TurboFile.'); },
+		$prepareToolInvocation: async () => undefined,
+		$handleToolStream: async () => undefined,
+		registerTool: () => Disposable.None,
+		registerToolDefinition: () => Disposable.None,
+		invokeTool: async () => { throw new Error('Language model tools are not available in TurboFile.'); },
+		getTools: () => []
+	} as unknown as import('./extHostLanguageModelTools.js').ExtHostLanguageModelTools);
 	const extHostChatSessions = rpcProtocol.set(ExtHostContext.ExtHostChatSessions, new ExtHostChatSessions(extHostCommands, extHostLanguageModels, rpcProtocol, extHostLogService));
 	const extHostChatAgents2 = rpcProtocol.set(ExtHostContext.ExtHostChatAgents2, new ExtHostChatAgents2(rpcProtocol, extHostLogService, extHostCommands, extHostDocuments, extHostDocumentsAndEditors, extHostLanguageModels, extHostDiagnostics, extHostLanguageModelTools, extHostChatSessions));
 	const extHostChatContext = rpcProtocol.set(ExtHostContext.ExtHostChatContext, new ExtHostChatContext(rpcProtocol, extHostCommands));

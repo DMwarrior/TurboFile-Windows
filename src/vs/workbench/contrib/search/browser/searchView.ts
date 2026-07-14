@@ -70,8 +70,8 @@ import { createEditorFromSearchResult } from '../../searchEditor/browser/searchE
 import { ACTIVE_GROUP, IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IPreferencesService, ISettingsEditorOptions } from '../../../services/preferences/common/preferences.js';
 import { ITextQueryBuilderOptions, QueryBuilder } from '../../../services/search/common/queryBuilder.js';
-import { SemanticSearchBehavior, IPatternInfo, ISearchComplete, ISearchConfiguration, ISearchConfigurationProperties, ITextQuery, SearchCompletionExitCode, SearchSortOrder, TextSearchCompleteMessageType, ViewMode, isAIKeyword } from '../../../services/search/common/search.js';
-import { AISearchKeyword, TextSearchCompleteMessage } from '../../../services/search/common/searchExtTypes.js';
+import { IPatternInfo, ISearchComplete, ISearchConfiguration, ISearchConfigurationProperties, ITextQuery, SearchCompletionExitCode, SearchSortOrder, TextSearchCompleteMessageType, ViewMode } from '../../../services/search/common/search.js';
+import { TextSearchCompleteMessage } from '../../../services/search/common/searchExtTypes.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { INotebookService } from '../../notebook/common/notebookService.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -82,9 +82,6 @@ import { ISearchViewModelWorkbenchService } from './searchTreeModel/searchViewMo
 import { ISearchTreeMatch, isSearchTreeMatch, RenderableMatch, SearchModelLocation, IChangeEvent, FileMatchOrMatch, ISearchTreeFileMatch, ISearchTreeFolderMatch, ISearchModel, ISearchResult, isSearchTreeFileMatch, isSearchTreeFolderMatch, isSearchTreeFolderMatchNoRoot, isSearchTreeFolderMatchWithResource, isSearchTreeFolderMatchWorkspaceRoot, isSearchResult, isTextSearchHeading, ITextSearchHeading, isSearchHeader } from './searchTreeModel/searchTreeCommon.js';
 import { INotebookFileInstanceMatch, isIMatchInNotebook } from './notebookSearch/notebookSearchModelBase.js';
 import { searchMatchComparer } from './searchCompare.js';
-import { AIFolderMatchWorkspaceRootImpl } from './AISearch/aiSearchModel.js';
-import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
-import { forcedExpandRecursively } from './searchActionsTopBar.js';
 
 const $ = dom.$;
 
@@ -197,15 +194,11 @@ export class SearchView extends ViewPane {
 	private _refreshResultsScheduler: RunOnceScheduler;
 
 	private _onSearchResultChangedDisposable: IDisposable | undefined;
-	private _onAIResultChangedDisposable: IDisposable | undefined;
 
 	private searchDataSource: SearchViewDataSource | undefined;
 
 	private refreshTreeController: RefreshTreeController;
 
-	private _cachedResults: ISearchComplete | undefined;
-	private _cachedKeywords: string[] = [];
-	public _pendingSemanticSearchPromise: Promise<ISearchComplete> | undefined;
 	constructor(
 		options: IViewPaneOptions,
 		@IFileService private readonly fileService: IFileService,
@@ -236,7 +229,6 @@ export class SearchView extends ViewPane {
 		@INotebookService private readonly notebookService: INotebookService,
 		@ILogService private readonly logService: ILogService,
 		@IAccessibilitySignalService private readonly accessibilitySignalService: IAccessibilitySignalService,
-		@ITelemetryService private readonly telemetryService: ITelemetryService,
 	) {
 
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
@@ -262,13 +254,6 @@ export class SearchView extends ViewPane {
 		this.hasSomeCollapsibleResultKey = Constants.SearchContext.ViewHasSomeCollapsibleKey.bindTo(this.contextKeyService);
 		this.treeViewKey = Constants.SearchContext.InTreeViewKey.bindTo(this.contextKeyService);
 		this.refreshTreeController = this._register(this.instantiationService.createInstance(RefreshTreeController, this, () => this.searchConfig));
-
-		this._register(this.contextKeyService.onDidChangeContext(e => {
-			const keys = Constants.SearchContext.hasAIResultProvider.keys();
-			if (e.affectsSome(new Set(keys))) {
-				this.refreshHasAISetting();
-			}
-		}));
 
 		// scoped
 		this.contextKeyService = this._register(this.contextKeyService.createScoped(this.container));
@@ -339,10 +324,6 @@ export class SearchView extends ViewPane {
 		this.changedWhileHidden = this.hasSearchResults();
 	}
 
-	public get cachedResults() {
-		return this._cachedResults;
-	}
-
 	async queueRefreshTree(): Promise<void> {
 		return this.refreshTreeController.queue();
 	}
@@ -381,20 +362,6 @@ export class SearchView extends ViewPane {
 
 	get model(): ISearchModel {
 		return this.viewModel;
-	}
-
-	private async refreshHasAISetting(): Promise<void> {
-		const shouldShowAI = this.shouldShowAIResults();
-		if (!this.tree || !this.tree.hasNode(this.searchResult)) {
-			return;
-		}
-		if (shouldShowAI && !this.tree.hasNode(this.searchResult.aiTextSearchResult)) {
-			if (this.model.searchResult.getCachedSearchComplete(false)) {
-				return this.refreshAndUpdateCount();
-			}
-		} else if (!shouldShowAI && this.tree.hasNode(this.searchResult.aiTextSearchResult)) {
-			return this.refreshAndUpdateCount();
-		}
 	}
 
 	private onDidChangeWorkbenchState(): void {
@@ -569,17 +536,6 @@ export class SearchView extends ViewPane {
 
 		this._onSearchResultChangedDisposable = this._register(this.viewModel.onSearchResultChanged(async (event) => await this.onSearchResultsChanged(event)));
 
-		// Subscribe to AI search result changes and update the tree when new AI results are reported
-		this._onAIResultChangedDisposable?.dispose();
-		this._onAIResultChangedDisposable = this._register(
-			this.viewModel.searchResult.aiTextSearchResult.onChange((e) => {
-				// Only refresh the AI node, not the whole tree
-				if (this.tree && this.tree.hasNode(this.searchResult.aiTextSearchResult) && !e.removed) {
-					this.tree.updateChildren(this.searchResult.aiTextSearchResult);
-				}
-			})
-		);
-
 		this._register(this.onDidChangeBodyVisibility(visible => this.onVisibilityChanged(visible)));
 
 		this.updateIndentStyles(this.themeService.getFileIconTheme());
@@ -664,23 +620,13 @@ export class SearchView extends ViewPane {
 			this.searchWidget.toggleReplace(true);
 		}
 
-		this._register(this.searchWidget.onSearchSubmit(options => {
-			const shouldRenderAIResults = this.configurationService.getValue<ISearchConfigurationProperties>('search').searchView.semanticSearchBehavior;
-			if (shouldRenderAIResults === SemanticSearchBehavior.Auto) {
-				this.logService.info(`SearchView: Automatically rendering AI results`);
-			}
-			this.triggerQueryChange({
-				...options,
-				shouldKeepAIResults: false,
-				shouldUpdateAISearch: shouldRenderAIResults === SemanticSearchBehavior.Auto,
-			});
-		}));
+		this._register(this.searchWidget.onSearchSubmit(options => this.triggerQueryChange(options)));
 		this._register(this.searchWidget.onSearchCancel(({ focus }) => this.cancelSearch(focus)));
 		this._register(this.searchWidget.searchInput.onDidOptionChange(() => {
-			this.triggerQueryChange({ shouldKeepAIResults: true });
+			this.triggerQueryChange();
 		}));
 
-		this._register(this.searchWidget.getNotebookFilters().onDidChange(() => this.triggerQueryChange({ shouldKeepAIResults: true })));
+		this._register(this.searchWidget.getNotebookFilters().onDidChange(() => this.triggerQueryChange()));
 
 		const updateHasPatternKey = () => this.hasSearchPatternKey.set(this.searchWidget.searchInput ? (this.searchWidget.searchInput.getValue().length > 0) : false);
 		updateHasPatternKey();
@@ -718,10 +664,6 @@ export class SearchView extends ViewPane {
 		this.trackInputBox(this.searchWidget.replaceInputFocusTracker);
 	}
 
-	public shouldShowAIResults(): boolean {
-		const hasProvider = Constants.SearchContext.hasAIResultProvider.getValue(this.contextKeyService);
-		return !!hasProvider;
-	}
 	private async onConfigurationUpdated(event?: IConfigurationChangeEvent): Promise<void> {
 		if (event && (event.affectsConfiguration('search.decorations.colors') || event.affectsConfiguration('search.decorations.badges'))) {
 			return this.refreshTreeController.queue();
@@ -964,8 +906,7 @@ export class SearchView extends ViewPane {
 				paddingBottom: SearchDelegate.ITEM_HEIGHT,
 				collapseByDefault: (e: RenderableMatch) => {
 					if (isTextSearchHeading(e)) {
-						// always collapse the ai text search result, but always expand the text result
-						return e.isAIContributed;
+						return false;
 					}
 
 					// always expand compressed nodes
@@ -1082,10 +1023,8 @@ export class SearchView extends ViewPane {
 		const viewer = this.getControl();
 		const navigator = viewer.navigate();
 		let node = navigator.first();
-		const shouldShowAI = this.shouldShowAIResults();
 		do {
-			if (node && !viewer.isCollapsed(node) && (!shouldShowAI || !(isTextSearchHeading(node)))) {
-				// ignore the ai text search result id
+			if (node && !viewer.isCollapsed(node)) {
 				return true;
 			}
 		} while (node = navigator.next());
@@ -1386,7 +1325,6 @@ export class SearchView extends ViewPane {
 			this.searchWidget.clear();
 		}
 		this.viewModel.cancelSearch();
-		this.viewModel.cancelAISearch();
 		this.tree.ariaLabel = nls.localize('emptySearch', "Empty Search");
 
 		this.accessibilitySignalService.playSignal(AccessibilitySignal.clear);
@@ -1399,7 +1337,7 @@ export class SearchView extends ViewPane {
 	}
 
 	cancelSearch(focus: boolean = true): boolean {
-		if (this.viewModel.cancelSearch() && this.viewModel.cancelAISearch()) {
+		if (this.viewModel.cancelSearch()) {
 			if (focus) { this.searchWidget.focus(); }
 			return true;
 		}
@@ -1439,22 +1377,22 @@ export class SearchView extends ViewPane {
 
 	toggleCaseSensitive(): void {
 		this.searchWidget.searchInput?.setCaseSensitive(!this.searchWidget.searchInput.getCaseSensitive());
-		this.triggerQueryChange({ shouldKeepAIResults: true });
+		this.triggerQueryChange();
 	}
 
 	toggleWholeWords(): void {
 		this.searchWidget.searchInput?.setWholeWords(!this.searchWidget.searchInput.getWholeWords());
-		this.triggerQueryChange({ shouldKeepAIResults: true });
+		this.triggerQueryChange();
 	}
 
 	toggleRegex(): void {
 		this.searchWidget.searchInput?.setRegex(!this.searchWidget.searchInput.getRegex());
-		this.triggerQueryChange({ shouldKeepAIResults: true });
+		this.triggerQueryChange();
 	}
 
 	togglePreserveCase(): void {
 		this.searchWidget.replaceInput?.setPreserveCase(!this.searchWidget.replaceInput.getPreserveCase());
-		this.triggerQueryChange({ shouldKeepAIResults: true });
+		this.triggerQueryChange();
 	}
 
 	setSearchParameters(args: IFindInFilesArgs = {}): void {
@@ -1553,7 +1491,7 @@ export class SearchView extends ViewPane {
 		this.searchWidget.focus(false);
 	}
 
-	triggerQueryChange(_options?: { preserveFocus?: boolean; triggeredOnType?: boolean; delay?: number; shouldKeepAIResults?: boolean; shouldUpdateAISearch?: boolean }): void {
+	triggerQueryChange(_options?: { preserveFocus?: boolean; triggeredOnType?: boolean; delay?: number }): void {
 		const options = { preserveFocus: true, triggeredOnType: false, delay: 0, ..._options };
 
 		if (options.triggeredOnType && !this.searchConfig.searchOnType) { return; }
@@ -1562,7 +1500,7 @@ export class SearchView extends ViewPane {
 
 			const delay = options.triggeredOnType ? options.delay : 0;
 			this.triggerQueryDelayer.trigger(() => {
-				this._onQueryChanged(options.preserveFocus, options.triggeredOnType, options.shouldKeepAIResults, options.shouldUpdateAISearch);
+				this._onQueryChanged(options.preserveFocus, options.triggeredOnType);
 			}, delay);
 		}
 	}
@@ -1575,7 +1513,7 @@ export class SearchView extends ViewPane {
 		return this.inputPatternIncludes.getValue().trim();
 	}
 
-	private _onQueryChanged(preserveFocus: boolean, triggeredOnType = false, shouldKeepAIResults = false, shouldUpdateAISearch = false): void {
+	private _onQueryChanged(preserveFocus: boolean, triggeredOnType = false): void {
 		if (!(this.searchWidget.searchInput?.inputBox.isInputValid())) {
 			return;
 		}
@@ -1597,7 +1535,6 @@ export class SearchView extends ViewPane {
 		if (contentPattern.length === 0) {
 			this.clearSearchResults(false);
 			this.clearMessage();
-			this.clearAIResults();
 			return;
 		}
 
@@ -1655,11 +1592,7 @@ export class SearchView extends ViewPane {
 		}
 
 		this.validateQuery(query).then(() => {
-			if (!shouldKeepAIResults && shouldUpdateAISearch && this.tree.hasNode(this.searchResult.aiTextSearchResult)) {
-				this.tree.collapse(this.searchResult.aiTextSearchResult);
-			}
-
-			this.onQueryTriggered(query, options, excludePatternText, includePatternText, triggeredOnType, shouldKeepAIResults, shouldUpdateAISearch);
+			this.onQueryTriggered(query, options, excludePatternText, includePatternText, triggeredOnType);
 
 			if (!preserveFocus) {
 				this.searchWidget.focus(false, undefined, true); // focus back to input field
@@ -1689,7 +1622,7 @@ export class SearchView extends ViewPane {
 		});
 	}
 
-	private onQueryTriggered(query: ITextQuery, options: ITextQueryBuilderOptions, excludePatternText: string, includePatternText: string, triggeredOnType: boolean, shouldKeepAIResults: boolean, shouldUpdateAISearch: boolean): void {
+	private onQueryTriggered(query: ITextQuery, options: ITextQueryBuilderOptions, excludePatternText: string, includePatternText: string, triggeredOnType: boolean): void {
 		this.addToSearchHistoryDelayer.trigger(() => {
 			this.searchWidget.searchInput?.onSearchSubmit();
 			this.inputPatternExcludes.onSearchSubmit();
@@ -1697,12 +1630,9 @@ export class SearchView extends ViewPane {
 		});
 
 		this.viewModel.cancelSearch(true);
-		if (!shouldKeepAIResults) {
-			this.clearAIResults();
-		}
 
 		this.currentSearchQ = this.currentSearchQ
-			.then(() => this.doSearch(query, excludePatternText, includePatternText, triggeredOnType, shouldKeepAIResults, shouldUpdateAISearch))
+			.then(() => this.doSearch(query, excludePatternText, includePatternText, triggeredOnType))
 			.then(() => undefined, () => undefined);
 	}
 
@@ -1737,27 +1667,12 @@ export class SearchView extends ViewPane {
 		}
 	}
 
-	private appendSearchWithAIButton(messageEl: HTMLElement) {
-		const searchWithAIButtonTooltip = this.keybindingService.appendKeybinding(
-			nls.localize('triggerAISearch.tooltip', "Search with AI."),
-			Constants.SearchCommandIds.SearchWithAIActionId
-		);
-		const searchWithAIButtonText = nls.localize('searchWithAIButtonTooltip', "Search with AI");
-		const searchWithAIButton = this.messageDisposables.add(new SearchLinkButton(
-			searchWithAIButtonText,
-			() => {
-				this.commandService.executeCommand(Constants.SearchCommandIds.SearchWithAIActionId);
-			}, this.hoverService, searchWithAIButtonTooltip));
-		dom.append(messageEl, searchWithAIButton.element);
-	}
-
 	private async onSearchComplete(
 		progressComplete: () => void,
 		excludePatternText?: string,
 		includePatternText?: string,
 		completed?: ISearchComplete,
 		shouldDoFinalRefresh = true,
-		keywords?: AISearchKeyword[],
 	) {
 
 		this.state = SearchUIState.Idle;
@@ -1771,17 +1686,7 @@ export class SearchView extends ViewPane {
 		}
 
 		const allResults = !this.viewModel.searchResult.isEmpty();
-		const aiResults = this.searchResult.getCachedSearchComplete(true);
 		if (completed?.exit === SearchCompletionExitCode.NewSearchStarted) {
-			return;
-		}
-
-		// Special case for when we have an AI provider registered
-		Constants.SearchContext.AIResultsRequested.bindTo(this.contextKeyService).set(this.shouldShowAIResults() && !!aiResults);
-
-		// Expand AI results if the node is collapsed
-		if (completed && this.tree.hasNode(this.searchResult.aiTextSearchResult) && this.tree.isCollapsed(this.searchResult.aiTextSearchResult)) {
-			this.tree.expand(this.searchResult.aiTextSearchResult);
 			return;
 		}
 
@@ -1820,11 +1725,6 @@ export class SearchView extends ViewPane {
 
 			const messageEl = this.clearMessage();
 			dom.append(messageEl, message);
-
-			if (this.shouldShowAIResults()) {
-				this.appendSearchWithAIButton(messageEl);
-				dom.append(messageEl, $('span', undefined, ' - '));
-			}
 
 			if (!completed) {
 				const searchAgainButton = this.messageDisposables.add(new SearchLinkButton(
@@ -1877,58 +1777,7 @@ export class SearchView extends ViewPane {
 		}
 	}
 
-	public clearAIResults() {
-		this.model.searchResult.aiTextSearchResult.hidden = true;
-		this.refreshTreeController.clearAllPending();
-		this._pendingSemanticSearchPromise = undefined;
-		this._cachedResults = undefined;
-		this._cachedKeywords = [];
-		this.model.cancelAISearch(true);
-		this.model.clearAiSearchResults();
-	}
-
-	public async requestAIResults() {
-		this.logService.info(`SearchView: Requesting semantic results from keybinding. Cached: ${!!this.cachedResults}`);
-		if ((!this.cachedResults || this.cachedResults.results.length === 0) && !this._pendingSemanticSearchPromise) {
-			this.clearAIResults();
-		}
-		this.model.searchResult.aiTextSearchResult.hidden = false;
-		await this.queueRefreshTree();
-		await forcedExpandRecursively(this.getControl(), this.model.searchResult.aiTextSearchResult);
-	}
-
-	public async addAIResults() {
-		const excludePatternText = this._getExcludePattern();
-		const includePatternText = this._getIncludePattern();
-
-		this.searchWidget.searchInput?.clearMessage();
-		this.showEmptyStage();
-		this._visibleMatches = 0;
-		this.tree.setSelection([]);
-		this.tree.setFocus([]);
-
-		this.viewModel.replaceString = this.searchWidget.getReplaceValue();
-		// Reuse pending aiSearch if available
-		let aiSearchPromise = this._pendingSemanticSearchPromise;
-		if (!aiSearchPromise) {
-			this.viewModel.searchResult.setAIQueryUsingTextQuery();
-			aiSearchPromise = this._pendingSemanticSearchPromise = this.viewModel.aiSearch(() => {
-				// Clear pending promise when first result comes in
-				if (this._pendingSemanticSearchPromise === aiSearchPromise) {
-					this._pendingSemanticSearchPromise = undefined;
-				}
-			});
-		}
-
-		aiSearchPromise.then((complete) => {
-			this.updateSearchResultCount(this.viewModel.searchResult.query?.userDisabledExcludesAndIgnoreFiles, this.viewModel.searchResult.query?.onlyOpenEditors, false);
-			return this.onSearchComplete(() => { }, excludePatternText, includePatternText, complete, false, complete.aiKeywords);
-		}, (e) => {
-			return this.onSearchError(e, () => { }, excludePatternText, includePatternText, undefined, false);
-		});
-	}
-
-	private doSearch(query: ITextQuery, excludePatternText: string, includePatternText: string, triggeredOnType: boolean, shouldKeepAIResults: boolean, shouldUpdateAISearch: boolean): Thenable<void> {
+	private doSearch(query: ITextQuery, excludePatternText: string, includePatternText: string, triggeredOnType: boolean): Thenable<void> {
 		let progressComplete: () => void;
 		this.progressService.withProgress({ location: this.getProgressLocation(), delay: triggeredOnType ? 300 : 0 }, _progress => {
 			return new Promise<void>(resolve => progressComplete = resolve);
@@ -1937,11 +1786,6 @@ export class SearchView extends ViewPane {
 		this.searchWidget.searchInput?.clearMessage();
 		this.state = SearchUIState.Searching;
 		this.showEmptyStage();
-		if (this.model.searchResult.aiTextSearchResult.hidden && shouldUpdateAISearch) {
-			this.logService.info(`SearchView: Semantic search visible. Keep semantic results: ${shouldKeepAIResults}. Update semantic search: ${shouldUpdateAISearch}`);
-			this.model.searchResult.aiTextSearchResult.hidden = false;
-		}
-
 		const slowTimer = setTimeout(() => {
 			this.state = SearchUIState.SlowSearch;
 		}, 2000);
@@ -1958,21 +1802,8 @@ export class SearchView extends ViewPane {
 		this.viewModel.replaceString = this.searchWidget.getReplaceValue();
 		const result = this.viewModel.search(query);
 
-		if (!shouldKeepAIResults || shouldUpdateAISearch) {
-			this.viewModel.searchResult.setAIQueryUsingTextQuery(query);
-		}
-
-		if (this.configurationService.getValue<ISearchConfigurationProperties>('search').searchView.keywordSuggestions) {
-			this.getKeywordSuggestions();
-		}
-
 		return result.asyncResults.then((complete) => {
 			clearTimeout(slowTimer);
-			const config = this.configurationService.getValue<ISearchConfigurationProperties>('search').searchView.semanticSearchBehavior;
-			if (complete.results.length === 0 && config === SemanticSearchBehavior.RunOnEmpty) {
-				this.logService.info(`SearchView: Requesting semantic results on empty search.`);
-				this.model.searchResult.aiTextSearchResult.hidden = false;
-			}
 			return this.onSearchComplete(progressComplete, excludePatternText, includePatternText, complete);
 		}, (e) => {
 			clearTimeout(slowTimer);
@@ -2011,11 +1842,8 @@ export class SearchView extends ViewPane {
 	}
 
 	private updateSearchResultCount(disregardExcludesAndIgnores?: boolean, onlyOpenEditors?: boolean, clear: boolean = false): void {
-		if (this._cachedKeywords.length > 0) {
-			return;
-		}
-		const fileCount = this.viewModel.searchResult.fileCount(this.viewModel.searchResult.aiTextSearchResult.hidden);
-		const resultCount = this.viewModel.searchResult.count(this.viewModel.searchResult.aiTextSearchResult.hidden);
+		const fileCount = this.viewModel.searchResult.fileCount();
+		const resultCount = this.viewModel.searchResult.count();
 		this.hasSearchResultsKey.set(fileCount > 0);
 
 		const msgWasHidden = this.messagesElement.style.display === 'none';
@@ -2049,86 +1877,10 @@ export class SearchView extends ViewPane {
 				openInEditorTooltip));
 			dom.append(messageEl, openInEditorButton.element);
 
-			if (this.shouldShowAIResults()) {
-				dom.append(messageEl, ' - ');
-				this.appendSearchWithAIButton(messageEl);
-			}
-
 			this.reLayout();
 		} else if (!msgWasHidden) {
 			dom.hide(this.messagesElement);
 		}
-	}
-
-	private handleKeywordClick(keyword: string, index: number) {
-		this.searchWidget.searchInput?.setValue(keyword);
-		this.triggerQueryChange({ preserveFocus: false, triggeredOnType: false, shouldKeepAIResults: false });
-		type KeywordClickClassification = {
-			owner: 'osortega';
-			comment: 'Fired when the user clicks on a keyword suggestion';
-			index: { classification: 'SystemMetaData'; purpose: 'PerformanceAndHealth'; isMeasurement: true; comment: 'The index of the keyword clicked' };
-			maxKeywords: { classification: 'SystemMetaData'; purpose: 'PerformanceAndHealth'; isMeasurement: true; comment: 'The total number of suggested keywords' };
-		};
-		type KeywordClickEvent = {
-			index: number;
-			maxKeywords: number;
-		};
-		this.telemetryService.publicLog2<KeywordClickEvent, KeywordClickClassification>('searchKeywordClick', {
-			index,
-			maxKeywords: this._cachedKeywords.length
-		});
-	}
-
-	private updateKeywordSuggestionUI(keyword: AISearchKeyword) {
-		const element = this.messagesElement.firstChild as HTMLDivElement;
-		if (this._cachedKeywords.length > 0) {
-			if (this._cachedKeywords.length >= 3) {
-				// If we already have 3 keywords, just return
-				return;
-			}
-			dom.append(element, ', ');
-			const index = this._cachedKeywords.length;
-			const button = this.messageDisposables.add(new SearchLinkButton(
-				keyword.keyword,
-				() => this.handleKeywordClick(keyword.keyword, index),
-				this.hoverService
-			));
-			dom.append(element, button.element);
-		} else {
-			const messageEl = this.clearMessage();
-			messageEl.classList.add('ai-keywords');
-
-			// Add unclickable message
-			const resultMsg = nls.localize('keywordSuggestion.message', "Search instead for: ");
-			dom.append(messageEl, resultMsg);
-
-			const button = this.messageDisposables.add(new SearchLinkButton(
-				keyword.keyword,
-				() => this.handleKeywordClick(keyword.keyword, 0),
-				this.hoverService
-			));
-			dom.append(messageEl, button.element);
-		}
-		this._cachedKeywords.push(keyword.keyword);
-	}
-
-	private async getKeywordSuggestions() {
-		// Reuse pending aiSearch if available
-		let aiSearchPromise = this._pendingSemanticSearchPromise;
-		if (!aiSearchPromise) {
-			this.viewModel.searchResult.setAIQueryUsingTextQuery();
-			aiSearchPromise = this._pendingSemanticSearchPromise = this.viewModel.aiSearch(result => {
-				if (result && isAIKeyword(result)) {
-					this.updateKeywordSuggestionUI(result);
-					return;
-				}
-				// Clear pending promise when first result comes in
-				if (this._pendingSemanticSearchPromise === aiSearchPromise) {
-					this._pendingSemanticSearchPromise = undefined;
-				}
-			});
-		}
-		this._cachedResults = await aiSearchPromise;
 	}
 
 	private addMessage(message: TextSearchCompleteMessage) {
@@ -2299,12 +2051,6 @@ export class SearchView extends ViewPane {
 				this.viewModel.searchResult.remove(matches[i]);
 			}
 		}
-		matches = this.viewModel.searchResult.matches(true);
-		for (let i = 0, len = matches.length; i < len; i++) {
-			if (resource.toString() === matches[i].resource.toString()) {
-				this.viewModel.searchResult.remove(matches[i]);
-			}
-		}
 	}
 
 	private onFilesChanged(e: FileChangesEvent): void {
@@ -2438,9 +2184,6 @@ export class SearchView extends ViewPane {
 		for (const fileMatch of this.searchResult.matches()) {
 			fileMatch.fileStat = undefined;
 		}
-		for (const fileMatch of this.searchResult.matches(true)) {
-			fileMatch.fileStat = undefined;
-		}
 	}
 
 	override dispose(): void {
@@ -2570,18 +2313,8 @@ class SearchViewDataSource implements IAsyncDataSource<ISearchResult, Renderable
 
 		const ret: ITextSearchHeading[] = [];
 
-		if (this.searchView.shouldShowAIResults() && searchResult.searchModel.hasPlainResults && !searchResult.aiTextSearchResult.hidden) {
-			// as long as there is a query present, we can load AI results
-			ret.push(searchResult.aiTextSearchResult);
-		}
-
 		if (!searchResult.plainTextSearchResult.isEmpty()) {
-			if (!this.searchView.shouldShowAIResults() || searchResult.aiTextSearchResult.hidden) {
-				// only one root, so just return the children
-				return this.createTextSearchResultIterator(searchResult.plainTextSearchResult);
-			}
-			ret.push(searchResult.plainTextSearchResult);
-
+			return this.createTextSearchResultIterator(searchResult.plainTextSearchResult);
 		}
 
 		return ret;
@@ -2601,12 +2334,7 @@ class SearchViewDataSource implements IAsyncDataSource<ISearchResult, Renderable
 
 	private createFolderIterator(folderMatch: ISearchTreeFolderMatch): Iterable<ISearchTreeFolderMatch | ISearchTreeFileMatch> {
 		const matchArray = this.searchView.isTreeLayoutViewVisible ? folderMatch.matches() : folderMatch.allDownstreamFileMatches();
-		let matches = matchArray;
-		if (!(folderMatch instanceof AIFolderMatchWorkspaceRootImpl)) {
-			matches = matchArray.sort((a, b) => searchMatchComparer(a, b, this.searchConfig.sortOrder));
-		}
-
-		return matches;
+		return matchArray.sort((a, b) => searchMatchComparer(a, b, this.searchConfig.sortOrder));
 	}
 
 	private createFileIterator(fileMatch: ISearchTreeFileMatch): Iterable<ISearchTreeMatch> {
@@ -2619,10 +2347,6 @@ class SearchViewDataSource implements IAsyncDataSource<ISearchResult, Renderable
 			return false;
 		}
 
-		if (isTextSearchHeading(element) && element.isAIContributed) {
-			return true;
-		}
-
 		const hasChildren = element.hasChildren;
 		return hasChildren;
 	}
@@ -2631,18 +2355,6 @@ class SearchViewDataSource implements IAsyncDataSource<ISearchResult, Renderable
 		if (isSearchResult(element)) {
 			return this.createSearchResultIterator(element);
 		} else if (isTextSearchHeading(element)) {
-			if (element.isAIContributed && (!this.searchView.model.hasAIResults || !!this.searchView._pendingSemanticSearchPromise)) {
-				if (this.searchView.cachedResults) {
-					return this.createTextSearchResultIterator(element);
-				}
-				this.searchView.addAIResults();
-				return new Promise<Iterable<RenderableMatch>>(resolve => {
-					const disposable = element.onChange(() => {
-						disposable.dispose(); // Clean up listener after first result
-						resolve(this.createTextSearchResultIterator(element));
-					});
-				});
-			}
 			return this.createTextSearchResultIterator(element);
 		} else if (isSearchTreeFolderMatch(element)) {
 			return this.createFolderIterator(element);
