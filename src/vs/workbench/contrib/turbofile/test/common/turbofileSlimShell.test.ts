@@ -133,4 +133,16 @@ suite('TurboFileSlimShell', () => {
 		assert.ok(installer.includes('Compression=lzma2/ultra64'));
 		assert.ok(installer.includes('SolidCompression=yes'));
 	});
+
+	test('only removes validated legacy versioned resource directories after installation', () => {
+		const installer = fs.readFileSync(path.join(process.cwd(), 'build/win32/code.iss'), 'utf8');
+
+		assert.ok(installer.includes('procedure CleanupLegacyVersionedResources();'));
+		assert.ok(installer.includes('Length(DirectoryName) <> 10'));
+		assert.ok(installer.includes("FileExists(LegacyPath + '\\version')"));
+		assert.ok(installer.includes("FileExists(LegacyPath + '\\resources\\app\\product.json')"));
+		assert.ok(installer.includes("DirectoryName <> '{#VersionedResourcesFolder}'"));
+		assert.ok(installer.includes('DelTree(LegacyPath, True, True, True)'));
+		assert.ok(installer.includes('CleanupLegacyVersionedResources();'));
+	});
 });

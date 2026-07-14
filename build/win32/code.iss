@@ -1361,6 +1361,57 @@ begin
   Result := '{#VersionedResourcesFolder}' <> '';
 end;
 
+function IsLegacyVersionedDirectoryName(DirectoryName: String): Boolean;
+var
+  Index: Integer;
+  Character: Char;
+begin
+  Result := False;
+  if Length(DirectoryName) <> 10 then
+    Exit;
+
+  for Index := 1 to Length(DirectoryName) do begin
+    Character := DirectoryName[Index];
+    if not (((Character >= '0') and (Character <= '9')) or
+            ((Character >= 'a') and (Character <= 'f')) or
+            ((Character >= 'A') and (Character <= 'F'))) then
+      Exit;
+  end;
+
+  Result := True;
+end;
+
+procedure CleanupLegacyVersionedResources();
+var
+  FindRec: TFindRec;
+  DirectoryName: String;
+  LegacyPath: String;
+begin
+  if not DirExists(ExpandConstant('{app}')) then
+    Exit;
+
+  if FindFirst(ExpandConstant('{app}\*'), FindRec) then begin
+    try
+      repeat
+        DirectoryName := FindRec.Name;
+        LegacyPath := ExpandConstant('{app}\') + DirectoryName;
+
+        if IsLegacyVersionedDirectoryName(DirectoryName) and
+           (DirectoryName <> '{#VersionedResourcesFolder}') and
+           DirExists(LegacyPath) and
+           FileExists(LegacyPath + '\version') and
+           FileExists(LegacyPath + '\resources\app\product.json') then begin
+          Log('Removing validated legacy versioned resources directory: ' + LegacyPath);
+          if not DelTree(LegacyPath, True, True, True) then
+            Log('Failed to remove legacy versioned resources directory: ' + LegacyPath);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
 // Don't allow installing conflicting architectures
 function InitializeSetup(): Boolean;
 var
@@ -1891,6 +1942,8 @@ begin
         Log('inno_updater completed gc successfully');
       end;
     end;
+
+    CleanupLegacyVersionedResources();
 
     if ShouldRestartTunnelService then
     begin
