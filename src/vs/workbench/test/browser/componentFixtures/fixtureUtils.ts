@@ -86,13 +86,7 @@ import { IAnyWorkspaceIdentifier } from '../../../../platform/workspace/common/w
 import { TestMenuService } from '../workbenchTestServices.js';
 import { IAccessibilitySignalService } from '../../../../platform/accessibilitySignal/browser/accessibilitySignalService.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
-// eslint-disable-next-line local/code-import-patterns
-import { IAgentFeedbackService } from '../../../../sessions/contrib/agentFeedback/browser/agentFeedbackService.js';
 import { IChatEditingService } from '../../../contrib/chat/common/editing/chatEditingService.js';
-// eslint-disable-next-line local/code-import-patterns
-import { ISessionsManagementService } from '../../../../sessions/services/sessions/common/sessionsManagement.js';
-// eslint-disable-next-line local/code-import-patterns
-import { ICodeReviewService, CodeReviewStateKind, PRReviewStateKind } from '../../../../sessions/contrib/codeReview/browser/codeReviewService.js';
 import { constObservable } from '../../../../base/common/observable.js';
 
 // Editor
@@ -475,50 +469,11 @@ export function createEditorServices(disposables: DisposableStore, options?: Cre
 		createModelReference: async () => ({ object: { textEditorModel: null }, dispose() { } } as any),
 	});
 
-	defineInstance(IAgentFeedbackService, {
-		_serviceBrand: undefined,
-		onDidChangeFeedback: Event.None,
-		onDidChangeNavigation: Event.None,
-		addFeedback: () => undefined!,
-		removeFeedback: () => { },
-		updateFeedback: () => { },
-		getFeedback: () => [],
-		getMostRecentSessionForResource: () => undefined,
-		revealFeedback: async () => { },
-		revealSessionComment: async () => { },
-		getNextFeedback: () => undefined,
-		getNextNavigableItem: () => undefined,
-		setNavigationAnchor: () => { },
-		getNavigationBearing: () => ({ activeIdx: -1, totalCount: 0 }),
-		clearFeedback: () => { },
-		addFeedbackAndSubmit: async () => { },
-	});
-
 	definePartialInstance(IChatEditingService, {
 		_serviceBrand: undefined,
 		editingSessionsObs: constObservable([]),
 		startOrContinueGlobalEditingSession: () => undefined!,
 		getEditingSession: () => undefined,
-	});
-
-	definePartialInstance(ISessionsManagementService, {
-		_serviceBrand: undefined,
-		activeSession: constObservable(undefined),
-		getSession: () => undefined,
-		getSessions: () => [],
-	});
-
-	definePartialInstance(ICodeReviewService, {
-		_serviceBrand: undefined,
-		getReviewState: () => constObservable({ kind: CodeReviewStateKind.Idle }),
-		getPRReviewState: () => constObservable({ kind: PRReviewStateKind.None }),
-		hasReview: () => false,
-		requestReview: () => { },
-		removeComment: () => { },
-		updateComment: () => { },
-		dismissReview: () => { },
-		resolvePRReviewThread: async () => { },
-		markPRReviewCommentConverted: () => { },
 	});
 
 	// Allow additional services to override defaults

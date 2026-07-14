@@ -100,6 +100,7 @@ suite('TurboFileSlimShell', () => {
 		for (const forbiddenEntrypoint of [
 			'vs/sessions/',
 			'vs/platform/agentHost/',
+			'vs/platform/browserView/',
 			'vs/workbench/contrib/debug/node/telemetryApp',
 			'vs/platform/profiling/electron-browser/profileAnalysisWorkerMain'
 		]) {
@@ -115,6 +116,38 @@ suite('TurboFileSlimShell', () => {
 			'vs/workbench/services/search/worker/localFileSearchMain'
 		]) {
 			assert.ok(buildFiles.includes(requiredEntrypoint), `${requiredEntrypoint} must remain bundled`);
+		}
+	});
+
+	test('removes source trees that are unreachable from retained TurboFile and document workflows', () => {
+		for (const removedSourceTree of [
+			'src/vs/sessions',
+			'src/vs/platform/agentHost/browser',
+			'src/vs/platform/agentHost/electron-browser',
+			'src/vs/platform/agentHost/electron-main',
+			'src/vs/platform/agentHost/node',
+			'src/vs/platform/browserView/electron-browser',
+			'src/vs/platform/browserView/electron-main',
+			'src/vs/platform/browserView/node',
+			'src/vs/server/node/serverAgentHostManager.ts',
+			'src/vs/workbench/contrib/telemetry',
+			'src/vs/workbench/services/browserView',
+			'src/vs/workbench/test/browser/componentFixtures/sessions'
+		]) {
+			assert.ok(!fs.existsSync(path.join(process.cwd(), removedSourceTree)), `${removedSourceTree} must be deleted`);
+		}
+	});
+
+	test('removes production dependencies that were exclusive to the deleted agent host runtime', () => {
+		const rootPackage = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
+		for (const removedDependency of [
+			'@microsoft/dev-tunnels-connections',
+			'@microsoft/dev-tunnels-contracts',
+			'@microsoft/dev-tunnels-management',
+			'@microsoft/dev-tunnels-ssh',
+			'@microsoft/dev-tunnels-ssh-tcp'
+		]) {
+			assert.ok(!rootPackage.dependencies?.[removedDependency], `${removedDependency} must be removed from root dependencies`);
 		}
 	});
 
