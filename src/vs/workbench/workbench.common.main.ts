@@ -352,6 +352,9 @@ import './contrib/accessibilitySignals/browser/accessibilitySignal.contribution.
 // Accessibility
 import './contrib/accessibility/browser/accessibility.contribution.js';
 
+// Speech service is required by retained accessibility contributions.
+import './contrib/speech/browser/speech.contribution.js';
+
 // Metered Connection
 import './contrib/meteredConnection/browser/meteredConnection.contribution.js';
 

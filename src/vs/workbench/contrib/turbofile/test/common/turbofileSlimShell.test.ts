@@ -58,6 +58,15 @@ suite('TurboFileSlimShell', () => {
 		assert.ok(electronMain.includes('services.set(IWebContentExtractorService, new SyncDescriptor(NativeWebContentExtractorService'));
 	});
 
+	test('registers services required by extension hosts and retained document contributions', () => {
+		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
+		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
+
+		assert.ok(desktopMain.includes("import './contrib/debug/electron-browser/extensionHostDebugService.js';"));
+		assert.ok(desktopMain.includes("import '../platform/diagnostics/electron-browser/diagnosticsService.js';"));
+		assert.ok(commonMain.includes("import './contrib/speech/browser/speech.contribution.js';"));
+	});
+
 	test('does not register workbench features outside TurboFile and document workflows', () => {
 		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
 		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
@@ -65,7 +74,6 @@ suite('TurboFileSlimShell', () => {
 		const entrypoints = `${commonMain}\n${desktopMain}\n${desktopContribution}`;
 		const forbiddenImports = [
 			'contrib/authentication',
-			'contrib/debug/electron-browser/extensionHostDebugService',
 			'contrib/emergencyAlert',
 			'contrib/issue',
 			'contrib/keybindingsExport',
@@ -74,13 +82,11 @@ suite('TurboFileSlimShell', () => {
 			'contrib/policyExport',
 			'contrib/processExplorer',
 			'contrib/share',
-			'contrib/speech',
 			'contrib/tags',
 			'contrib/telemetry',
 			'contrib/userDataProfile',
 			'contrib/userDataSync',
 			'platform/agentHost',
-			'platform/diagnostics',
 			'platform/profiling',
 			'platform/remoteTunnel',
 			'services/aiEmbeddingVector',
