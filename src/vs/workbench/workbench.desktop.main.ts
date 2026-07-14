@@ -64,7 +64,6 @@ import './services/localization/electron-browser/languagePackService.js';
 import './services/telemetry/electron-browser/telemetryService.js';
 import './services/extensions/electron-browser/extensionHostStarter.js';
 import './services/extensions/electron-browser/nativeExtensionService.js';
-import './contrib/debug/electron-browser/extensionHostDebugService.js';
 import '../platform/extensionResourceLoader/common/extensionResourceLoaderService.js';
 import './services/localization/electron-browser/localeService.js';
 import './services/extensions/electron-browser/extensionsScannerService.js';
@@ -80,10 +79,7 @@ import './services/workingCopy/electron-browser/workingCopyBackupService.js';
 import './services/checksum/electron-browser/checksumService.js';
 import '../platform/remote/electron-browser/sharedProcessTunnelService.js';
 import './services/tunnel/electron-browser/tunnelService.js';
-import '../platform/diagnostics/electron-browser/diagnosticsService.js';
-import '../platform/profiling/electron-browser/profilingService.js';
 import '../platform/telemetry/electron-browser/customEndpointTelemetryService.js';
-import '../platform/remoteTunnel/electron-browser/remoteTunnelService.js';
 import './services/files/electron-browser/elevatedFileService.js';
 import './services/search/electron-browser/searchService.js';
 import './services/workingCopy/electron-browser/workingCopyHistoryService.js';
@@ -93,8 +89,6 @@ import './services/auxiliaryWindow/electron-browser/auxiliaryWindowService.js';
 import '../platform/extensionManagement/electron-browser/extensionsProfileScannerService.js';
 import '../platform/sandbox/electron-browser/sandboxHelperService.js';
 import '../platform/webContentExtractor/electron-browser/webContentExtractorService.js';
-import '../platform/agentHost/electron-browser/agentHostService.js';
-import './services/browserView/electron-browser/playwrightWorkbenchService.js';
 import './services/process/electron-browser/processService.js';
 import './services/power/electron-browser/powerService.js';
 
@@ -123,12 +117,6 @@ import './contrib/codeEditor/electron-browser/codeEditor.contribution.js';
 
 // TurboFile slim shell: Debug and Extensions Management contributions are intentionally disabled.
 
-// Issues
-import './contrib/issue/electron-browser/issue.contribution.js';
-
-// Process Explorer
-import './contrib/processExplorer/electron-browser/processExplorer.contribution.js';
-
 // TurboFile slim shell: VS Code Remote UI is intentionally disabled.
 
 // Terminal
@@ -141,13 +129,6 @@ import './contrib/turbofile/browser/turbofile.contribution.js';
 import './contrib/themes/browser/themes.test.contribution.js';
 import './services/themes/electron-browser/themes.contribution.js';
 // User Data Sync
-import './contrib/userDataSync/electron-browser/userDataSync.contribution.js';
-
-// Tags
-import './contrib/tags/electron-browser/workspaceTagsService.js';
-import './contrib/tags/electron-browser/tags.contribution.js';
-// Performance
-import './contrib/performance/electron-browser/performance.contribution.js';
 
 // TurboFile slim shell: VS Code Tasks service is intentionally disabled.
 
@@ -177,16 +158,7 @@ import './contrib/mergeEditor/electron-browser/mergeEditor.contribution.js';
 // Encryption
 import './contrib/encryption/electron-browser/encryption.contribution.js';
 
-// Emergency Alert
-import './contrib/emergencyAlert/electron-browser/emergencyAlert.contribution.js';
-
 // TurboFile slim shell: MCP contributions are intentionally disabled.
-
-// Policy Export
-import './contrib/policyExport/electron-browser/policyExport.contribution.js';
-
-// Keybindings Export
-import './contrib/keybindingsExport/electron-browser/keybindingsExport.contribution.js';
 
 //#endregion
 

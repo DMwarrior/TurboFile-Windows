@@ -49,4 +49,40 @@ suite('TurboFileSlimShell', () => {
 		assert.ok(!commonMain.includes('registerSingleton(IExtensionService, TurboFileExtensionContributionService'));
 		assert.ok(desktopMain.includes("import './services/extensions/electron-browser/nativeExtensionService.js';"));
 	});
+
+	test('does not register workbench features outside TurboFile and document workflows', () => {
+		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
+		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
+		const entrypoints = `${commonMain}\n${desktopMain}`;
+		const forbiddenImports = [
+			'contrib/authentication',
+			'contrib/debug/electron-browser/extensionHostDebugService',
+			'contrib/emergencyAlert',
+			'contrib/issue',
+			'contrib/keybindingsExport',
+			'contrib/performance/electron-browser',
+			'contrib/policyExport',
+			'contrib/processExplorer',
+			'contrib/share',
+			'contrib/speech',
+			'contrib/tags',
+			'contrib/telemetry',
+			'contrib/userDataProfile',
+			'contrib/userDataSync',
+			'platform/agentHost',
+			'platform/diagnostics',
+			'platform/profiling',
+			'platform/remoteTunnel',
+			'services/aiEmbeddingVector',
+			'services/aiRelatedInformation',
+			'services/aiSettingsSearch',
+			'services/browserView',
+			'services/chat',
+			'services/policies'
+		];
+
+		for (const forbiddenImport of forbiddenImports) {
+			assert.ok(!entrypoints.includes(forbiddenImport), `${forbiddenImport} must not be registered`);
+		}
+	});
 });

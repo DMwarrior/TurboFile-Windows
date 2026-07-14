@@ -73,9 +73,6 @@ import './services/configuration/common/jsonEditingService.js';
 import './services/textmodelResolver/common/textModelResolverService.js';
 import './services/editor/browser/editorService.js';
 import './services/editor/browser/editorResolverService.js';
-import './services/aiEmbeddingVector/common/aiEmbeddingVectorService.js';
-import './services/aiRelatedInformation/common/aiRelatedInformationService.js';
-import './services/aiSettingsSearch/common/aiSettingsSearchService.js';
 import './services/history/browser/historyService.js';
 import './services/activity/browser/activityService.js';
 import './services/keybinding/browser/keybindingService.js';
@@ -137,7 +134,6 @@ import './services/editor/browser/editorPaneService.js';
 import './services/editor/common/customEditorLabelService.js';
 import './services/dataChannel/browser/dataChannelService.js';
 import './services/inlineCompletions/common/inlineCompletionsUnification.js';
-import './services/chat/common/chatEntitlementService.js';
 import './services/log/common/defaultLogLevels.js';
 
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
@@ -193,12 +189,6 @@ registerSingleton(IAllowedMcpServersService, AllowedMcpServersService, Instantia
 
 // TurboFile slim shell: Default AI account contribution is intentionally disabled.
 
-// Account Policy Gate
-import './services/policies/browser/accountPolicyGate.contribution.js';
-
-// Telemetry
-import './contrib/telemetry/browser/telemetry.contribution.js';
-
 // Preferences
 import './contrib/preferences/browser/preferences.contribution.js';
 import './contrib/preferences/browser/keybindingsEditorContribution.js';
@@ -208,9 +198,6 @@ import './contrib/preferences/browser/preferencesSearch.js';
 import './contrib/performance/browser/performance.contribution.js';
 
 // TurboFile slim shell: Notebook UI is intentionally disabled.
-
-// Speech
-import './contrib/speech/browser/speech.contribution.js';
 
 // TurboFile slim shell: Chat, Inline Chat and MCP UI contributions are intentionally disabled.
 import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
@@ -250,9 +237,6 @@ import './contrib/sash/browser/sash.contribution.js';
 
 // Markers
 import './contrib/markers/browser/markers.contribution.js';
-
-// Process Explorer
-import './contrib/processExplorer/browser/processExplorer.contribution.js';
 
 // Merge Editor
 import './contrib/mergeEditor/browser/mergeEditor.contribution.js';
@@ -350,15 +334,6 @@ import './contrib/languageDetection/browser/languageDetection.contribution.js';
 // Language Status
 import './contrib/languageStatus/browser/languageStatus.contribution.js';
 
-// Authentication
-import './contrib/authentication/browser/authentication.contribution.js';
-
-// User Data Sync
-import './contrib/userDataSync/browser/userDataSync.contribution.js';
-
-// User Data Profiles
-import './contrib/userDataProfile/browser/userDataProfile.contribution.js';
-
 // TurboFile slim shell: Continue Edit Session is intentionally disabled.
 
 // TurboFile slim shell: Remote Coding Agents are intentionally disabled.
@@ -392,9 +367,6 @@ import './contrib/accessibility/browser/accessibility.contribution.js';
 
 // Metered Connection
 import './contrib/meteredConnection/browser/meteredConnection.contribution.js';
-
-// Share
-import './contrib/share/browser/share.contribution.js';
 
 // Synchronized Scrolling
 import './contrib/scrollLocking/browser/scrollLocking.contribution.js';
