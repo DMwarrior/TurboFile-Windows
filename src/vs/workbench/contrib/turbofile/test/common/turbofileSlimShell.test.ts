@@ -40,4 +40,13 @@ suite('TurboFileSlimShell', () => {
 			assert.ok(!policy.excludedLocalExtensions.includes(extension), `${extension} must remain packaged`);
 		}
 	});
+
+	test('uses the native extension service for default language intelligence', () => {
+		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
+		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
+
+		assert.ok(!commonMain.includes('TurboFileExtensionContributionService'));
+		assert.ok(!commonMain.includes('registerSingleton(IExtensionService, TurboFileExtensionContributionService'));
+		assert.ok(desktopMain.includes("import './services/extensions/electron-browser/nativeExtensionService.js';"));
+	});
 });

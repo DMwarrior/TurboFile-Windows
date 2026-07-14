@@ -63,6 +63,7 @@ import './services/turbofile/electron-browser/turbofileSshService.js';
 import './services/localization/electron-browser/languagePackService.js';
 import './services/telemetry/electron-browser/telemetryService.js';
 import './services/extensions/electron-browser/extensionHostStarter.js';
+import './services/extensions/electron-browser/nativeExtensionService.js';
 import './contrib/debug/electron-browser/extensionHostDebugService.js';
 import '../platform/extensionResourceLoader/common/extensionResourceLoaderService.js';
 import './services/localization/electron-browser/localeService.js';
