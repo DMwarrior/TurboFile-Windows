@@ -50,6 +50,14 @@ suite('TurboFileSlimShell', () => {
 		assert.ok(desktopMain.includes("import './services/extensions/electron-browser/nativeExtensionService.js';"));
 	});
 
+	test('registers startup dependencies for native web content extraction', () => {
+		const electronMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/code/electron-main/app.ts'), 'utf8');
+
+		assert.ok(electronMain.includes('services.set(ITerminalSandboxService, new SyncDescriptor(NullTerminalSandboxService));'));
+		assert.ok(electronMain.includes('services.set(IAgentNetworkFilterService, new SyncDescriptor(AgentNetworkFilterService, undefined, true));'));
+		assert.ok(electronMain.includes('services.set(IWebContentExtractorService, new SyncDescriptor(NativeWebContentExtractorService'));
+	});
+
 	test('does not register workbench features outside TurboFile and document workflows', () => {
 		const commonMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.common.main.ts'), 'utf8');
 		const desktopMain = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/workbench.desktop.main.ts'), 'utf8');
