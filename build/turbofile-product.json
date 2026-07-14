@@ -1,0 +1,52 @@
+{
+	"excludedLocalExtensions": [
+		"debug-auto-launch",
+		"debug-server-ready",
+		"git",
+		"git-base",
+		"github",
+		"github-authentication",
+		"mermaid-chat-features",
+		"microsoft-authentication",
+		"tunnel-forwarding"
+	],
+	"excludedProductionDependencies": [
+		"@anthropic-ai/sandbox-runtime",
+		"@anthropic-ai/sdk",
+		"@github/copilot",
+		"@github/copilot-sdk",
+		"@microsoft/1ds-core-js",
+		"@microsoft/1ds-post-js",
+		"@microsoft/applicationinsights-core-js",
+		"@microsoft/applicationinsights-shims",
+		"@microsoft/dev-tunnels-connections",
+		"@microsoft/dev-tunnels-contracts",
+		"@microsoft/dev-tunnels-management",
+		"@microsoft/dev-tunnels-ssh",
+		"@microsoft/dev-tunnels-ssh-tcp",
+		"chrome-remote-interface",
+		"playwright-core"
+	],
+	"electronLocales": [
+		"en-US.pak",
+		"zh-CN.pak"
+	],
+	"forbiddenDesktopEntrypoints": [
+		"vs/sessions/",
+		"vs/platform/agentHost/",
+		"vs/workbench/contrib/debug/node/telemetryApp"
+	],
+	"forbiddenWorkbenchImports": [
+		"contrib/authentication",
+		"contrib/processExplorer",
+		"contrib/share",
+		"contrib/speech",
+		"contrib/userDataSync",
+		"contrib/userDataProfile",
+		"platform/agentHost",
+		"platform/remoteTunnel",
+		"services/browserView",
+		"services/mcp",
+		"services/userDataSync"
+	]
+}
