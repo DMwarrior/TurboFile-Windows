@@ -1,4 +1,4 @@
-# Tar 传输稳定性、左右栏独立模式与同名冲突提醒设计
+# Tar 传输稳定性、左右栏独立模式、快捷键响应与同名冲突提醒设计
 
 ## 背景与根因
 
@@ -7,6 +7,7 @@
 1. 当前 `TurboFileEditorInput` 仅保存一份页面级 `dragOperation`，左右栏工具栏读取并切换同一状态，因此两栏必然同步。
 2. 本机参与的 tar 传输使用“远端 tar / 本地 tar → SSH 管道 → 目标 tar”的高速流式路径。数据流结束后，代码继续无限等待 `ssh.exe`、`tar.exe` 或 ssh2 channel 的关闭事件；只要某一层没有正常收尾，任务就会永久停在接近完成的位置。当前 tar 还直接写最终目录，异常后可能留下半成品，使自动重试和协议回退不安全。
 3. 批量传输已经会在目标存在同名目录时整批拒绝，但冲突只显示在状态栏。用户容易把这种安全拒绝误认为传输协议故障。
+4. 面板内 Ctrl+C/X 已经同步创建内部剪贴板，但 Ctrl+V 会先等待 Windows 剪贴板写入，再启动 PowerShell STA 读取系统剪贴板，最后才决定使用内部数据。实测一次 Windows 剪贴板探测冷启动约 2.3 秒、热启动仍约 0.3 秒；面板内粘贴被不必要地串行阻塞，而拖拽直接使用内存 snapshot，因此响应差异明显。
 
 对用户提供的 64 服务器目录做了只读验证：2835 个文件、内容约 4.87 MB、tar 流约 6.84 MB，远端 tar 在 0.06 秒内正常结束。因此该案例的瓶颈不在远端打包，而在 Windows 本机 SSH/tar 管道的生命周期收尾。
 
@@ -18,6 +19,8 @@
 - tar 异常、卡住或取消时不向最终目录暴露半成品，并能安全使用下一种协议重试。
 - 剪切只在目标完整提交成功后删除源文件；任何失败、取消或回退失败均保留源文件。
 - 同名目录继续保持“整批不开始、不覆盖、不合并”，但在界面弹窗明确说明冲突路径和安全行为。
+- 当前页面左右栏之间的 Ctrl+C/X/V 使用同步内存快路径，按键后立即进入与拖拽相同的传输调用链，不等待 Windows 剪贴板桥接。
+- 保留与 Windows Explorer 之间复制、剪切和粘贴文件的能力；外部剪贴板探测只在确实需要区分外部来源时执行。
 
 ## 非目标
 
@@ -26,6 +29,7 @@
 - 不持久化左右栏模式；关闭标签或重启应用后恢复默认复制。
 - 不恢复目录大小预扫描，也不为 tar 增加百分比或 ETA。
 - 不通过降低并发、禁用 tar 或默认改用慢协议规避问题。
+- 不让“面板内快路径”覆盖用户在应用外复制的新内容；窗口离开前台后必须重新确认系统剪贴板来源。
 
 ## 方案比较
 
@@ -144,6 +148,36 @@ SSH 到 SSH 保持 direct 优先，并在 direct tar 异常时进入 relay 或�
 
 状态栏和任务记录仍保留失败信息。弹窗不提供覆盖、合并或跳过操作，源文件保持不变。
 
+## Ctrl+C/X/V 面板内零等待快路径
+
+### 当前阻塞链
+
+当前 `pasteIntoPane()` 的顺序为：
+
+```text
+等待 internal.windowsClipboardWrite
+→ 启动 PowerShell 读取 Windows 剪贴板
+→ 比较 clipboardId / sequenceNumber
+→ 调用 pasteInternalTransferClipboard
+```
+
+这条链路对“刚在当前页面左栏复制、马上到右栏粘贴”的场景没有必要。内部 clipboard 已经包含来源设备、栏位、操作类型和完整项目 snapshot，可以与拖拽使用相同传输入口。
+
+### 快路径规则
+
+- Ctrl+C/X 在键盘事件中同步完成选择 snapshot 和 `internalTransferClipboard` 更新，立即显示“已复制/已剪切”的界面反馈。
+- Windows 文件剪贴板写入继续异步执行，用于随后粘贴到 Explorer；它不能阻塞面板内操作。
+- 记录内部 clipboard 的可信状态。用户自 Ctrl+C/X 后一直留在当前应用窗口内时，Ctrl+V 直接调用 `pasteInternalTransferClipboard(targetSide)`，不等待写入 Promise，也不读取 Windows 剪贴板。
+- 应用窗口失焦、隐藏或检测到外部剪贴板变更后，将内部 clipboard 标记为“需要确认”。下一次 Ctrl+V 才读取 Windows 剪贴板：若 `clipboardId` 仍匹配则恢复内部快路径；否则使用新的 Windows 文件列表。
+- 同一页面内左右栏粘贴保持现有 copy/move 语义和成功后刷新策略。Ctrl+X 仍然只在目标传输完整成功后清理来源。
+- 对一次按键生成稳定 paste key，继续阻止 keydown 与 DOM paste 事件造成重复传输。
+
+### Windows 剪贴板慢路径
+
+Windows Explorer → 面板或面板 → Explorer 仍使用现有带 `Preferred DropEffect` 和自定义 `clipboardId` 的可靠桥接。主进程在应用空闲时预热 PowerShell/WinForms 剪贴板依赖，降低第一次外部粘贴的冷启动；预热失败时保留现有按需启动和重试作为兼容回退。
+
+该优化不改变传输协议或数据吞吐，只移除传输开始前不必要的串行等待。
+
 ## 测试设计
 
 ### 左右栏模式
@@ -172,9 +206,18 @@ SSH 到 SSH 保持 direct 优先，并在 direct tar 异常时进入 relay 或�
 - 界面弹窗显示冲突路径和“未覆盖、未开始”的说明。
 - 非冲突传输不弹窗；普通网络或权限错误仍走原错误提示。
 
+### 快捷键响应
+
+- 内部 Windows 剪贴板写入 Promise 保持 pending 时，当前页面 Ctrl+V 仍立即调用内部传输。
+- 内部快路径不调用 `readWindowsClipboardFiles()`。
+- Ctrl+C/X 同步更新 snapshot 和操作类型，异步桥接失败不丢失内部 clipboard。
+- 窗口失焦后复制了 Explorer 文件时，下一次 Ctrl+V 不使用过期内部内容。
+- Windows clipboardId 仍匹配时，慢路径确认后恢复内部粘贴。
+- keydown 与 paste 事件不会为同一次按键启动两份任务。
+
 ## 验证
 
 1. 运行 `npm run compile-check-ts-native`。
-2. 运行相关 TurboFile 单元测试，覆盖 drag mode、tar supervisor、事务目标、回退、冲突信息和剪切保护。
+2. 运行相关 TurboFile 单元测试，覆盖 drag mode、tar supervisor、事务目标、回退、冲突信息、快捷键快路径和剪切保护。
 3. 使用完整 `npx gulp vscode-win32-x64` 生成新的发布 Bundle，确认新代码进入实际安装包。
-4. 在 Windows 上验证首次和连续 tar 传输、主动取消、断网/杀死子进程、同名冲突弹窗及左右栏独立模式。
+4. 在 Windows 上验证首次和连续 tar 传输、主动取消、断网/杀死子进程、同名冲突弹窗、左右栏独立模式，以及当前页面和 Explorer 两类 Ctrl+C/X/V。
