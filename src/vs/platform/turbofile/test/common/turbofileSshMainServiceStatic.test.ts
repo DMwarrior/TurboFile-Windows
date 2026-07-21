@@ -431,6 +431,76 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
+	test('routes every direct SSH protocol entry through the verified attempt wrapper', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const entries = [
+			methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute'),
+			methodBlock(service, 'private async tryDirectSftpTransfer', 'private async tryDirectSftpTransferRoute'),
+			methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute'),
+			methodBlock(service, 'private async tryDirectRsyncTransfer', 'private async tryDirectRsyncTransferRoute'),
+			methodBlock(service, 'private async tryDirectBatchTarTransfer', 'private async tryDirectBatchTarTransferRoute'),
+			methodBlock(service, 'private async tryDirectBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransferRoute')
+		];
+
+		assert.deepStrictEqual(entries.map(entry => ({
+			verifiedAttempt: entry.includes('this.runVerifiedDirectRouteAttempt('),
+			resolvesRoutesDirectly: entry.includes('this.resolveDirectSshRoutes('),
+			loopsRoutesDirectly: entry.includes('for (const route of routes)')
+		})), entries.map(() => ({
+			verifiedAttempt: true,
+			resolvesRoutesDirectly: false,
+			loopsRoutesDirectly: false
+		})));
+	});
+
+	test('keeps batch cut cleanup outside direct route retries and terminal after copied data', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const directBatchTar = methodBlock(service, 'private async tryDirectBatchTarTransfer', 'private async tryDirectBatchTarTransferRoute');
+		const directBatchTarRoute = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
+		const directBatchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransferRoute');
+		const directBatchRsyncRoute = methodBlock(service, 'private async tryDirectBatchRsyncTransferRoute', 'private async tryTunneledBatchRsyncRelayTransfer');
+		const batchAttempt = methodBlock(service, 'private async runSshToSshBatchTransferAttempt', 'private async runLocalNativeBatchTransfer');
+		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
+		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
+		const batchTar = methodBlock(service, 'private async tryBatchTarTransfer', 'private createRemoteBatchTarPlan');
+		const verifiedAttempt = directBatchTar.indexOf('this.runVerifiedDirectRouteAttempt(');
+		const finalDataAttempt = batchPlan.indexOf('await this.runSshToSshBatchTransferAttempt(');
+		const sourceCleanup = batchPlan.indexOf('await this.deleteBatchSources(');
+
+		assert.deepStrictEqual({
+			tarCoordinatorHasOperation: directBatchTar.slice(0, directBatchTar.indexOf('{')).includes('operation:'),
+			tarRouteHasOperation: directBatchTarRoute.slice(0, directBatchTarRoute.indexOf('{')).includes('operation:'),
+			tarRouteCleansSources: directBatchTarRoute.includes('cleanupBatchSourcesAfterTar(') || directBatchTarRoute.includes('deleteBatchSources('),
+			tarCoordinatorCleansSources: directBatchTar.includes('cleanupBatchSourcesAfterTar(') || directBatchTar.includes('deleteBatchSources('),
+			verifiedAttemptExists: verifiedAttempt >= 0,
+			cleanupAfterFinalDataSuccess: finalDataAttempt >= 0 && sourceCleanup > finalDataAttempt,
+			finalCleanupOnce: (batchPlan.match(/await this\.deleteBatchSources\(/g)?.length ?? 0) === 1,
+			tarDefinedDirectResultIsTerminal: batchTar.includes('if (directResult) {\n\t\t\t\t\t\treturn directResult;'),
+			rsyncRouteCleansSources: directBatchRsyncRoute.includes('cleanupBatchSourcesAfterTar(') || directBatchRsyncRoute.includes('deleteBatchSources('),
+			rsyncCoordinatorCleansSources: directBatchRsync.includes('cleanupBatchSourcesAfterTar(') || directBatchRsync.includes('deleteBatchSources('),
+			batchAttemptCleansSources: batchAttempt.includes('cleanupBatchSourcesAfterTar(') || batchAttempt.includes('deleteBatchSources('),
+			completedCleanupFailureIsTerminal: batchPlan.includes('result && (result.ok || result.completed === items.length)'),
+			transferCoreCleanupFailureIsTerminal: transferBatchCore.includes('tarBatch && (tarBatch.ok || tarBatch.completed === items.length)')
+				&& transferBatchCore.includes('localRsyncBatch && (localRsyncBatch.ok || localRsyncBatch.completed === items.length)'),
+			noRecycleBinFallback: ![directBatchTar, directBatchTarRoute, directBatchRsync, directBatchRsyncRoute, batchAttempt, batchPlan].some(block => block.includes('movePathsToTrash('))
+		}, {
+			tarCoordinatorHasOperation: false,
+			tarRouteHasOperation: false,
+			tarRouteCleansSources: false,
+			tarCoordinatorCleansSources: false,
+			verifiedAttemptExists: true,
+			cleanupAfterFinalDataSuccess: true,
+			finalCleanupOnce: true,
+			tarDefinedDirectResultIsTerminal: true,
+			rsyncRouteCleansSources: false,
+			rsyncCoordinatorCleansSources: false,
+			batchAttemptCleansSources: false,
+			completedCleanupFailureIsTerminal: true,
+			transferCoreCleanupFailureIsTerminal: true,
+			noRecycleBinFallback: true
+		});
+	});
+
 	test('cancels verification connection setup and cleans credentials in order', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const connect = methodBlock(service, 'private async connect(config: ConnectConfig', 'private connectDirectSsh');

@@ -2641,7 +2641,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			const tarBatch = await this.tryBatchTarTransfer(request, items, operation, expectedBytes, startedAt);
 			this.throwIfTransferCanceled(request.progressId);
-			if (tarBatch?.ok) {
+			if (tarBatch && (tarBatch.ok || tarBatch.completed === items.length)) {
 				return tarBatch;
 			}
 			if (shouldUseTarOnlyForBatchTransfer(request)) {
@@ -2650,7 +2650,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 			const localRsyncBatch = await this.tryLocalBatchRsyncTransfer(request, items, operation, expectedBytes, startedAt);
 			this.throwIfTransferCanceled(request.progressId);
-			if (localRsyncBatch?.ok) {
+			if (localRsyncBatch && (localRsyncBatch.ok || localRsyncBatch.completed === items.length)) {
 				return localRsyncBatch;
 			}
 
@@ -2712,9 +2712,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					totalItems: items.length,
 					currentName: items[0]?.displayName ?? items[0]?.targetName
 				});
-				const result = await this.runSshToSshBatchTransferAttempt(request, items, operation, expectedBytes, startedAt, attempt);
+				const result = await this.runSshToSshBatchTransferAttempt(request, items, expectedBytes, startedAt, attempt);
 				this.throwIfTransferCanceled(request.progressId);
-				if (result?.ok) {
+				if (result && (result.ok || result.completed === items.length)) {
+					if (result.ok && operation === 'move') {
+						const cleanupFailures = await this.deleteBatchSources(request.source, items, request.progressId);
+						if (cleanupFailures.length) {
+							return this.createBatchTransferResult(false, result.strategy, result.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
+						}
+					}
 					return result;
 				}
 				if (result) {
@@ -2748,31 +2754,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		})), startedAt, request.progressId);
 	}
 
-	private async runSshToSshBatchTransferAttempt(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number, attempt: ITurboFileTransferAttempt): Promise<ITurboFileBatchTransferResult | undefined> {
+	private async runSshToSshBatchTransferAttempt(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], expectedBytes: number, startedAt: number, attempt: ITurboFileTransferAttempt): Promise<ITurboFileBatchTransferResult | undefined> {
 		if (attempt.protocol === 'rsync') {
-			const result = attempt.route === 'direct'
+			return attempt.route === 'direct'
 				? await this.tryDirectBatchRsyncTransfer(request, items, expectedBytes, startedAt, true)
 				: attempt.route === 'relay'
 					? await this.tryTunneledBatchRsyncRelayTransfer(request, items, expectedBytes, startedAt, true)
 					: undefined;
-			if (result?.ok && operation === 'move') {
-				const cleanupFailures = await this.deleteBatchSources(request.source, items, request.progressId);
-				if (cleanupFailures.length) {
-					return this.createBatchTransferResult(false, result.strategy, result.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
-				}
-			}
-			return result;
 		}
 		if (attempt.protocol === 'tar') {
 			return this.tryBatchTarTransfer({
 				...request,
 				strategyHint: attempt.route === 'relay' ? 'relay' : 'direct'
-			}, items, operation, expectedBytes, startedAt, true);
+			}, items, 'copy', expectedBytes, startedAt, true);
 		}
 		return this.runConcurrentBatchTransfer({
 			...request,
 			strategyHint: attempt.route === 'relay' ? 'relay' : 'direct'
-		}, items, operation, expectedBytes, startedAt, false);
+		}, items, 'copy', expectedBytes, startedAt, false);
 	}
 
 	private async runLocalNativeBatchTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult> {
@@ -2996,23 +2995,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const routes = await this.resolveDirectSshRoutes(request.source, request.targetDirectory, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectBatchRsyncTransferRoute(request, items, expectedBytes, startedAt, route);
-				return result;
-			} catch {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-			}
-		}
-
-		return undefined;
+		return this.runVerifiedDirectRouteAttempt(request.source, request.targetDirectory, request.progressId, route => this.tryDirectBatchRsyncTransferRoute(request, items, expectedBytes, startedAt, route));
 	}
 
 	private async tryDirectBatchRsyncTransferRoute(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], expectedBytes: number, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileBatchTransferResult> {
@@ -3287,8 +3270,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			let directFailure: unknown;
 			if (request.strategyHint !== 'relay') {
 				try {
-					const directResult = await this.tryDirectBatchTarTransfer(request, items, plan, operation, bytes, startedAt);
-					if (directResult?.ok) {
+					const directResult = await this.tryDirectBatchTarTransfer(request, items, plan, bytes, startedAt);
+					if (directResult) {
 						return directResult;
 					}
 				} catch (error) {
@@ -3304,7 +3287,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				return undefined;
 			}
-			return this.tryRelayBatchTarTransfer(request, items, plan, operation, bytes, startedAt);
+			return this.tryRelayBatchTarTransfer(request, items, plan, bytes, startedAt);
 		}
 
 		return undefined;
@@ -3447,32 +3430,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async tryDirectBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+	private async tryDirectBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.targetDirectory.kind !== 'ssh' || !request.source.connection || !request.targetDirectory.connection) {
 			return undefined;
 		}
-		const routes = await this.resolveDirectSshRoutes(request.source, request.targetDirectory, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		const failures: string[] = [];
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectBatchTarTransferRoute(request, items, plan, operation, expectedBytes, startedAt, route);
-				return result;
-			} catch (error) {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				failures.push(`${route}: ${formatTransferError(error)}`);
-			}
-		}
-
-		throw new Error(`Direct batch tar failed: ${failures.join('; ')}`);
+		return this.runVerifiedDirectRouteAttempt(request.source, request.targetDirectory, request.progressId, route => this.tryDirectBatchTarTransferRoute(request, items, plan, expectedBytes, startedAt, route));
 	}
 
-	private async tryDirectBatchTarTransferRoute(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileBatchTransferResult> {
+	private async tryDirectBatchTarTransferRoute(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, expectedBytes: number, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileBatchTransferResult> {
 		const executorEndpoint = route === 'source-push' ? request.source : request.targetDirectory;
 		const remoteEndpoint = route === 'source-push' ? request.targetDirectory : request.source;
 		if (!executorEndpoint.connection || !remoteEndpoint.connection || !request.targetDirectory.connection) {
@@ -3519,7 +3484,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = Math.max(expectedBytes, tarProgress.getTransferredBytes());
-			await this.cleanupBatchSourcesAfterTar(request, items, operation);
 			this.fireTransferProgress(request, bytes, expectedBytes, 'complete', 'Batch direct tar completed.', true, { strategy: 'tar-direct', route, completedItems: items.length, totalItems: items.length });
 			return this.createBatchTransferResult(true, 'tar-direct', bytes, 'Batch direct tar completed.', items.length, 0, [], startedAt, request.progressId);
 		} finally {
@@ -3530,7 +3494,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async tryRelayBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
+	private async tryRelayBatchTarTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], plan: ITarBatchPlan, expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
 		if (request.source.kind !== 'ssh' || request.targetDirectory.kind !== 'ssh' || !request.source.connection || !request.targetDirectory.connection) {
 			return undefined;
 		}
@@ -3580,7 +3544,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await Promise.all([archivePipeline, inputWrite, sourceStream.close, targetStream.close]);
 			this.throwIfTransferCanceled(request.progressId);
 			const bytes = Math.max(expectedBytes, transferredBytes);
-			await this.cleanupBatchSourcesAfterTar(request, items, operation);
 			this.fireTransferProgress(request, bytes, expectedBytes, 'complete', 'Batch tar relay completed.', true, { strategy: 'tar-relay', route: 'relay', completedItems: items.length, totalItems: items.length });
 			return this.createBatchTransferResult(true, 'tar-relay', bytes, 'Batch tar relay completed.', items.length, 0, [], startedAt, request.progressId);
 		} finally {
@@ -5479,25 +5442,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const bytes = Math.max(0, request.expectedBytes ?? 0);
 
-		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		const failures: string[] = [];
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectTarTransferRoute(request, startedAt, bytes, route);
-				return result;
-			} catch (error) {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				failures.push(`${route}: ${formatTransferError(error)}`);
-			}
-		}
-
-		throw new Error(`Direct tar failed: ${failures.join('; ')}`);
+		return this.runVerifiedDirectRouteAttempt(request.source, request.target, request.progressId, route => this.tryDirectTarTransferRoute(request, startedAt, bytes, route));
 	}
 
 	private async tryDirectTarTransferRoute(request: ITurboFileTransferRequest, startedAt: number, expectedBytes: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
@@ -5583,25 +5528,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		this.throwIfTransferCanceled(request.progressId);
 
-		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		const failures: string[] = [];
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectRsyncTransferRoute(request, startedAt, route);
-				return result;
-			} catch (error) {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				failures.push(`${route}: ${formatTransferError(error)}`);
-			}
-		}
-
-		throw new Error(`Direct rsync failed: ${failures.join('; ')}`);
+		return this.runVerifiedDirectRouteAttempt(request.source, request.target, request.progressId, route => this.tryDirectRsyncTransferRoute(request, startedAt, route));
 	}
 
 	private async tryDirectRsyncTransferRoute(request: ITurboFileTransferRequest, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
@@ -5684,7 +5611,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return orderTurboFileDirectSshRoutes(preferred);
 	}
 
-	// @ts-expect-error Task 3 connects this staged wrapper to the six direct protocol loops.
 	private async runVerifiedDirectRouteAttempt<T>(
 		source: ITurboFileTransferEndpoint,
 		target: ITurboFileTransferEndpoint,
@@ -5862,25 +5788,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		const failures: string[] = [];
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectScpTransferRoute(request, startedAt, sourceIsDirectory, bytes, route);
-				return result;
-			} catch (error) {
-				if (this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				failures.push(`${route}: ${formatTransferError(error)}`);
-			}
-		}
-
-		throw new Error(`Direct SCP failed: ${failures.join('; ')}`);
+		return this.runVerifiedDirectRouteAttempt(request.source, request.target, request.progressId, route => this.tryDirectScpTransferRoute(request, startedAt, sourceIsDirectory, bytes, route));
 	}
 
 	private async tryDirectScpTransferRoute(request: ITurboFileTransferRequest, startedAt: number, sourceIsDirectory: boolean, bytes: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
@@ -6011,25 +5919,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		this.throwIfTransferCanceled(request.progressId);
 
-		const routes = await this.resolveDirectSshRoutes(request.source, request.target, request.progressId);
-		if (!routes.length) {
-			return undefined;
-		}
-
-		const failures: string[] = [];
-		for (const route of routes) {
-			try {
-				const result = await this.tryDirectSftpTransferRoute(request, startedAt, route);
-				return result;
-			} catch (error) {
-				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
-					throw new TurboFileTransferCanceledError();
-				}
-				failures.push(`${route}: ${formatTransferError(error)}`);
-			}
-		}
-
-		throw new Error(`Direct SFTP failed: ${failures.join('; ')}`);
+		return this.runVerifiedDirectRouteAttempt(request.source, request.target, request.progressId, route => this.tryDirectSftpTransferRoute(request, startedAt, route));
 	}
 
 	private async tryDirectSftpTransferRoute(request: ITurboFileTransferRequest, startedAt: number, route: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult> {
