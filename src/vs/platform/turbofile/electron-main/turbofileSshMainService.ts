@@ -18,6 +18,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
+import { runTurboFileBatchTransferFlow } from '../common/turbofileBatchTransferFlow.js';
 import { createLocalBatchTarPlans, createRemoteBatchTarSourcePlan, createTarNullListBuffer, isTurboFileBatchCommandSafe, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
@@ -2702,9 +2703,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			strategyHint: request.strategyHint
 		});
 		const failures: ITurboFileBatchTransferFailure[] = [];
-		for (const [index, attempt] of plan.attempts.entries()) {
-			this.throwIfTransferCanceled(request.progressId);
-			try {
+		const result = await runTurboFileBatchTransferFlow({
+			attempts: plan.attempts,
+			operation,
+			totalItems: items.length,
+			runAttempt: async attempt => {
+				this.throwIfTransferCanceled(request.progressId);
 				this.fireTransferProgress(request, 0, attempt.protocol === 'rsync' ? 0 : expectedBytes, attempt.route === 'relay' ? 'relay-upload' : 'transfer', `Starting batch ${attempt.protocol} ${attempt.route} transfer.`, true, {
 					strategy: transferAttemptToStrategy(attempt),
 					route: attempt.route === 'relay' ? 'relay' : undefined,
@@ -2712,21 +2716,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					totalItems: items.length,
 					currentName: items[0]?.displayName ?? items[0]?.targetName
 				});
-				const result = await this.runSshToSshBatchTransferAttempt(request, items, expectedBytes, startedAt, attempt);
+				const attemptResult = await this.runSshToSshBatchTransferAttempt(request, items, expectedBytes, startedAt, attempt);
 				this.throwIfTransferCanceled(request.progressId);
-				if (result && (result.ok || result.completed === items.length)) {
-					if (result.ok && operation === 'move') {
-						const cleanupFailures = await this.deleteBatchSources(request.source, items, request.progressId);
-						if (cleanupFailures.length) {
-							return this.createBatchTransferResult(false, result.strategy, result.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
-						}
-					}
-					return result;
-				}
-				if (result) {
-					failures.push(...result.failures);
-				}
-			} catch (error) {
+				return attemptResult;
+			},
+			cleanupSources: () => this.deleteBatchSources(request.source, items, request.progressId),
+			createCleanupFailureResult: (successfulResult, cleanupFailures) => this.createBatchTransferResult(false, successfulResult.strategy, successfulResult.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, [...cleanupFailures], startedAt, request.progressId),
+			onIncompleteResult: incompleteResult => failures.push(...incompleteResult.failures),
+			onAttemptError: (error, attempt, nextAttempt) => {
 				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
@@ -2735,7 +2732,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					path: items[0]?.sourcePath ?? request.source.path,
 					message: `${attempt.protocol} ${attempt.route}: ${formatTransferError(error)}`
 				});
-				const nextAttempt = plan.attempts[index + 1];
 				if (nextAttempt) {
 					this.fireTransferProgress(request, 0, nextAttempt.protocol === 'rsync' ? 0 : expectedBytes, nextAttempt.route === 'relay' ? 'relay-upload' : 'transfer', `Falling back to batch ${nextAttempt.protocol} ${nextAttempt.route}.`, true, {
 						strategy: transferAttemptToStrategy(nextAttempt),
@@ -2746,6 +2742,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					});
 				}
 			}
+		});
+		if (result) {
+			return result;
 		}
 		return this.createBatchTransferResult(false, transferAttemptToStrategy(plan.attempts[0]), 0, failures[0]?.message ?? 'Batch transfer unavailable.', 0, items.length, failures.length ? failures : items.map(item => ({
 			name: item.displayName ?? item.targetName,

@@ -71,3 +71,57 @@
 - generic verifier 与既有 SFTP/rsync 私钥数据命令构造存在已知能力差异；按 brief 本任务只接统一 wrapper，没有扩写各数据协议认证构造。
 - cleanup failure 用 `ok:false`、`completed === items.length` 表示“数据已完成但后处理失败”；调用方必须继续把该组合视为终态。新增的三层静态断言防止当前调度链回归。
 - Task 4 才负责 `directFallbackReason` 等 UI/诊断扩展；本任务未把 raw verifier error、命令、主机或凭据拼入普通 fallback 文本。
+
+## 独立审查补充：批量剪切运行时回归保护
+
+### 结论
+
+- 将“按计划执行数据 attempt、判定终态、move 最终清源一次”的纯协调逻辑提取到 `turbofileBatchTransferFlow.ts`，并由 `runSshToSshBatchTransferPlan` 的真实生产路径调用；Node 单测不导入 Electron main，也没有增加 test-only 服务 API。
+- 协调器只接管原有 attempt 结果判定与最终清源边界。真实 direct/relay/concurrent attempt、路由顺序、取消检查、fallback 进度、失败聚合及 cleanup failure 结果构造仍由主服务提供。
+- cleanup failure 在数据已成功后直接返回 `ok:false`、`completed === totalItems` 的终态结果，不执行任何后续 attempt；cleanup 抛错也位于数据 attempt 的 catch 边界之外，不会被误判为可 relay 的数据失败。
+- 普通 `TurboFileDirectDataError` 与 `TurboFileDirectUnavailableError` 仍调用既有错误处理回调并继续 relay；direct、relay、concurrent 任一路径成功的 move 都只清源一次，copy 永不清源。
+
+### TDD RED
+
+1. 先新增 `turbofileBatchTransferFlow.test.ts`，以 stub 执行期望的纯协调 API，覆盖 cleanup failure 终态、普通 direct 错误继续 relay、三类成功 move 单次清源及 copy 不清源。此时未修改生产代码。
+2. 先运行 `npm run compile-check-ts-native`，退出码 0。
+3. 首次 exact runner 因仓库没有新测试的 `out` 产物，在断言前报 `ERR_MODULE_NOT_FOUND`；该结果属于测试基础设施阻塞，没有作为行为 RED 证据。
+4. 使用 `tsc --noCheck` 只定向生成 Node runner 所需的临时 JS 后，重新运行：
+
+   ```powershell
+   npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileBatchTransferFlow.test.ts
+   ```
+
+   结果为 `1 passing, 6 failing`；六个行为用例均稳定失败在 `Expected a Node-safe batch transfer flow coordinator.`，证明缺失的是可执行的协调状态机而不是测试拼写或 Electron 装载问题。
+
+### TDD GREEN 与重构
+
+1. 最小实现纯 helper 并接入主服务后，先运行 `npm run compile-check-ts-native`，退出码 0；runtime test 变为 `7 passing`。
+2. GREEN 后把 RED 阶段的 `Reflect.get` 桥接重构为正式 API 显式 import，并把普通 direct 失败收紧为 `TurboFileDirectDataError`、`TurboFileDirectUnavailableError` 两个运行时用例；最终 runtime test 为 `8 passing (5ms)`。
+3. 静态 exact test 改为同时确认主服务真实调用 helper，以及 helper 中数据 attempt 位于唯一 cleanup 之前；最终结果为 `33 passing (54ms)`。
+4. 每个 exact test 前均重新运行 `npm run compile-check-ts-native`，均退出码 0；其余回归结果：
+
+   ```powershell
+   npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileTransferPlan.test.ts
+   # 9 passing (8ms)
+
+   npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileTransfer148Baseline.test.ts
+   # 3 passing (5ms)
+   ```
+
+### 补充影响文件
+
+- `src/vs/platform/turbofile/common/turbofileBatchTransferFlow.ts`
+- `src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts`
+- `src/vs/platform/turbofile/test/common/turbofileBatchTransferFlow.test.ts`
+- `src/vs/platform/turbofile/test/common/turbofileSshMainServiceStatic.test.ts`
+- `.superpowers/sdd/task-3-report.md`
+
+`turbofileTransferPlan.ts`、`turbofileTransferPlan.test.ts` 与 `turbofileTransfer148Baseline.test.ts` 均未修改。
+
+### 补充自审与风险
+
+- helper 使用明确的 `ITurboFileBatchTransferFlowOptions`、batch result/failure/attempt 类型，没有 `any`、test-only production API 或 Electron 运行时依赖。
+- 数据 result 只有 `ok:true` 或 `completed === totalItems` 才终止；不完整结果继续下一 attempt 并保留原有 failures。move 仅在 `ok:true` 后清源；已是 cleanup failure 的 `ok:false` 完整结果不会重复清源。
+- 主服务的 attempt 调用、取消检查和 progress 仍在原顺序；helper 没有引入 attempt、改变 protocol/route 顺序，或触碰并发、buffer、压缩、超时、UI 与本地传输。
+- 测试是纯状态机运行时回归，不替代真实双 SSH 主机的端到端验证；外部 SSH/rsync/tar 行为仍由既有 exact 与集成边界保护。

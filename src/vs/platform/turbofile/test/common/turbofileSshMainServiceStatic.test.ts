@@ -27,6 +27,7 @@ function numericProductConstant(source: string, name: string): number {
 
 suite('TurboFileSshMainServiceStatic', () => {
 	const servicePath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
+	const batchTransferFlowPath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofileBatchTransferFlow.ts');
 
 	test('keeps remote directory retries and cache generations safe', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
@@ -455,6 +456,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 
 	test('keeps batch cut cleanup outside direct route retries and terminal after copied data', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
+		const batchTransferFlow = fs.readFileSync(batchTransferFlowPath(), 'utf8');
 		const directBatchTar = methodBlock(service, 'private async tryDirectBatchTarTransfer', 'private async tryDirectBatchTarTransferRoute');
 		const directBatchTarRoute = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
 		const directBatchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransferRoute');
@@ -463,9 +465,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
 		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
 		const batchTar = methodBlock(service, 'private async tryBatchTarTransfer', 'private createRemoteBatchTarPlan');
+		const batchFlow = functionBlock(batchTransferFlow, 'runTurboFileBatchTransferFlow');
 		const verifiedAttempt = directBatchTar.indexOf('this.runVerifiedDirectRouteAttempt(');
-		const finalDataAttempt = batchPlan.indexOf('await this.runSshToSshBatchTransferAttempt(');
-		const sourceCleanup = batchPlan.indexOf('await this.deleteBatchSources(');
+		const finalDataAttempt = batchFlow.indexOf('await options.runAttempt(');
+		const sourceCleanup = batchFlow.indexOf('await options.cleanupSources(');
 
 		assert.deepStrictEqual({
 			tarCoordinatorHasOperation: directBatchTar.slice(0, directBatchTar.indexOf('{')).includes('operation:'),
@@ -473,13 +476,14 @@ suite('TurboFileSshMainServiceStatic', () => {
 			tarRouteCleansSources: directBatchTarRoute.includes('cleanupBatchSourcesAfterTar(') || directBatchTarRoute.includes('deleteBatchSources('),
 			tarCoordinatorCleansSources: directBatchTar.includes('cleanupBatchSourcesAfterTar(') || directBatchTar.includes('deleteBatchSources('),
 			verifiedAttemptExists: verifiedAttempt >= 0,
+			usesRuntimeCoordinator: batchPlan.includes('await runTurboFileBatchTransferFlow({'),
 			cleanupAfterFinalDataSuccess: finalDataAttempt >= 0 && sourceCleanup > finalDataAttempt,
-			finalCleanupOnce: (batchPlan.match(/await this\.deleteBatchSources\(/g)?.length ?? 0) === 1,
+			finalCleanupOnce: (batchFlow.match(/await options\.cleanupSources\(/g)?.length ?? 0) === 1,
 			tarDefinedDirectResultIsTerminal: batchTar.includes('if (directResult) {\n\t\t\t\t\t\treturn directResult;'),
 			rsyncRouteCleansSources: directBatchRsyncRoute.includes('cleanupBatchSourcesAfterTar(') || directBatchRsyncRoute.includes('deleteBatchSources('),
 			rsyncCoordinatorCleansSources: directBatchRsync.includes('cleanupBatchSourcesAfterTar(') || directBatchRsync.includes('deleteBatchSources('),
 			batchAttemptCleansSources: batchAttempt.includes('cleanupBatchSourcesAfterTar(') || batchAttempt.includes('deleteBatchSources('),
-			completedCleanupFailureIsTerminal: batchPlan.includes('result && (result.ok || result.completed === items.length)'),
+			completedCleanupFailureIsTerminal: batchFlow.includes("if (!result.ok || options.operation === 'copy')"),
 			transferCoreCleanupFailureIsTerminal: transferBatchCore.includes('tarBatch && (tarBatch.ok || tarBatch.completed === items.length)')
 				&& transferBatchCore.includes('localRsyncBatch && (localRsyncBatch.ok || localRsyncBatch.completed === items.length)'),
 			noRecycleBinFallback: ![directBatchTar, directBatchTarRoute, directBatchRsync, directBatchRsyncRoute, batchAttempt, batchPlan].some(block => block.includes('movePathsToTrash('))
@@ -489,6 +493,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			tarRouteCleansSources: false,
 			tarCoordinatorCleansSources: false,
 			verifiedAttemptExists: true,
+			usesRuntimeCoordinator: true,
 			cleanupAfterFinalDataSuccess: true,
 			finalCleanupOnce: true,
 			tarDefinedDirectResultIsTerminal: true,
