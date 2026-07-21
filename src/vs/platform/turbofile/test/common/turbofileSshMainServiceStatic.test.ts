@@ -474,6 +474,31 @@ suite('TurboFileSshMainServiceStatic', () => {
 		})));
 	});
 
+	test('falls back to the remote shell size only when direct SCP target stat fails', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const dataCommand = directScp.indexOf('await this.execRemote(client, scpCommand, {');
+		const targetStat = directScp.indexOf('const targetSize = await this.withDirectorySftp(request.target');
+		const shellFallback = directScp.indexOf('.catch(() => this.getRemotePathSizeByCommand(request.target, request.progressId));', targetStat);
+		const mismatchCheck = directScp.indexOf('if (targetSize !== bytes)', targetStat);
+
+		assert.deepStrictEqual({
+			validatesAfterDataCommand: dataCommand >= 0 && targetStat > dataCommand,
+			usesSftpStatFirst: targetStat >= 0 && directScp.includes('this.remoteStat(sftp, request.target.path)).size'),
+			shellQueryIsStatFailureFallback: shellFallback > targetStat && shellFallback < mismatchCheck,
+			shellQueryIsNotUnconditional: (directScp.match(/getRemotePathSizeByCommand\(request\.target, request\.progressId\)/g)?.length ?? 0) === 1,
+			keepsMismatchFailure: mismatchCheck > shellFallback && directScp.includes('Direct SCP size mismatch: expected ${bytes}, got ${targetSize}.'),
+			keepsCancellationPostcheck: directScp.indexOf('this.throwIfTransferCanceled(request.progressId);', shellFallback) > shellFallback
+		}, {
+			validatesAfterDataCommand: true,
+			usesSftpStatFirst: true,
+			shellQueryIsStatFailureFallback: true,
+			shellQueryIsNotUnconditional: true,
+			keepsMismatchFailure: true,
+			keepsCancellationPostcheck: true
+		});
+	});
+
 	test('reports typed direct fallback reasons without exposing direct errors', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const common = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');

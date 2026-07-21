@@ -5866,7 +5866,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			this.throwIfTransferCanceled(request.progressId);
 			if (!sourceIsDirectory) {
-				const targetSize = await this.withDirectorySftp(request.target, async sftp => (await this.remoteStat(sftp, request.target.path)).size).catch(() => 0);
+				const targetSize = await this.withDirectorySftp(request.target, async sftp => (await this.remoteStat(sftp, request.target.path)).size).catch(() => this.getRemotePathSizeByCommand(request.target, request.progressId));
 				this.throwIfTransferCanceled(request.progressId);
 				if (targetSize !== bytes) {
 					await this.withDirectorySftp(request.target, sftp => this.unlinkRemote(sftp, request.target.path)).catch(() => undefined);
