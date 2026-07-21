@@ -41,7 +41,7 @@ public:
 		if (escapePressed) {
 			return DRAGDROP_S_CANCEL;
 		}
-		if ((keyState & MK_LBUTTON) == 0) {
+		if ((keyState & MK_LBUTTON) == 0 || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0) {
 			return DRAGDROP_S_DROP;
 		}
 		return S_OK;
@@ -89,9 +89,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
 	DWORD effect = DROPEFFECT_NONE;
 	if (SUCCEEDED(result) && dataObject) {
-		TurboFileDropSource *dropSource = new TurboFileDropSource();
-		result = DoDragDrop(dataObject, dropSource, DROPEFFECT_COPY, &effect);
-		dropSource->Release();
+		if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0) {
+			result = DRAGDROP_S_CANCEL;
+		} else {
+			TurboFileDropSource *dropSource = new TurboFileDropSource();
+			result = DoDragDrop(dataObject, dropSource, DROPEFFECT_COPY, &effect);
+			dropSource->Release();
+		}
 	}
 
 	if (dataObject) {

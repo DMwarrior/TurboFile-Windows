@@ -19,19 +19,13 @@ import { URI } from '../../base/common/uri.js';
 import { Schemas } from '../../base/common/network.js';
 import { IEditorGroup } from '../services/editor/common/editorGroupsService.js';
 import { Iterable } from '../../base/common/iterator.js';
-import { Emitter, Event } from '../../base/common/event.js';
+import { Emitter } from '../../base/common/event.js';
 
 //#region Editor Pane Registry
 
 export interface IEditorPaneDescriptor extends ICommonEditorDescriptor<EditorPane> { }
 
 export interface IEditorPaneRegistry {
-
-	/**
-	 * Fires after an editor pane registration is removed.
-	 */
-	readonly onDidDeregisterEditorPane: Event<IEditorPaneDescriptor>;
-
 	/**
 	 * Registers an editor pane to the platform for the given editor type. The second parameter also supports an
 	 * array of input classes to be passed in. If the more than one editor is registered for the same editor
@@ -58,9 +52,6 @@ export class EditorPaneDescriptor implements IEditorPaneDescriptor {
 	private static readonly instantiatedEditorPanes = new Set<string>();
 	static didInstantiateEditorPane(typeId: string): boolean {
 		return EditorPaneDescriptor.instantiatedEditorPanes.has(typeId);
-	}
-	static didDeregisterEditorPane(typeId: string): void {
-		EditorPaneDescriptor.instantiatedEditorPanes.delete(typeId);
 	}
 
 	private static readonly _onWillInstantiateEditorPane = new Emitter<IWillInstantiateEditorPaneEvent>();
@@ -95,20 +86,13 @@ export class EditorPaneDescriptor implements IEditorPaneDescriptor {
 }
 
 export class EditorPaneRegistry implements IEditorPaneRegistry {
-
-	private readonly _onDidDeregisterEditorPane = new Emitter<IEditorPaneDescriptor>();
-	readonly onDidDeregisterEditorPane = this._onDidDeregisterEditorPane.event;
-
 	private readonly mapEditorPanesToEditors = new Map<EditorPaneDescriptor, readonly SyncDescriptor<EditorInput>[]>();
 
 	registerEditorPane(editorPaneDescriptor: EditorPaneDescriptor, editorDescriptors: readonly SyncDescriptor<EditorInput>[]): IDisposable {
 		this.mapEditorPanesToEditors.set(editorPaneDescriptor, editorDescriptors);
 
 		return toDisposable(() => {
-			if (this.mapEditorPanesToEditors.delete(editorPaneDescriptor)) {
-				EditorPaneDescriptor.didDeregisterEditorPane(editorPaneDescriptor.typeId);
-				this._onDidDeregisterEditorPane.fire(editorPaneDescriptor);
-			}
+			this.mapEditorPanesToEditors.delete(editorPaneDescriptor);
 		});
 	}
 

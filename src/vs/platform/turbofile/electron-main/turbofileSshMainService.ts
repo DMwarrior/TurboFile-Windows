@@ -74,6 +74,7 @@ const IMAGE_RESOURCE_TTL_MS = 10 * 60 * 1000;
 const IMAGE_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 1000;
 const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
 const WINDOWS_DRAG_COPY_HOOK_POLL_MS = 50;
+const WINDOWS_DRAG_HELPER_TARGET_GRACE_MS = 1000;
 const TURBOFILE_WINDOWS_DRAG_COPY_HOOK_CLSID = '{D650A1FA-43C6-4B8F-8C83-80B028353F64}';
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
 const REMOTE_DIRECTORY_SFTP_IDLE_MS = 5 * 60 * 1000;
@@ -4718,12 +4719,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await fsp.rm(paths.targetFile, { force: true }).catch(() => undefined);
 			await fsp.mkdir(paths.fakeDirectory, { recursive: true });
 			await fsp.mkdir(dirname(paths.targetFile), { recursive: true });
+			this.cancelChromiumWindowsDrag(_window);
 			dragSource = this.startWindowsDragSourceHelper(paths.fakeDirectory);
 
-			const targetDirectory = await Promise.race([
-				this.waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName),
-				this.waitForWindowsDragSourceHelperFailure(dragSource)
-			]);
+			const targetDirectory = await this.waitForWindowsDragSourceHelperResult(dragSource, paths.targetFile, fakeDirectoryName);
 			return { ok: true, message: 'Windows drop target captured.', targetDirectory };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -4741,6 +4740,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private cancelChromiumWindowsDrag(window: BrowserWindow): void {
+		if (window.isDestroyed() || window.webContents.isDestroyed()) {
+			return;
+		}
+		window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+		window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+	}
+
 	private startWindowsDragSourceHelper(fakeDirectory: string): ChildProcess {
 		return spawn(this.resolveWindowsDragSourceHelperPath(), [fakeDirectory], {
 			stdio: 'ignore',
@@ -4748,18 +4755,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private waitForWindowsDragSourceHelperFailure(child: ChildProcess): Promise<string> {
-		return new Promise((_, reject) => {
+	private waitForWindowsDragSourceHelperResult(child: ChildProcess, targetFile: string, fakeDirectoryName: string): Promise<string> {
+		return new Promise((resolve, reject) => {
 			const onError = (error: Error): void => {
 				child.removeListener('exit', onExit);
 				reject(error);
 			};
-			const onExit = (code: number | null): void => {
+			const onExit = async (code: number | null): Promise<void> => {
 				child.removeListener('error', onError);
 				if (code === 2) {
 					reject(new Error('Windows drag was canceled.'));
 				} else if (code !== 0) {
 					reject(new Error(`Windows drag helper failed with exit code ${code ?? 'unknown'}.`));
+				} else {
+					try {
+						resolve(await this.waitForWindowsDragCopyHookTarget(targetFile, fakeDirectoryName, WINDOWS_DRAG_HELPER_TARGET_GRACE_MS));
+					} catch (error) {
+						reject(error);
+					}
 				}
 			};
 			child.once('error', onError);
@@ -4785,8 +4798,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return join(localAppData, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR);
 	}
 
-	private async waitForWindowsDragCopyHookTarget(targetFile: string, fakeDirectoryName: string): Promise<string> {
-		const deadline = Date.now() + WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS;
+	private async waitForWindowsDragCopyHookTarget(targetFile: string, fakeDirectoryName: string, timeoutMs = WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS): Promise<string> {
+		const deadline = Date.now() + timeoutMs;
 		const desktopFallbackDirs = this.getWindowsDragDesktopFallbackDirs();
 		while (Date.now() < deadline) {
 			// 1) The CopyHook captured the destination. This covers drops onto ordinary directories and

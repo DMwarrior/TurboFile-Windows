@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IDisposable } from '../../../../base/common/lifecycle.js';
 import Severity from '../../../../base/common/severity.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -129,10 +128,6 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 
 	setCleanupForClose(handler: () => void): void {
 		this.cleanupForClose = handler;
-	}
-
-	setEditorPaneRegistration(registration: IDisposable): void {
-		this._register(registration);
 	}
 
 	override dispose(): void {

@@ -16,7 +16,7 @@ import { workbenchInstantiationService, TestEditorGroupView, TestEditorGroupsSer
 import { TextResourceEditorInput } from '../../../../common/editor/textResourceEditorInput.js';
 import { TestThemeService } from '../../../../../platform/theme/test/common/testThemeService.js';
 import { URI } from '../../../../../base/common/uri.js';
-import { EditorPaneDescriptor, EditorPaneRegistry, IEditorPaneDescriptor } from '../../../../browser/editor.js';
+import { EditorPaneDescriptor, EditorPaneRegistry } from '../../../../browser/editor.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { DisposableStore, IDisposable } from '../../../../../base/common/lifecycle.js';
 import { TestStorageService, TestWorkspaceTrustManagementService } from '../../../common/workbenchTestServices.js';
@@ -165,18 +165,6 @@ suite('EditorPane', () => {
 		assert.strictEqual(editorRegistry.getEditorPaneByType('id1'), editorDescriptor1);
 		assert.strictEqual(editorRegistry.getEditorPaneByType('id2'), editorDescriptor2);
 		assert(!editorRegistry.getEditorPaneByType('id3'));
-	});
-
-	test('Editor Pane Registration emits deregistration', function () {
-		const editorDescriptor = EditorPaneDescriptor.create(TestEditor, 'deregisteredEditor', 'name');
-		let deregisteredDescriptor: IEditorPaneDescriptor | undefined;
-		disposables.add(editorRegistry.onDidDeregisterEditorPane(descriptor => deregisteredDescriptor = descriptor));
-
-		const registration = editorRegistry.registerEditorPane(editorDescriptor, [new SyncDescriptor(TestInput)]);
-		registration.dispose();
-
-		assert.strictEqual(deregisteredDescriptor, editorDescriptor);
-		assert.strictEqual(editorRegistry.getEditorPaneByType(editorDescriptor.typeId), undefined);
 	});
 
 	test('Editor Pane Lookup favors specific class over superclass (match on specific class)', function () {

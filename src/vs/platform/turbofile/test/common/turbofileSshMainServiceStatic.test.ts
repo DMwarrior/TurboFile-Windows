@@ -247,6 +247,39 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(service.includes("TurboFileDragSource.exe"));
 	});
 
+	test('hands captured Windows drag ownership to the native helper before it starts', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const capturedDrag = methodBlock(service, 'private async startCapturedWindowsFileDrag', 'private getWindowsDragCopyHookPaths');
+		const cancelChromiumDrag = capturedDrag.indexOf('cancelChromiumWindowsDrag(_window)');
+		const startNativeDrag = capturedDrag.indexOf('startWindowsDragSourceHelper(paths.fakeDirectory)');
+
+		assert.ok(service.includes("keyCode: 'Escape'"));
+		assert.ok(cancelChromiumDrag >= 0);
+		assert.ok(startNativeDrag > cancelChromiumDrag);
+	});
+
+	test('settles every native Windows drag helper exit without the long capture timeout', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const waitStart = service.indexOf('private waitForWindowsDragSourceHelperResult');
+		const waitEnd = service.indexOf('private getWindowsDragCopyHookPaths', waitStart);
+		const waitForHelper = service.slice(waitStart, waitEnd);
+
+		assert.ok(waitStart >= 0);
+		assert.ok(waitForHelper.includes('WINDOWS_DRAG_HELPER_TARGET_GRACE_MS'));
+		assert.ok(waitForHelper.includes('waitForWindowsDragCopyHookTarget('));
+		assert.ok(waitForHelper.includes('code === 2'));
+		assert.ok(waitForHelper.includes('code !== 0'));
+	});
+
+	test('ends the native Windows drag from the physical left mouse state', () => {
+		const source = fs.readFileSync(path.resolve(process.cwd(), 'resources/turbofile/drag-ext/TurboFileDragSource.cpp'), 'utf8');
+		const queryContinueDrag = source.slice(source.indexOf('QueryContinueDrag'), source.indexOf('GiveFeedback'));
+		const beforeDoDragDrop = source.slice(source.indexOf('DWORD effect'), source.indexOf('DoDragDrop'));
+
+		assert.ok(queryContinueDrag.includes('GetAsyncKeyState(VK_LBUTTON)'));
+		assert.ok(beforeDoDragDrop.includes('GetAsyncKeyState(VK_LBUTTON)'));
+	});
+
 	test('starts local folder and batch copies without recursive size discovery', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transferFile = methodBlock(service, 'async transferFile', 'async transferBatch');

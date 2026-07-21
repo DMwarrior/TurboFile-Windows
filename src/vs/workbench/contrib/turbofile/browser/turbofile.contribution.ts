@@ -124,7 +124,7 @@ function createTurboFileTransferEditorInput(instantiationService: IInstantiation
 		static override readonly ID = editorPaneId;
 	}
 
-	const editorPaneRegistration = Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 		EditorPaneDescriptor.create(
 			TurboFileTransferEditor,
 			TurboFileTransferEditor.ID,
@@ -135,9 +135,7 @@ function createTurboFileTransferEditorInput(instantiationService: IInstantiation
 		]
 	);
 
-	const input = instantiationService.createInstance(TurboFileTransferEditorInput, instanceId, ordinal, editorPaneId);
-	input.setEditorPaneRegistration(editorPaneRegistration);
-	return input;
+	return instantiationService.createInstance(TurboFileTransferEditorInput, instanceId, ordinal, editorPaneId);
 }
 
 function getActiveTurboFileEditorInput(editorService: IEditorService): TurboFileEditorInput | undefined {

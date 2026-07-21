@@ -48,7 +48,7 @@ if (!$DragSourceOnly) {
 	}
 }
 
-$dragSourceCommand = "`"$vcvars`" -arch=x64 -host_arch=x64 >nul && cl.exe /nologo /EHsc $optimization /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN `"$dragSource`" /Fe:`"$exe`" /Fo:`"$dragSourceObj`" /link /NOLOGO /SUBSYSTEM:WINDOWS shell32.lib ole32.lib uuid.lib"
+$dragSourceCommand = "`"$vcvars`" -arch=x64 -host_arch=x64 >nul && cl.exe /nologo /EHsc $optimization /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN `"$dragSource`" /Fe:`"$exe`" /Fo:`"$dragSourceObj`" /link /NOLOGO /SUBSYSTEM:WINDOWS shell32.lib ole32.lib user32.lib uuid.lib"
 cmd.exe /d /s /c $dragSourceCommand
 if ($LASTEXITCODE -ne 0) {
 	throw "TurboFile drag source helper build failed with exit code $LASTEXITCODE."
