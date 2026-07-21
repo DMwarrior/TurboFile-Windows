@@ -58,6 +58,7 @@ import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceSto
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
+import { createTurboFileCopyNames } from '../common/turbofileCopyName.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileRowDragEffectAllowed, shouldHandleTurboFilePaneDropAtPage } from '../common/turbofileDragDrop.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
@@ -8540,6 +8541,24 @@ export class TurboFileEditor extends EditorPane {
 		await this.pasteWindowsClipboardFiles(targetSide);
 	}
 
+	private createSameDirectoryCopyItems(clipboard: TurboFileInternalTransferClipboard, targetSide: 'left' | 'right', targetDevice: TurboFileDevice): TurboFileFileItem[] {
+		const sourceItems = clipboard.items.map(item => ({ ...item }));
+		const targetState = this.paneStates[targetSide];
+		const windowsPath = this.isWindowsDevice(targetDevice);
+		if (clipboard.operation !== 'copy'
+			|| !this.isSameDeviceForNativeOperation(clipboard.sourceDevice, targetDevice)
+			|| !this.pathsEqualForDevice(clipboard.sourcePath, targetState.path, windowsPath)) {
+			return sourceItems;
+		}
+
+		const targetNames = createTurboFileCopyNames(
+			sourceItems.map(item => ({ name: item.name, directory: !!item.directory })),
+			targetState.items.filter(item => !item.parent).map(item => item.name),
+			!windowsPath
+		);
+		return sourceItems.map((item, index) => ({ ...item, name: targetNames[index] }));
+	}
+
 	private async pasteInternalTransferClipboard(targetSide: 'left' | 'right'): Promise<boolean> {
 		const clipboard = this.internalTransferClipboard;
 		const targetDevice = this.getPaneDevice(targetSide);
@@ -8550,7 +8569,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const sourceDevice = clipboard.sourceDevice;
-		const sourceItems = clipboard.items.map(item => ({ ...item }));
+		const sourceItems = this.createSameDirectoryCopyItems(clipboard, targetSide, targetDevice);
 		if (sourceItems.length > 1) {
 			const transferred = await this.transferItemsBatch(clipboard.sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, clipboard.operation);
 			if (transferred && clipboard.operation === 'move') {
