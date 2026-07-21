@@ -241,13 +241,46 @@ suite('TurboFileSshMainServiceStatic', () => {
 	test('uses the 1.148 Electron fake-directory drag for captured Windows targets', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const capturedDrag = methodBlock(service, 'private async startCapturedWindowsFileDrag', 'private getWindowsDragCopyHookPaths');
+		const completion = methodBlock(service, 'async completeWindowsFileDrag', 'private async startCapturedWindowsFileDrag');
 
 		assert.ok(capturedDrag.includes('window.webContents.startDrag({'));
 		assert.ok(capturedDrag.includes('file: paths.fakeDirectory'));
 		assert.ok(capturedDrag.includes('files: [paths.fakeDirectory]'));
-		assert.ok(capturedDrag.includes('waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName)'));
+		assert.ok(capturedDrag.includes('const token = request.sessionId'));
+		assert.ok(capturedDrag.includes('waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName, token)'));
+		assert.ok(completion.includes('this.activeWindowsDragSessions.has(sessionId)'));
+		assert.ok(completion.includes('this.completedInternalWindowsDrags.add(sessionId)'));
 		assert.ok(!capturedDrag.includes('startWindowsDragSourceHelper'));
 		assert.ok(!capturedDrag.includes('cancelChromiumWindowsDrag'));
+	});
+
+	test('settles every native Windows drag session without a long post-drop wait', () => {
+		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const startDrag = methodBlock(service, 'async startWindowsFileDrag', 'async completeWindowsFileDrag');
+		const waitForTarget = methodBlock(service, 'private async waitForWindowsDragCopyHookTarget', 'async getLocalDesktopPath');
+
+		assert.deepStrictEqual({
+			contractSessionId: contract.includes('readonly sessionId: string;'),
+			completionApi: contract.includes('completeWindowsFileDrag(sessionId: string): Promise<void>;'),
+			internalResult: contract.includes('readonly internal?: boolean;'),
+			validatesToken: startDrag.includes('isValidWindowsDragToken(request.sessionId)'),
+			rejectsDuplicate: startDrag.includes('this.activeWindowsDragSessions.has(request.sessionId)'),
+			registersSession: startDrag.includes('this.activeWindowsDragSessions.add(request.sessionId)'),
+			shortSettle: service.includes('const WINDOWS_DRAG_TARGET_SETTLE_MS = 2000;'),
+			internalFirst: waitForTarget.indexOf('this.completedInternalWindowsDrags.has(sessionId)') < waitForTarget.indexOf('fsp.readFile(targetFile'),
+			cleanup: service.includes('this.completedInternalWindowsDrags.delete(request.sessionId);') && service.includes('this.activeWindowsDragSessions.delete(request.sessionId);')
+		}, {
+			contractSessionId: true,
+			completionApi: true,
+			internalResult: true,
+			validatesToken: true,
+			rejectsDuplicate: true,
+			registersSession: true,
+			shortSettle: true,
+			internalFirst: true,
+			cleanup: true
+		});
 	});
 
 	test('starts local folder and batch copies without recursive size discovery', () => {

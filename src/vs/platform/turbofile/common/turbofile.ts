@@ -64,6 +64,7 @@ export interface ITurboFileSshService {
 	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
+	completeWindowsFileDrag(sessionId: string): Promise<void>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
 	/**
@@ -298,6 +299,7 @@ export interface ITurboFileWindowsDragItem {
 }
 
 export interface ITurboFileStartWindowsDragRequest {
+	readonly sessionId: string;
 	readonly source: ITurboFileTransferEndpoint;
 	readonly items: readonly ITurboFileWindowsDragItem[];
 	readonly operation?: 'copy' | 'move';
@@ -315,6 +317,7 @@ export interface ITurboFileImageMetadataEntry {
 export interface ITurboFileStartWindowsDragResult extends ITurboFileFileOperationResult {
 	readonly targetDirectory?: string;
 	readonly canceled?: boolean;
+	readonly internal?: boolean;
 }
 
 export interface ITurboFileTransferResult {

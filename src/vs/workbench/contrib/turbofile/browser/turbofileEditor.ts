@@ -16,6 +16,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
 import { joinPath } from '../../../../base/common/resources.js';
 import { IAction, Separator, toAction } from '../../../../base/common/actions.js';
 import { localize } from '../../../../nls.js';
@@ -63,6 +64,7 @@ import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { createTurboFileCopyNames } from '../common/turbofileCopyName.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage, TurboFileDragOperation } from '../common/turbofileDragDrop.js';
+import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
 import { createTurboFilePostTransferRefreshPlan } from '../common/turbofileTransferRefresh.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
@@ -805,9 +807,7 @@ export class TurboFileEditor extends EditorPane {
 	private pendingAppearanceMode: 'light' | 'dark' | undefined;
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
-	private currentFileDragSide: 'left' | 'right' | undefined;
-	private currentFileDragOperation: TurboFileDragOperation | undefined;
-	private hasStartedNativeWindowsDrag = false;
+	private nativeDragSession: TurboFileNativeDragSession<TurboFileFileItem> | undefined;
 	private maximizedPane: 'left' | 'right' | undefined;
 	private internalTransferClipboard: TurboFileInternalTransferClipboard | undefined;
 	private inlineRename: TurboFileInlineRenameState | undefined;
@@ -1215,6 +1215,7 @@ export class TurboFileEditor extends EditorPane {
 		return this.isEditorVisible
 			&& (this.activePage === 'transfer' || this.activePage === 'images')
 			&& !this.dialogState && !this.isDeviceFormVisible && !this.isTaskLogVisible
+			&& !this.nativeDragSession
 			&& !this.getTurboFileDragSourceSide(event)
 			&& this.hasExternalDropData(event);
 	}
@@ -1571,14 +1572,9 @@ export class TurboFileEditor extends EditorPane {
 		this.activeFilePaneSide = side;
 	}
 
-	/**
-	 * Resets the drag-state flags after an internal pane drag finishes (drop or dragend) or after
-	 * we've handed control over to the Windows native drag pipeline. Safe to call multiple times.
-	 */
+	/** Clears the current native drag session and every transient target highlight. */
 	private clearCurrentFileDragState(): void {
-		this.currentFileDragSide = undefined;
-		this.currentFileDragOperation = undefined;
-		this.hasStartedNativeWindowsDrag = false;
+		this.nativeDragSession = undefined;
 		this.setExternalDropTargetSide(undefined);
 		this.clearInternalDropTargetHighlight();
 	}
@@ -1613,11 +1609,118 @@ export class TurboFileEditor extends EditorPane {
 		state.retainedPaneRoot = undefined;
 	}
 
+	private recordNativeInternalDrop(target: TurboFileNativeDragTarget): boolean {
+		const session = this.nativeDragSession;
+		if (!session || session.state !== 'dragging') {
+			return false;
+		}
+
+		const dropped = dropTurboFileNativeDragSessionInternally(session, target);
+		if (dropped === session) {
+			return false;
+		}
+		this.nativeDragSession = dropped;
+		void this.sshService.completeWindowsFileDrag(session.id);
+		return true;
+	}
+
+	private executeNativeInternalDrop(session: TurboFileNativeDragSession<TurboFileFileItem>): void {
+		const target = session.internalTarget;
+		if (!target) {
+			return;
+		}
+		if (target.kind === 'directory') {
+			void this.moveSelectedItemsIntoDirectory(target.side, target.path, target.label, session.items);
+			return;
+		}
+		if (session.sourceSide !== target.side) {
+			void this.transferSelected(session.sourceSide, target.side, target.initiatedAt, session.operation, session.items);
+		}
+	}
+
+	private beginNativeFileDrag(side: 'left' | 'right', event: DragEvent): void {
+		if (!event.dataTransfer || this.nativeDragSession?.state === 'dragging') {
+			return;
+		}
+
+		const items = this.getSelectedTransferItems(side)
+			.filter(item => !!item.path && !item.parent)
+			.map(item => ({ ...item }));
+		if (!items.length) {
+			return;
+		}
+
+		event.preventDefault();
+		const operation = this.getCurrentDragOperation(side);
+		const session = startTurboFileNativeDragSession(createTurboFileNativeDragSession(generateUuid(), side, operation, items));
+		this.nativeDragSession = session;
+		void this.runNativeFileDrag(session);
+	}
+
+	private async runNativeFileDrag(session: TurboFileNativeDragSession<TurboFileFileItem>): Promise<void> {
+		const device = this.getPaneDevice(session.sourceSide);
+		if (!device) {
+			this.clearCurrentFileDragState();
+			return;
+		}
+
+		const dragItems: ITurboFileWindowsDragItem[] = session.items
+			.filter((item): item is TurboFileFileItem & { path: string } => !!item.path && !item.parent)
+			.map(item => ({
+				sourcePath: item.path,
+				name: item.name,
+				type: item.type,
+				size: item.directory ? undefined : item.rawSize
+			}));
+		if (!dragItems.length) {
+			this.clearCurrentFileDragState();
+			return;
+		}
+
+		try {
+			const result = await this.sshService.startWindowsFileDrag({
+				sessionId: session.id,
+				source: await this.toTransferEndpoint(device, this.paneStates[session.sourceSide].path),
+				items: dragItems,
+				operation: session.operation
+			});
+			const current = this.nativeDragSession?.id === session.id ? this.nativeDragSession : undefined;
+			if (!current) {
+				return;
+			}
+
+			if (current.internalTarget) {
+				const completed = settleTurboFileNativeDragSession(current, 'completed');
+				this.clearCurrentFileDragState();
+				this.deferAfterDrag(() => this.executeNativeInternalDrop(completed));
+				return;
+			}
+
+			this.nativeDragSession = settleTurboFileNativeDragSession(current, result.ok ? 'completed' : result.canceled ? 'canceled' : 'failed');
+			this.clearCurrentFileDragState();
+			if (result.ok && result.targetDirectory) {
+				this.deferAfterDrag(() => void this.transferItemsToWindowsDirectory(session.sourceSide, device, session.items, result.targetDirectory!, Date.now(), session.operation));
+				return;
+			}
+			if (!result.ok && !result.canceled) {
+				this.statusMessage = `拖到 Windows 失败：${result.message}`;
+				this.render();
+			}
+		} catch (error) {
+			if (this.nativeDragSession?.id !== session.id) {
+				return;
+			}
+			this.nativeDragSession = settleTurboFileNativeDragSession(this.nativeDragSession, 'failed');
+			this.clearCurrentFileDragState();
+			const message = error instanceof Error ? error.message : String(error);
+			this.statusMessage = `拖到 Windows 失败：${message}`;
+			this.render();
+		}
+	}
+
 	/**
-	 * dragstart handler for a file-list row. Marks the drag as TurboFile-originated (so internal
-	 * drop handlers can detect it via the side data) and remembers the source side so a later
-	 * dragleave from the window can hand off to the Windows native drag pipeline. Same-pane folder
-	 * row drops move items, while pane-to-pane and external drops keep the existing copy behavior.
+	 * Starts one native drag session for a file-list row. Same-pane folder row drops move items,
+	 * while pane-to-pane and external drops keep the snapshotted copy/cut behavior.
 	 *
 	 * Selection rule: if the dragged row is part of the current multi-selection, drag the whole
 	 * selection; otherwise drag just that single row (without disturbing the previous selection
@@ -1637,10 +1740,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.setActiveFilePaneSide(side);
-		this.currentFileDragSide = side;
-		this.hasStartedNativeWindowsDrag = false;
 		const operation = this.getCurrentDragOperation(side);
-		this.currentFileDragOperation = operation;
 
 		event.dataTransfer.effectAllowed = getTurboFileRowDragEffectAllowed();
 		event.dataTransfer.setData('application/x-turbofile-side', side);
@@ -1649,157 +1749,7 @@ export class TurboFileEditor extends EditorPane {
 		const items = this.getSelectedTransferItems(side);
 		const labels = items.length ? items.map(i => i.name) : [item.name];
 		event.dataTransfer.setData('text/plain', labels.join('\n'));
-
-		// Keep the browser drag alive for pane-to-pane drops. If the pointer leaves the window,
-		// dragleave/drag will hand local Windows files to the native drag pipeline.
-		this.tryStartImmediateLocalWindowsDrag(side, event, operation);
-	}
-
-	private tryStartImmediateLocalWindowsDrag(side: 'left' | 'right', event: DragEvent, operation: TurboFileDragOperation): void {
-		if (!event.altKey || operation !== 'copy') {
-			return;
-		}
-		const device = this.getPaneDevice(side);
-		if (device?.id !== LOCAL_WINDOWS_DEVICE_ID) {
-			return;
-		}
-
-		const dragItems: ITurboFileWindowsDragItem[] = this.getSelectedTransferItems(side)
-			.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent)
-			.map(candidate => ({
-				sourcePath: candidate.path,
-				name: candidate.name,
-				type: candidate.type,
-				size: candidate.directory ? undefined : candidate.rawSize
-			}));
-		if (!dragItems.length) {
-			return;
-		}
-
-		event.preventDefault();
-		this.hasStartedNativeWindowsDrag = true;
-		void this.sshService.startWindowsFileDrag({
-			source: {
-				kind: 'local',
-				path: this.paneStates[side].path,
-				label: device.name
-			},
-			items: dragItems,
-			operation
-		}).then(result => {
-			if (!result.ok) {
-				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
-				this.render();
-			}
-		}).catch(error => {
-			const message = error instanceof Error ? error.message : String(error);
-			this.statusMessage = `拖出到 Windows 失败：${message}`;
-			this.render();
-		});
-	}
-
-	/**
-	 * Called when the user drags a TurboFile file-row out of the window. Local files are handed to
-	 * Windows directly; remote files first capture Explorer/Desktop's real drop directory through
-	 * the native CopyHook helper, then use the normal transfer pipeline to download there.
-	 */
-	private async startWindowsFileDragFromPane(side: 'left' | 'right', operation: TurboFileDragOperation = this.currentFileDragOperation ?? this.getCurrentDragOperation(side)): Promise<void> {
-		const device = this.getPaneDevice(side);
-		if (!device) {
-			return;
-		}
-
-		if (device.id !== LOCAL_WINDOWS_DEVICE_ID || operation === 'move') {
-			try {
-				const sourceItems = this.getSelectedTransferItems(side)
-					.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent);
-				const dragItems: ITurboFileWindowsDragItem[] = sourceItems
-					.map(candidate => ({
-						sourcePath: candidate.path,
-						name: candidate.name,
-						type: candidate.type,
-						size: candidate.directory ? undefined : candidate.rawSize
-					}));
-				if (!dragItems.length) {
-					return;
-				}
-				this.statusMessage = '拖到 Windows 后将开始下载...';
-				this.render();
-				const result = await this.sshService.startWindowsFileDrag({
-					source: await this.toTransferEndpoint(device, this.paneStates[side].path),
-					items: dragItems,
-					operation
-				});
-				if (!result.ok) {
-					this.statusMessage = result.canceled ? '已取消拖到 Windows。' : `拖到 Windows 失败：${result.message}`;
-					this.render();
-					return;
-				}
-				if (!result.targetDirectory) {
-					this.statusMessage = '拖到 Windows 失败：没有捕获到目标目录。';
-					this.render();
-					return;
-				}
-				await this.transferItemsToWindowsDirectory(side, device, sourceItems, result.targetDirectory, Date.now(), operation);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				this.statusMessage = `拖到 Windows 失败：${message}`;
-				this.render();
-			}
-			return;
-		}
-
-		// Defensive fallback for a local drag that didn't start natively at dragstart: start the
-		// native drag now with the real Windows paths (no staging, no transfer task).
-		try {
-			const dragItems: ITurboFileWindowsDragItem[] = this.getSelectedTransferItems(side)
-				.filter((candidate): candidate is TurboFileFileItem & { path: string } => !!candidate.path && !candidate.parent)
-				.map(candidate => ({
-					sourcePath: candidate.path,
-					name: candidate.name,
-					type: candidate.type,
-					size: candidate.directory ? undefined : candidate.rawSize
-				}));
-			if (!dragItems.length) {
-				return;
-			}
-			const result = await this.sshService.startWindowsFileDrag({
-				source: { kind: 'local', path: this.paneStates[side].path, label: device.name },
-				items: dragItems,
-				operation
-			});
-			if (!result.ok) {
-				this.statusMessage = `拖出到 Windows 失败：${result.message}`;
-				this.render();
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.statusMessage = `拖出到 Windows 失败：${message}`;
-			this.render();
-		}
-	}
-
-	private maybeStartWindowsFileDragFromPointer(side: 'left' | 'right', event: DragEvent): void {
-		if (this.currentFileDragSide !== side || this.hasStartedNativeWindowsDrag) {
-			return;
-		}
-
-		if (event.clientX === 0 && event.clientY === 0 && event.screenX === 0 && event.screenY === 0) {
-			return;
-		}
-
-		const ownerWindow = getWindow(this.container);
-		const outsideWindow = event.clientX <= 0
-			|| event.clientY <= 0
-			|| event.clientX >= ownerWindow.innerWidth - 1
-			|| event.clientY >= ownerWindow.innerHeight - 1;
-		if (!outsideWindow) {
-			return;
-		}
-
-		this.hasStartedNativeWindowsDrag = true;
-		const operation = this.currentFileDragOperation ?? this.getCurrentDragOperation(side);
-		void this.startWindowsFileDragFromPane(side, operation);
+		this.beginNativeFileDrag(side, event);
 	}
 
 	private renderTransferPage(): HTMLElement {
@@ -1829,17 +1779,14 @@ export class TurboFileEditor extends EditorPane {
 		const handleDragEnter = (event: DragEvent) => this.handleTransferPageDragOver(event);
 		const handleDragOver = (event: DragEvent) => this.handleTransferPageDragOver(event);
 		const handleDrop = (event: DragEvent) => this.handleTransferPageDrop(event);
-		const handleDragLeave = (event: DragEvent) => this.handleTransferPageDragLeave(event);
 		page.addEventListener('dragenter', handleDragEnter, true);
 		page.addEventListener('dragover', handleDragOver, true);
 		page.addEventListener('drop', handleDrop, true);
-		page.addEventListener('dragleave', handleDragLeave, true);
 		this.renderDisposables.add({
 			dispose: () => {
 				page.removeEventListener('dragenter', handleDragEnter, true);
 				page.removeEventListener('dragover', handleDragOver, true);
 				page.removeEventListener('drop', handleDrop, true);
-				page.removeEventListener('dragleave', handleDragLeave, true);
 			}
 		});
 	}
@@ -1853,7 +1800,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const targetSide = this.getTransferDropTargetSide(event);
-		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.currentFileDragSide;
+		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 		if (!shouldHandleTurboFilePaneDropAtPage(sourceSide, targetSide)) {
 			this.setExternalDropTargetSide(undefined);
 			return;
@@ -1876,7 +1823,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const initiatedAt = Date.now();
 		const targetSide = this.getTransferDropTargetSide(event);
-		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.currentFileDragSide;
+		const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 		const operation = this.getDragOperationFromEvent(event, sourceSide ?? targetSide);
 		if (!shouldHandleTurboFilePaneDropAtPage(sourceSide, targetSide)) {
 			this.setExternalDropTargetSide(undefined);
@@ -1884,10 +1831,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.consumeTurboFileDropEvent(event);
 		this.setExternalDropTargetSide(undefined);
-		if (sourceSide) {
-			this.clearCurrentFileDragState();
+		if (this.nativeDragSession && sourceSide) {
 			if (sourceSide !== targetSide) {
-				this.deferAfterDrag(() => void this.transferSelected(sourceSide, targetSide, initiatedAt, operation));
+				this.recordNativeInternalDrop({ kind: 'pane', side: targetSide, initiatedAt });
 			}
 			return;
 		}
@@ -1909,21 +1855,8 @@ export class TurboFileEditor extends EditorPane {
 		return !!target?.closest('.turbofile-file-list, .turbofile-image-page-body');
 	}
 
-	private handleTransferPageDragLeave(event: DragEvent): void {
-		const relatedTarget = event.relatedTarget;
-		if (relatedTarget instanceof Node && event.currentTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
-			return;
-		}
-
-		this.setExternalDropTargetSide(undefined);
-		if (this.currentFileDragSide && !this.hasStartedNativeWindowsDrag) {
-			this.hasStartedNativeWindowsDrag = true;
-			void this.startWindowsFileDragFromPane(this.currentFileDragSide, this.currentFileDragOperation ?? this.getCurrentDragOperation(this.currentFileDragSide));
-		}
-	}
-
 	private isTransferPageFileDrag(event: DragEvent): boolean {
-		return !!this.getTurboFileDragSourceSide(event) || this.hasExternalDropData(event);
+		return !!this.nativeDragSession || !!this.getTurboFileDragSourceSide(event) || this.hasExternalDropData(event);
 	}
 
 	private getTransferDropTargetSide(event: DragEvent): 'left' | 'right' {
@@ -3404,7 +3337,7 @@ export class TurboFileEditor extends EditorPane {
 			if (isTurboFileTrashRootView(state.trashMode)) {
 				return;
 			}
-			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
+			const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 			if (sourceSide && sourceSide !== side) {
 				this.consumeTurboFileDropEvent(event);
 				if (event.dataTransfer) {
@@ -3439,11 +3372,12 @@ export class TurboFileEditor extends EditorPane {
 			const initiatedAt = Date.now();
 			this.consumeTurboFileDropEvent(event);
 			this.setExternalDropTargetSide(undefined);
-			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
+			const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 			const operation = this.getDragOperationFromEvent(event, sourceSide || side);
-			if (sourceSide && sourceSide !== side) {
-				this.clearCurrentFileDragState();
-				this.deferAfterDrag(() => void this.transferSelected(sourceSide, side, initiatedAt, operation));
+			if (this.nativeDragSession && sourceSide) {
+				if (sourceSide !== side) {
+					this.recordNativeInternalDrop({ kind: 'pane', side, initiatedAt });
+				}
 				return;
 			}
 
@@ -4229,12 +4163,6 @@ export class TurboFileEditor extends EditorPane {
 			row.addEventListener('dragstart', event => {
 				this.beginFileRowDrag(side, item, event);
 			});
-			row.addEventListener('drag', event => {
-				this.maybeStartWindowsFileDragFromPointer(side, event);
-			});
-			row.addEventListener('dragend', () => {
-				this.clearCurrentFileDragState();
-			});
 		}
 		row.addEventListener('click', event => {
 			this.setActiveFilePaneSide(side);
@@ -4258,7 +4186,8 @@ export class TurboFileEditor extends EditorPane {
 			// into that directory, like Windows Explorer / TurboFile-web.
 			const dropTargetPath = item.path;
 			row.addEventListener('dragover', event => {
-				if (this.currentFileDragSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath)) {
+				const session = this.nativeDragSession;
+				if (session?.sourceSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath, session.items)) {
 					return;
 				}
 				event.preventDefault();
@@ -4276,15 +4205,15 @@ export class TurboFileEditor extends EditorPane {
 				row.classList.remove('is-internal-drop-target');
 			});
 			row.addEventListener('drop', event => {
-				if (this.currentFileDragSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath)) {
+				const session = this.nativeDragSession;
+				if (session?.sourceSide !== side || !this.canMoveSelectionIntoDirectory(side, item, dropTargetPath, session.items)) {
 					return;
 				}
 				event.preventDefault();
 				event.stopPropagation();
 				row.classList.remove('is-internal-drop-target');
 				const targetLabel = item.parent ? '上一级目录' : item.name;
-				this.clearCurrentFileDragState();
-				this.deferAfterDrag(() => void this.moveSelectedItemsIntoDirectory(side, dropTargetPath, targetLabel));
+				this.recordNativeInternalDrop({ kind: 'directory', side, path: dropTargetPath, label: targetLabel, initiatedAt: Date.now() });
 			});
 		}
 		row.addEventListener('dblclick', () => {
@@ -6150,7 +6079,6 @@ export class TurboFileEditor extends EditorPane {
 			this.selectImageGridItemWithPointer(index, event);
 		});
 		card.addEventListener('dragstart', event => this.beginImageGridCardDrag(state, index, event));
-		card.addEventListener('dragend', () => this.clearCurrentFileDragState());
 		card.addEventListener('contextmenu', event => {
 			this.setActiveImageGridState(state);
 			this.selectImageGridItemWithContextMenu(index, event);
@@ -6191,16 +6119,13 @@ export class TurboFileEditor extends EditorPane {
 
 		this.syncImageGridSelectionToPane(state);
 		this.setActiveFilePaneSide(state.side);
-		this.currentFileDragSide = state.side;
-		this.hasStartedNativeWindowsDrag = false;
 		const operation = this.getCurrentDragOperation(state.side);
-		this.currentFileDragOperation = operation;
 
 		event.dataTransfer.effectAllowed = getTurboFileRowDragEffectAllowed();
 		event.dataTransfer.setData('application/x-turbofile-side', state.side);
 		event.dataTransfer.setData('application/x-turbofile-operation', operation);
 		event.dataTransfer.setData('text/plain', this.getImageGridTransferItems(state).map(item => item.name).join('\n'));
-		this.tryStartImmediateLocalWindowsDrag(state.side, event, operation);
+		this.beginNativeFileDrag(state.side, event);
 	}
 
 	private copyImageGridSelectionToInternalClipboard(state: TurboFileImageGridState, operation: 'copy' | 'move'): void {
@@ -6241,7 +6166,7 @@ export class TurboFileEditor extends EditorPane {
 	private registerImageGridDropTarget(body: HTMLElement, state: TurboFileImageGridState): void {
 		body.classList.toggle('is-external-drop-target', this.externalDropTargetSide === state.side);
 		body.addEventListener('dragover', event => {
-			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
+			const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 			if (sourceSide && sourceSide !== state.side) {
 				this.consumeTurboFileDropEvent(event);
 				if (event.dataTransfer) {
@@ -6271,14 +6196,12 @@ export class TurboFileEditor extends EditorPane {
 			const initiatedAt = Date.now();
 			this.consumeTurboFileDropEvent(event);
 			this.setExternalDropTargetSide(undefined);
-			const sourceSide = event.dataTransfer?.getData('application/x-turbofile-side') as 'left' | 'right' | '';
+			const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 			const operation = this.getDragOperationFromEvent(event, sourceSide || state.side);
-			if (sourceSide && sourceSide !== state.side) {
-				this.clearCurrentFileDragState();
-				this.deferAfterDrag(() => {
-					void this.transferSelected(sourceSide, state.side, initiatedAt, operation);
-					this.clearCurrentFileDragState();
-				});
+			if (this.nativeDragSession && sourceSide) {
+				if (sourceSide !== state.side) {
+					this.recordNativeInternalDrop({ kind: 'pane', side: state.side, initiatedAt });
+				}
 				return;
 			}
 			const externalPaths = this.extractExternalDropPaths(event);
@@ -7575,7 +7498,8 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getDragOperationFromEvent(event: DragEvent, fallbackSide: 'left' | 'right'): TurboFileDragOperation {
-		return resolveTurboFileDragOperation(event.dataTransfer?.getData('application/x-turbofile-operation'), this.getCurrentDragOperation(fallbackSide));
+		const fallback = this.nativeDragSession?.operation ?? this.getCurrentDragOperation(fallbackSide);
+		return resolveTurboFileDragOperation(event.dataTransfer?.getData('application/x-turbofile-operation'), fallback);
 	}
 
 	private appendDragOperationButton(parent: HTMLElement, side: 'left' | 'right'): void {
@@ -9098,13 +9022,13 @@ export class TurboFileEditor extends EditorPane {
 	 * skips items already living in that directory (no-op) and folders that would be moved into
 	 * themselves or a descendant.
 	 */
-	private getDirectoryMoveTargets(side: 'left' | 'right', targetDir: string): TurboFileFileItem[] {
+	private getDirectoryMoveTargets(side: 'left' | 'right', targetDir: string, sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined): TurboFileFileItem[] {
 		const device = this.getPaneDevice(side);
 		if (!device || !targetDir) {
 			return [];
 		}
 		const windowsPath = this.isWindowsDevice(device);
-		return this.getSelectedTransferItems(side).filter(item => {
+		return (sourceItemsOverride ?? this.getSelectedTransferItems(side)).filter(item => {
 			if (!item.path || item.parent) {
 				return false;
 			}
@@ -9119,23 +9043,23 @@ export class TurboFileEditor extends EditorPane {
 		});
 	}
 
-	private canMoveSelectionIntoDirectory(side: 'left' | 'right', targetItem: TurboFileFileItem, targetDir: string): boolean {
+	private canMoveSelectionIntoDirectory(side: 'left' | 'right', targetItem: TurboFileFileItem, targetDir: string, sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined): boolean {
 		if (!targetItem.directory && !targetItem.parent) {
 			return false;
 		}
-		return this.getDirectoryMoveTargets(side, targetDir).length > 0;
+		return this.getDirectoryMoveTargets(side, targetDir, sourceItemsOverride).length > 0;
 	}
 
 	/**
 	 * Moves the current same-pane selection into `targetDir` using a native same-device rename, the
 	 * same primitive used by cut/paste. Powers dragging rows onto a folder or the ".." row.
 	 */
-	private async moveSelectedItemsIntoDirectory(side: 'left' | 'right', targetDir: string, targetLabel: string): Promise<void> {
+	private async moveSelectedItemsIntoDirectory(side: 'left' | 'right', targetDir: string, targetLabel: string, sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined): Promise<void> {
 		const device = this.getPaneDevice(side);
 		if (!device) {
 			return;
 		}
-		const sourceItems = this.getDirectoryMoveTargets(side, targetDir);
+		const sourceItems = this.getDirectoryMoveTargets(side, targetDir, sourceItemsOverride);
 		if (!sourceItems.length) {
 			return;
 		}
@@ -9641,11 +9565,11 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async transferSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', initiatedAt?: number, operation: TurboFileDragOperation = 'copy'): Promise<boolean> {
+	private async transferSelected(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', initiatedAt?: number, operation: TurboFileDragOperation = 'copy', sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined): Promise<boolean> {
 		this.taskbarHiddenForTerminal = false;
 		const sourceDevice = this.getPaneDevice(sourceSide);
 		const targetDevice = this.getPaneDevice(targetSide);
-		const sourceItems = this.getSelectedTransferItems(sourceSide);
+		const sourceItems = sourceItemsOverride ? [...sourceItemsOverride] : this.getSelectedTransferItems(sourceSide);
 
 		if (!sourceDevice || !targetDevice || !sourceItems.length) {
 			this.statusMessage = '请先在来源面板选择一个或多个文件/目录。';

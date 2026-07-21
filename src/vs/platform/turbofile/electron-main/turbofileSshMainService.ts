@@ -32,7 +32,7 @@ import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
-import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
+import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
 const DEFAULT_READ_LIMIT = 10 * 1024 * 1024;
@@ -72,7 +72,7 @@ const IMAGE_THUMBNAIL_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const TURBOFILE_IMAGE_RESOURCE_SCHEME = 'turbofile-image';
 const IMAGE_RESOURCE_TTL_MS = 10 * 60 * 1000;
 const IMAGE_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 1000;
-const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
+const WINDOWS_DRAG_TARGET_SETTLE_MS = 2000;
 const WINDOWS_DRAG_COPY_HOOK_POLL_MS = 50;
 const TURBOFILE_WINDOWS_DRAG_COPY_HOOK_CLSID = '{D650A1FA-43C6-4B8F-8C83-80B028353F64}';
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
@@ -486,6 +486,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly imageResourceDescriptors = new Map<string, ITurboFileImageResourceDescriptor>();
 	private imageResourceCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	private windowsDragCopyHookRegistrationPromise: Promise<void> | undefined;
+	private readonly activeWindowsDragSessions = new Set<string>();
+	private readonly completedInternalWindowsDrags = new Set<string>();
 	// Caps concurrent SSH image reads. The image grid renders cards as <img src="turbofile-image://">,
 	// and Chromium fetches every visible card at once — dozens of simultaneous `client.exec` calls on
 	// one SSH connection blow past the server's MaxSessions limit and every command fails with
@@ -4663,52 +4665,73 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (platform() !== 'win32') {
 			return { ok: false, message: 'Windows file drag is only supported on Windows.' };
 		}
-
-		const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && !candidate.webContents.isDestroyed());
-		if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
-			return { ok: false, message: 'No TurboFile window is available for Windows drag.' };
+		if (!isValidWindowsDragToken(request.sessionId)) {
+			return { ok: false, message: 'Invalid Windows drag session.' };
 		}
-
-		const operation = request.operation ?? 'copy';
-		if (request.source.kind !== 'local' && request.source.kind !== 'ssh') {
-			return { ok: false, message: 'Unsupported Windows drag source.' };
+		if (this.activeWindowsDragSessions.has(request.sessionId)) {
+			return { ok: false, message: 'Windows drag session is already active.' };
 		}
-		const useDirectLocalDrag = request.source.kind === 'local' && operation === 'copy';
-		if (!useDirectLocalDrag) {
-			return this.startCapturedWindowsFileDrag(request, window);
-		}
-
-		const files = request.items
-			.map(item => item.sourcePath)
-			.filter(path => isWindowsClipboardPath(path));
-		if (!files.length) {
-			return { ok: false, message: 'No local Windows files are available to drag.' };
-		}
+		this.activeWindowsDragSessions.add(request.sessionId);
 
 		try {
-			window.webContents.startDrag({
-				file: files[0],
-				files,
-				icon: createWindowsDragIcon()
-			});
-			return { ok: true, message: 'Windows file drag started.' };
-		} catch (error) {
-			return {
-				ok: false,
-				message: error instanceof Error ? error.message : String(error)
-			};
+			const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && !candidate.webContents.isDestroyed());
+			if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
+				return { ok: false, message: 'No TurboFile window is available for Windows drag.' };
+			}
+
+			const operation = request.operation ?? 'copy';
+			if (request.source.kind !== 'local' && request.source.kind !== 'ssh') {
+				return { ok: false, message: 'Unsupported Windows drag source.' };
+			}
+			const useDirectLocalDrag = request.source.kind === 'local' && operation === 'copy';
+			if (!useDirectLocalDrag) {
+				return this.startCapturedWindowsFileDrag(request, window);
+			}
+
+			const files = request.items
+				.map(item => item.sourcePath)
+				.filter(path => isWindowsClipboardPath(path));
+			if (!files.length) {
+				return { ok: false, message: 'No local Windows files are available to drag.' };
+			}
+
+			try {
+				window.webContents.startDrag({
+					file: files[0],
+					files,
+					icon: createWindowsDragIcon()
+				});
+				return { ok: true, message: 'Windows file drag started.' };
+			} catch (error) {
+				return {
+					ok: false,
+					message: error instanceof Error ? error.message : String(error)
+				};
+			}
+		} finally {
+			this.completedInternalWindowsDrags.delete(request.sessionId);
+			this.activeWindowsDragSessions.delete(request.sessionId);
+		}
+	}
+
+	async completeWindowsFileDrag(sessionId: string): Promise<void> {
+		if (this.activeWindowsDragSessions.has(sessionId)) {
+			this.completedInternalWindowsDrags.add(sessionId);
 		}
 	}
 
 	private async startCapturedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileStartWindowsDragResult> {
 		if (request.source.kind === 'ssh' && !request.source.connection) {
-			return { ok: false, message: 'Missing SSH source connection for Windows drag.' };
+			return {
+				ok: false,
+				message: 'Missing SSH source connection for Windows drag.'
+			};
 		}
 		if (!request.items.length) {
 			return { ok: false, message: 'No SSH files are available to drag.' };
 		}
 
-		const token = randomUUID();
+		const token = request.sessionId;
 		const fakeDirectoryName = createWindowsDragFakeDirectoryName(token);
 		const paths = this.getWindowsDragCopyHookPaths(token, fakeDirectoryName);
 		try {
@@ -4723,7 +4746,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				icon: createWindowsDragIcon()
 			});
 
-			const targetDirectory = await this.waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName);
+			const targetDirectory = await this.waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName, token);
+			if (!targetDirectory) {
+				return { ok: true, message: 'Windows drag completed inside TurboFile.', internal: true };
+			}
 			return { ok: true, message: 'Windows drop target captured.', targetDirectory };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -4756,10 +4782,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return join(localAppData, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR);
 	}
 
-	private async waitForWindowsDragCopyHookTarget(targetFile: string, fakeDirectoryName: string, timeoutMs = WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS): Promise<string> {
+	private async waitForWindowsDragCopyHookTarget(targetFile: string, fakeDirectoryName: string, sessionId: string, timeoutMs = WINDOWS_DRAG_TARGET_SETTLE_MS): Promise<string | undefined> {
 		const deadline = Date.now() + timeoutMs;
 		const desktopFallbackDirs = this.getWindowsDragDesktopFallbackDirs();
 		while (Date.now() < deadline) {
+			if (this.completedInternalWindowsDrags.has(sessionId)) {
+				return undefined;
+			}
 			// 1) The CopyHook captured the destination. This covers drops onto ordinary directories and
 			//    open Explorer windows (the hook is registered for the file-system Directory class).
 			try {

@@ -24,7 +24,7 @@ suite('TurboFileDragDrop', () => {
 	test('permits a same-pane move even when pane-to-pane drags copy', () => {
 		const editor = readTurboFileEditor();
 		const beginDragStart = editor.indexOf('private beginFileRowDrag');
-		const beginDragEnd = editor.indexOf('private tryStartImmediateLocalWindowsDrag', beginDragStart);
+		const beginDragEnd = editor.indexOf('private renderTransferPage', beginDragStart);
 		const beginDrag = editor.slice(beginDragStart, beginDragEnd);
 
 		assert.ok(beginDrag.includes('getTurboFileRowDragEffectAllowed()'));
@@ -61,7 +61,7 @@ suite('TurboFileDragDrop', () => {
 		assert.deepStrictEqual({
 			button: editor.includes('this.appendDragOperationButton(toolbar, side)'),
 			snapshot: editor.includes("setData('application/x-turbofile-operation', operation)"),
-			internalDrop: editor.includes('this.transferSelected(sourceSide, targetSide, initiatedAt, operation)'),
+			internalDrop: editor.includes("this.recordNativeInternalDrop({ kind: 'pane'"),
 			externalDrop: editor.includes('this.transferExternalPaths(targetSide, externalPaths, operation, initiatedAt)'),
 			leftBlue: css.includes('.turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy'),
 			rightGreen: css.includes('.turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy'),
@@ -91,12 +91,14 @@ suite('TurboFileDragDrop', () => {
 
 		assert.deepStrictEqual({
 			requestOperation: requestBlock.includes("readonly operation?: 'copy' | 'move';"),
-			snapshottedField: editor.includes('private currentFileDragOperation: TurboFileDragOperation | undefined;'),
-			passesOperation: editor.includes('this.startWindowsFileDragFromPane(side, operation)'),
+			requestSession: requestBlock.includes('readonly sessionId: string;'),
+			snapshottedField: editor.includes('private nativeDragSession: TurboFileNativeDragSession<TurboFileFileItem> | undefined;'),
+			passesOperation: editor.includes('operation: session.operation'),
 			moveUsesBatch: editor.includes("if (operation === 'copy' && items.length === 1)"),
 			batchReceivesOperation: editor.includes('\n\t\t\t\toperation,\n\t\t\t\tprogressId,')
 		}, {
 			requestOperation: true,
+			requestSession: true,
 			snapshottedField: true,
 			passesOperation: true,
 			moveUsesBatch: true,
@@ -118,24 +120,46 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
 
-	test('uses the 1.148 window-edge handoff for Windows drags', () => {
+	test('starts one native drag at dragstart without a window-edge handoff', () => {
 		const editor = readTurboFileEditor();
-		const interceptor = methodBlock(editor, 'private registerWindowFileDropInterceptor', 'private shouldInterceptExternalFileDrop');
-		const pointerStart = methodBlock(editor, 'private maybeStartWindowsFileDragFromPointer', 'private renderTransferPage');
+		const beginNative = methodBlock(editor, 'private beginNativeFileDrag', 'private async runNativeFileDrag');
 
 		assert.deepStrictEqual({
-			windowOnlyHandlesExternalDrops: !interceptor.includes('handleWindowTurboFileDragOver') && !interceptor.includes('handleWindowTurboFileDragLeave'),
-			noEarlyStartMargin: !editor.includes('WINDOWS_NATIVE_DRAG_START_MARGIN'),
-			exactWindowEdge: pointerStart.includes('event.clientX <= 0')
-				&& pointerStart.includes('event.clientY <= 0')
-				&& pointerStart.includes('event.clientX >= ownerWindow.innerWidth - 1')
-				&& pointerStart.includes('event.clientY >= ownerWindow.innerHeight - 1'),
-			operationPreserved: pointerStart.includes('this.currentFileDragOperation ?? this.getCurrentDragOperation(side)')
+			cancelsChromiumDrag: beginNative.includes('event.preventDefault();'),
+			startsExactlyOnce: beginNative.includes('void this.runNativeFileDrag(session);'),
+			fileRowsReuseEntry: editor.includes('this.beginNativeFileDrag(side, event);'),
+			imageGridReusesEntry: editor.includes('this.beginNativeFileDrag(state.side, event);'),
+			noPointerHandoff: !editor.includes('maybeStartWindowsFileDragFromPointer'),
+			noPageLeaveHandoff: !editor.includes('handleTransferPageDragLeave'),
+			noDualSessionFlag: !editor.includes('hasStartedNativeWindowsDrag')
 		}, {
-			windowOnlyHandlesExternalDrops: true,
-			noEarlyStartMargin: true,
-			exactWindowEdge: true,
-			operationPreserved: true
+			cancelsChromiumDrag: true,
+			startsExactlyOnce: true,
+			fileRowsReuseEntry: true,
+			imageGridReusesEntry: true,
+			noPointerHandoff: true,
+			noPageLeaveHandoff: true,
+			noDualSessionFlag: true
+		});
+	});
+
+	test('records internal native drops before executing frozen selections', () => {
+		const editor = readTurboFileEditor();
+		const recordDrop = methodBlock(editor, 'private recordNativeInternalDrop', 'private executeNativeInternalDrop');
+		const executeDrop = methodBlock(editor, 'private executeNativeInternalDrop', 'private beginNativeFileDrag');
+
+		assert.deepStrictEqual({
+			recordsImmutableTarget: recordDrop.includes('dropTurboFileNativeDragSessionInternally(session, target)'),
+			notifiesMain: recordDrop.includes('this.sshService.completeWindowsFileDrag(session.id)'),
+			frozenPaneItems: executeDrop.includes('session.items'),
+			frozenTransferOverride: editor.includes('sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined'),
+			frozenDirectoryOverride: editor.includes('sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined')
+		}, {
+			recordsImmutableTarget: true,
+			notifiesMain: true,
+			frozenPaneItems: true,
+			frozenTransferOverride: true,
+			frozenDirectoryOverride: true
 		});
 	});
 
