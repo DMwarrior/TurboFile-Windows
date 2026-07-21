@@ -393,6 +393,64 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!getTrashState.includes('listTrashItems('));
 	});
 
+	test('uses verified direct routes without negative cooldown state', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const removedNegativeState = [
+			'DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS',
+			'DIRECT_SSH_ROUTE_CACHE_TTL_MS',
+			'directSshRouteFailureCooldowns',
+			'filterDirectSshRoutesByCooldown',
+			'markDirectSshRouteFailure',
+			'clearDirectSshRouteFailure',
+			'clearDirectSshRouteCache',
+			'getDirectSshRouteFailureKey'
+		];
+
+		assert.deepStrictEqual({
+			removedNegativeState: removedNegativeState.every(name => !service.includes(name)),
+			importsRouteCoordinator: service.includes("import { classifyTurboFileDirectSshVerification, orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectSshRoute, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';"),
+			noDuplicateRouteType: !service.includes("type TurboFileDirectSshRoute = 'source-push' | 'target-pull';"),
+			verificationMethod: service.includes('private async verifyDirectSshRoute('),
+			attemptWrapper: service.includes('private async runVerifiedDirectRouteAttempt<T>('),
+			verificationMarker: service.includes('__TURBOFILE_DIRECT_READY__'),
+			typedRemoteCommandExit: service.includes('class TurboFileRemoteCommandExitError extends Error') && service.includes('new TurboFileRemoteCommandExitError('),
+			preciseVerificationFailure: service.includes('classifyTurboFileDirectSshVerification(output.toString(\'utf8\') === DIRECT_SSH_READY_MARKER, false)') && service.includes('classifyTurboFileDirectSshVerification(false, error instanceof TurboFileRemoteCommandExitError)'),
+			quotedMarkerPrintf: service.includes('`printf %s ${quotePosixShellArg(DIRECT_SSH_READY_MARKER)}`'),
+			boundedMarkerExec: service.includes('execRemoteBytes(client, command, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId })')
+		}, {
+			removedNegativeState: true,
+			importsRouteCoordinator: true,
+			noDuplicateRouteType: true,
+			verificationMethod: true,
+			attemptWrapper: true,
+			verificationMarker: true,
+			typedRemoteCommandExit: true,
+			preciseVerificationFailure: true,
+			quotedMarkerPrintf: true,
+			boundedMarkerExec: true
+		});
+	});
+
+	test('cancels verification connection setup and cleans credentials in order', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const connect = methodBlock(service, 'private async connect(config: ConnectConfig', 'private connectDirectSsh');
+		const verification = methodBlock(service, 'private async verifyDirectSshRoute', 'private async resolveRemoteRsyncSshBinary');
+
+		assert.deepStrictEqual({
+			usesCancelableConnect: verification.includes('this.connectDirectSsh(executorConfig, progressId)'),
+			registersBeforeConnect: connect.indexOf('this.registerTransferCancelHandler(progressId') >= 0 && connect.indexOf('this.registerTransferCancelHandler(progressId') < connect.indexOf('client.connect('),
+			cancelEndsClient: connect.includes('client.end();'),
+			cancelRejectsTyped: connect.includes('reject(new TurboFileTransferCanceledError())'),
+			cleanupOrder: verification.indexOf('credential?.cleanupCommand') < verification.indexOf('unregisterCancel();') && verification.indexOf('unregisterCancel();') < verification.lastIndexOf('client.end();')
+		}, {
+			usesCancelableConnect: true,
+			registersBeforeConnect: true,
+			cancelEndsClient: true,
+			cancelRejectsTyped: true,
+			cleanupOrder: true
+		});
+	});
+
 	test('uses Chinese recycle-bin permanent deletion confirmations', () => {
 		const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 		const editor = fs.readFileSync(editorPath, 'utf8');

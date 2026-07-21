@@ -57,6 +57,13 @@ export function orderTurboFileDirectSshRoutes(preferred?: TurboFileDirectSshRout
 	return preferred ? [preferred, ...routes.filter(route => route !== preferred)] : routes;
 }
 
+export function classifyTurboFileDirectSshVerification(markerMatched: boolean, nestedCommandExited: boolean): TurboFileDirectVerification {
+	if (markerMatched) {
+		return 'available';
+	}
+	return nestedCommandExited ? 'unavailable' : 'indeterminate';
+}
+
 export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRouteFlowOptions<T>): Promise<ITurboFileDirectRouteFlowResult<T>> {
 	const failures: ITurboFileDirectRouteFailure[] = [];
 	for (const route of options.routes) {

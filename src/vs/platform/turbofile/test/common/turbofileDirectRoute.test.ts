@@ -5,6 +5,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import * as directRoute from '../../common/turbofileDirectRoute.js';
 import { orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectDataError, TurboFileDirectUnavailableError } from '../../common/turbofileDirectRoute.js';
 
 suite('TurboFileDirectRoute', () => {
@@ -17,6 +18,16 @@ suite('TurboFileDirectRoute', () => {
 
 	test('moves the most recently successful target pull first without removing source push', () => {
 		assert.deepStrictEqual(orderTurboFileDirectSshRoutes('target-pull'), ['target-pull', 'source-push']);
+	});
+
+	test('classifies only a typed nested command exit as unavailable', () => {
+		const classify = Reflect.get(directRoute, 'classifyTurboFileDirectSshVerification') as ((markerMatched: boolean, nestedCommandExited: boolean) => string) | undefined;
+		assert.ok(classify);
+		assert.deepStrictEqual([
+			classify(true, false),
+			classify(false, true),
+			classify(false, false)
+		], ['available', 'unavailable', 'indeterminate']);
 	});
 
 	test('returns the first successful route without verification', async () => {

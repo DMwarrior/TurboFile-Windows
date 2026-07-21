@@ -23,6 +23,7 @@ import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js'
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
 import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetadataBatch.js';
 import { TurboFileOperationCanceledError, TurboFileOperationQueue } from '../common/turbofileOperationQueue.js';
+import { classifyTurboFileDirectSshVerification, orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectSshRoute, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
 import { createTurboFileRsyncMappedGroups, createTurboFileRsyncSourceGroups } from '../common/turbofileRsyncBatchPlan.js';
 import { getRemoteDirectoryReadRetryDelay, REMOTE_DIRECTORY_READ_MAX_ATTEMPTS, shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { createPosixNativeBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
@@ -101,8 +102,7 @@ const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_SSH_CONNECT_TIMEOUT_MS = 5 * 1000;
-const DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
-const DIRECT_SSH_ROUTE_CACHE_TTL_MS = 10 * 60 * 1000;
+const DIRECT_SSH_READY_MARKER = '__TURBOFILE_DIRECT_READY__';
 const DIRECT_TRANSFER_STALL_TIMEOUT_MS = 10 * 1000;
 const DIRECT_TAR_STALL_TIMEOUT_MS = 30 * 60 * 1000;
 const DIRECT_RSYNC_STALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -124,6 +124,13 @@ class TurboFileTransferCanceledError extends Error {
 	constructor() {
 		super(TRANSFER_CANCELED_MESSAGE);
 		this.name = 'TurboFileTransferCanceledError';
+	}
+}
+
+class TurboFileRemoteCommandExitError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'TurboFileRemoteCommandExitError';
 	}
 }
 
@@ -342,8 +349,6 @@ interface IImageThumbnailCacheMetadata {
 	readonly createdAt: number;
 }
 
-type TurboFileDirectSshRoute = 'source-push' | 'target-pull';
-
 interface IRemoteScpCredential {
 	readonly identityPath?: string;
 	readonly cleanupCommand?: string;
@@ -477,8 +482,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly remoteDirectoryListingGenerations = new TurboFileKeyedGeneration();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
-	private readonly directSshRouteCache = new Map<string, { readonly routes: readonly TurboFileDirectSshRoute[]; readonly expiresAt: number }>();
-	private readonly directSshRouteFailureCooldowns = new Map<string, number>();
+	private readonly directSshRouteCache = new Map<string, TurboFileDirectSshRoute>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private readonly trashRootsByDeviceIdentity = new Map<string, Set<string>>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
@@ -3000,17 +3004,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectBatchRsyncTransferRoute(request, items, expectedBytes, startedAt, route);
-				this.clearDirectSshRouteFailure(request.source, request.targetDirectory, route);
 				return result;
 			} catch {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.targetDirectory, route);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.targetDirectory);
 		return undefined;
 	}
 
@@ -3459,18 +3460,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectBatchTarTransferRoute(request, items, plan, operation, expectedBytes, startedAt, route);
-				this.clearDirectSshRouteFailure(request.source, request.targetDirectory, route);
 				return result;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.targetDirectory, route);
 				failures.push(`${route}: ${formatTransferError(error)}`);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.targetDirectory);
 		throw new Error(`Direct batch tar failed: ${failures.join('; ')}`);
 	}
 
@@ -3490,7 +3488,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		let credential: IRemoteScpCredential | undefined;
 		let lastActivityAt = Date.now();
 		try {
-			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId);
 			const remote = remoteEndpoint.connection;
 			const remoteUserHost = `${remote.username}@${remote.host}`;
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
@@ -5492,18 +5490,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectTarTransferRoute(request, startedAt, bytes, route);
-				this.clearDirectSshRouteFailure(request.source, request.target, route);
 				return result;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.target, route);
 				failures.push(`${route}: ${formatTransferError(error)}`);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.target);
 		throw new Error(`Direct tar failed: ${failures.join('; ')}`);
 	}
 
@@ -5528,7 +5523,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
-			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId);
 			const remote = remoteEndpoint.connection;
 			const remoteUserHost = `${remote.username}@${remote.host}`;
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
@@ -5600,18 +5595,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectRsyncTransferRoute(request, startedAt, route);
-				this.clearDirectSshRouteFailure(request.source, request.target, route);
 				return result;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.target, route);
 				failures.push(`${route}: ${formatTransferError(error)}`);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.target);
 		throw new Error(`Direct rsync failed: ${failures.join('; ')}`);
 	}
 
@@ -5683,62 +5675,140 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	/**
-	 * Unified direct-route detection for all SSH-to-SSH transfers (scp/sftp/rsync).
-	 *
-	 * Returns every currently viable direction in deterministic order:
-	 * - `source-push`: source can reach target's SSH login and should push the payload.
-	 * - `target-pull`: target can reach source's SSH login and should pull the payload.
-	 *
-	 * Both directions are probed in parallel and capped under ~1s. Transfer failures put only the
-	 * failing direction into a short cooldown, so one bad route cannot keep every 62 -> * transfer
-	 * stuck at 0 bytes; the next direct candidate or same-protocol relay can take over.
+	 * Returns both direct routes, putting the most recently successful route first.
 	 */
 	private async resolveDirectSshRoutes(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId: string | undefined): Promise<readonly TurboFileDirectSshRoute[]> {
 		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
 			return [];
 		}
 
-		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		const now = Date.now();
-		const cached = this.directSshRouteCache.get(cacheKey);
-		if (cached && cached.expiresAt > now) {
-			const routes = this.filterDirectSshRoutesByCooldown(cacheKey, cached.routes);
-			if (routes.length > 0) {
-				return routes;
-			}
-		}
 		this.throwIfTransferCanceled(progressId);
-		const optimisticRoutes: readonly TurboFileDirectSshRoute[] = ['source-push', 'target-pull'];
-		this.directSshRouteCache.set(cacheKey, {
-			routes: optimisticRoutes,
-			expiresAt: now + DIRECT_SSH_ROUTE_CACHE_TTL_MS
+		const preferred = this.directSshRouteCache.get(getDirectSshRouteCacheKey(source.connection, target.connection));
+		return orderTurboFileDirectSshRoutes(preferred);
+	}
+
+	// @ts-expect-error Task 3 connects this staged wrapper to the six direct protocol loops.
+	private async runVerifiedDirectRouteAttempt<T>(
+		source: ITurboFileTransferEndpoint,
+		target: ITurboFileTransferEndpoint,
+		progressId: string | undefined,
+		run: (route: TurboFileDirectSshRoute, retry: boolean) => Promise<T>
+	): Promise<T> {
+		const routes = await this.resolveDirectSshRoutes(source, target, progressId);
+		const result = await runTurboFileDirectRouteFlow({
+			routes,
+			run: async (route, retry) => {
+				if (retry) {
+					this.fireTransferProgress({ progressId }, 0, 0, 'prepare', '直连重试', true, { route });
+				}
+				try {
+					return await run(route, retry);
+				} catch (error) {
+					if (error instanceof TurboFileTransferCanceledError) {
+						throw error;
+					}
+					this.throwIfTransferCanceled(progressId);
+					throw error;
+				}
+			},
+			verify: async route => {
+				try {
+					return await this.verifyDirectSshRoute(source, target, route, progressId);
+				} catch (error) {
+					if (error instanceof TurboFileTransferCanceledError) {
+						throw error;
+					}
+					this.throwIfTransferCanceled(progressId);
+					throw error;
+				}
+			},
+			isCancellationError: error => error instanceof TurboFileTransferCanceledError
 		});
-		return this.filterDirectSshRoutesByCooldown(cacheKey, optimisticRoutes);
-	}
-
-	private filterDirectSshRoutesByCooldown(cacheKey: string, routes: readonly TurboFileDirectSshRoute[]): readonly TurboFileDirectSshRoute[] {
-		const now = Date.now();
-		return routes.filter(route => (this.directSshRouteFailureCooldowns.get(getDirectSshRouteFailureKey(cacheKey, route)) ?? 0) <= now);
-	}
-
-	private markDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
-		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
-			return;
+		this.throwIfTransferCanceled(progressId);
+		if (source.kind === 'ssh' && target.kind === 'ssh' && source.connection && target.connection) {
+			this.directSshRouteCache.set(getDirectSshRouteCacheKey(source.connection, target.connection), result.route);
 		}
-		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		this.directSshRouteFailureCooldowns.set(getDirectSshRouteFailureKey(cacheKey, route), Date.now() + DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS);
+		return result.value;
 	}
 
-	private clearDirectSshRouteFailure(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, route: TurboFileDirectSshRoute): void {
-		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
-			return;
+	private async verifyDirectSshRoute(
+		source: ITurboFileTransferEndpoint,
+		target: ITurboFileTransferEndpoint,
+		route: TurboFileDirectSshRoute,
+		progressId: string | undefined
+	): Promise<TurboFileDirectVerification> {
+		this.throwIfTransferCanceled(progressId);
+		const executorEndpoint = route === 'source-push' ? source : target;
+		const remoteEndpoint = route === 'source-push' ? target : source;
+		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
+			return 'indeterminate';
 		}
-		const cacheKey = getDirectSshRouteCacheKey(source.connection, target.connection);
-		this.directSshRouteFailureCooldowns.delete(getDirectSshRouteFailureKey(cacheKey, route));
-		this.directSshRouteCache.set(cacheKey, {
-			routes: [route],
-			expiresAt: Date.now() + DIRECT_SSH_ROUTE_CACHE_TTL_MS
-		});
+
+		let executorConfig: ConnectConfig;
+		try {
+			const configResult = await this.createConnectConfig(executorEndpoint.connection);
+			if (!configResult.ok) {
+				this.throwIfTransferCanceled(progressId);
+				return 'indeterminate';
+			}
+			executorConfig = configResult.config;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError) {
+				throw error;
+			}
+			this.throwIfTransferCanceled(progressId);
+			return 'indeterminate';
+		}
+
+		let client: ISSHClient;
+		try {
+			client = await this.connectDirectSsh(executorConfig, progressId);
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError) {
+				throw error;
+			}
+			this.throwIfTransferCanceled(progressId);
+			return 'indeterminate';
+		}
+
+		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => client.end());
+		let credential: IRemoteScpCredential | undefined;
+		try {
+			this.throwIfTransferCanceled(progressId);
+			try {
+				credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, progressId);
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError) {
+					throw error;
+				}
+				this.throwIfTransferCanceled(progressId);
+				return 'indeterminate';
+			}
+
+			const remote = remoteEndpoint.connection;
+			const remoteUserHost = `${remote.username}@${remote.host}`;
+			const sshpassPrefix = buildSshpassPrefix(remote.password);
+			const sshCommand = buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath);
+			const markerCommand = `printf %s ${quotePosixShellArg(DIRECT_SSH_READY_MARKER)}`;
+			const command = `${sshpassPrefix}${sshCommand} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(markerCommand)}`;
+			try {
+				const output = await this.execRemoteBytes(client, command, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId });
+				this.throwIfTransferCanceled(progressId);
+				return classifyTurboFileDirectSshVerification(output.toString('utf8') === DIRECT_SSH_READY_MARKER, false);
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError) {
+					throw error;
+				}
+				this.throwIfTransferCanceled(progressId);
+				return classifyTurboFileDirectSshVerification(false, error instanceof TurboFileRemoteCommandExitError);
+			}
+		} finally {
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
+			}
+			unregisterCancel();
+			client.end();
+		}
 	}
 
 	private async resolveRemoteRsyncSshBinary(client: ISSHClient, connection: ITurboFileSshConnectionOptions): Promise<string> {
@@ -5762,13 +5832,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.remoteRsyncSshBinaryCache.set(cacheKey, 'ssh');
 			return 'ssh';
 		}
-	}
-
-	private clearDirectSshRouteCache(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): void {
-		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection) {
-			return;
-		}
-		this.directSshRouteCache.delete(getDirectSshRouteCacheKey(source.connection, target.connection));
 	}
 
 	private async tryDirectScpTransfer(request: ITurboFileTransferRequest, startedAt: number, forceProtocol = false): Promise<ITurboFileTransferResult | undefined> {
@@ -5810,18 +5873,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectScpTransferRoute(request, startedAt, sourceIsDirectory, bytes, route);
-				this.clearDirectSshRouteFailure(request.source, request.target, route);
 				return result;
 			} catch (error) {
 				if (this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.target, route);
 				failures.push(`${route}: ${formatTransferError(error)}`);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.target);
 		throw new Error(`Direct SCP failed: ${failures.join('; ')}`);
 	}
 
@@ -5848,7 +5908,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 		try {
 			this.throwIfTransferCanceled(request.progressId);
-			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection);
+			credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId);
 			const remote = remoteEndpoint.connection;
 			const remoteUserHost = `${remote.username}@${remote.host}`;
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
@@ -5909,11 +5969,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async prepareRemoteScpCredential(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions): Promise<IRemoteScpCredential> {
+	private async prepareRemoteScpCredential(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions, progressId: string | undefined): Promise<IRemoteScpCredential> {
 		if (remoteConnection.password) {
 			return {};
 		}
-		const privateKey = remoteConnection.privateKey ?? await this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined);
+		const privateKey = remoteConnection.privateKey ?? await this.readPrivateKey(remoteConnection.privateKeyPath);
 		if (!privateKey) {
 			return {};
 		}
@@ -5922,10 +5982,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const marker = `__TURBOFILE_SCP_KEY_${randomUUID().replace(/-/g, '')}__`;
 		const normalizedKey = privateKey.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n?$/, '\n');
 		const setupCommand = `umask 077; cat > ${quotePosixShellArg(identityPath)} <<'${marker}'\n${normalizedKey}${marker}\nchmod 600 ${quotePosixShellArg(identityPath)}`;
-		await this.execRemote(client, setupCommand);
+		const cleanupCommand = `rm -f ${quotePosixShellArg(identityPath)}`;
+		try {
+			await this.execRemote(client, setupCommand, { progressId });
+		} catch (error) {
+			await this.execRemote(client, cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
+			throw error;
+		}
 		return {
 			identityPath,
-			cleanupCommand: `rm -f ${quotePosixShellArg(identityPath)}`
+			cleanupCommand
 		};
 	}
 
@@ -5953,18 +6019,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const route of routes) {
 			try {
 				const result = await this.tryDirectSftpTransferRoute(request, startedAt, route);
-				this.clearDirectSshRouteFailure(request.source, request.target, route);
 				return result;
 			} catch (error) {
 				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
 				}
-				this.markDirectSshRouteFailure(request.source, request.target, route);
 				failures.push(`${route}: ${formatTransferError(error)}`);
 			}
 		}
 
-		this.clearDirectSshRouteCache(request.source, request.target);
 		throw new Error(`Direct SFTP failed: ${failures.join('; ')}`);
 	}
 
@@ -6514,21 +6577,28 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async connect(config: ConnectConfig): Promise<ISSHClient> {
+	private async connect(config: ConnectConfig, progressId?: string): Promise<ISSHClient> {
+		this.throwIfTransferCanceled(progressId);
 		const nativeRequire = await this.getNativeRequire();
 		const ssh2Module = nativeRequire('ssh2') as { Client: new () => ISSHClient };
 		const client = new ssh2Module.Client();
 
 		return new Promise<ISSHClient>((resolve, reject) => {
 			let settled = false;
+			let unregisterCancel: () => void = () => undefined;
 
 			const settle = (callback: () => void): void => {
 				if (settled) {
 					return;
 				}
 				settled = true;
+				unregisterCancel();
 				callback();
 			};
+			const cancel = (): void => settle(() => {
+				client.end();
+				reject(new TurboFileTransferCanceledError());
+			});
 
 			client
 				.on('ready', () => settle(() => resolve(client)))
@@ -6538,6 +6608,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						settle(() => reject(new Error('SSH connection closed before authentication completed.')));
 					}
 				});
+			unregisterCancel = this.registerTransferCancelHandler(progressId, cancel);
+			if (this.isTransferCanceled(progressId)) {
+				cancel();
+				return;
+			}
 
 			try {
 				client.connect(config);
@@ -6547,11 +6622,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private connectDirectSsh(config: ConnectConfig): Promise<ISSHClient> {
+	private connectDirectSsh(config: ConnectConfig, progressId?: string): Promise<ISSHClient> {
 		const readyTimeout = typeof config.readyTimeout === 'number'
 			? Math.min(config.readyTimeout, DIRECT_SSH_CONNECT_TIMEOUT_MS)
 			: DIRECT_SSH_CONNECT_TIMEOUT_MS;
-		return this.connect({ ...config, readyTimeout });
+		return this.connect({ ...config, readyTimeout }, progressId);
 	}
 
 	private async getDirectorySftpSession(options: ITurboFileSshConnectionOptions, config: ConnectConfig): Promise<IRemoteDirectorySftpSession> {
@@ -8739,7 +8814,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						finish(() => resolve(Buffer.concat(chunks)));
 						return;
 					}
-					finish(() => reject(new Error(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`)));
+					finish(() => reject(new TurboFileRemoteCommandExitError(stderr.trim() || `Remote command failed with exit code ${code ?? 'unknown'}.`)));
 				});
 			});
 		});
@@ -10310,10 +10385,6 @@ function quoteLocalShellArg(value: string): string {
 
 function getDirectSshRouteCacheKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions): string {
 	return `${getSshConnectionRouteKey(source)}=>${getSshConnectionRouteKey(target)}`;
-}
-
-function getDirectSshRouteFailureKey(cacheKey: string, route: TurboFileDirectSshRoute): string {
-	return `${cacheKey}:${route}`;
 }
 
 function getSshConnectionRouteKey(connection: ITurboFileSshConnectionOptions): string {
