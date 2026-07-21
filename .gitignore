@@ -34,6 +34,9 @@ dist
 .playwright-cli
 .playwright-mcp
 .claude/
+/.superpowers/
+/docs/presentations/
+**/__pycache__/
 .agents/agents/*.local.md
 .github/agents/*.local.md
 .agents/agents/*.local.agent.md
