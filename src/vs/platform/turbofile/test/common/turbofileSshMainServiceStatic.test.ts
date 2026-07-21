@@ -409,7 +409,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 
 		assert.deepStrictEqual({
 			removedNegativeState: removedNegativeState.every(name => !service.includes(name)),
-			importsRouteCoordinator: service.includes("import { classifyTurboFileDirectSshVerification, orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectSshRoute, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';"),
+			importsRouteCoordinator: service.includes("import { classifyTurboFileDirectSshVerification, orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';"),
 			noDuplicateRouteType: !service.includes("type TurboFileDirectSshRoute = 'source-push' | 'target-pull';"),
 			verificationMethod: service.includes('private async verifyDirectSshRoute('),
 			attemptWrapper: service.includes('private async runVerifiedDirectRouteAttempt<T>('),
@@ -452,6 +452,72 @@ suite('TurboFileSshMainServiceStatic', () => {
 			resolvesRoutesDirectly: false,
 			loopsRoutesDirectly: false
 		})));
+	});
+
+	test('keeps direct SCP and SFTP target growth timing observational', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
+
+		assert.deepStrictEqual([directScp, directSftp].map(block => ({
+			keepsGrowthTiming: block.includes('beginRemoteFileGrowthTiming') && block.includes('beginRemotePathGrowthTiming'),
+			keepsBoundedMkdir: block.includes('timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS'),
+			noGrowthActivityClock: !block.includes('lastActivityAt') && !block.includes('markActivity'),
+			noGrowthWatchdog: !block.includes('inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS')
+				&& !block.includes('getActivityTime: () => lastActivityAt')
+				&& !block.includes('produced no target growth')
+		})), [directScp, directSftp].map(() => ({
+			keepsGrowthTiming: true,
+			keepsBoundedMkdir: true,
+			noGrowthActivityClock: true,
+			noGrowthWatchdog: true
+		})));
+	});
+
+	test('reports typed direct fallback reasons without exposing direct errors', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const common = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
+		const singlePlan = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
+		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
+		const wrapper = methodBlock(service, 'private async runVerifiedDirectRouteAttempt<T>', 'private async verifyDirectSshRoute');
+		const fallbackMapping = functionBlock(service, 'getDirectFallbackProgress');
+		const directEntries = [
+			methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute'),
+			methodBlock(service, 'private async tryDirectSftpTransfer', 'private async tryDirectSftpTransferRoute'),
+			methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute'),
+			methodBlock(service, 'private async tryDirectRsyncTransfer', 'private async tryDirectRsyncTransferRoute'),
+			methodBlock(service, 'private async tryDirectBatchTarTransfer', 'private async tryDirectBatchTarTransferRoute'),
+			methodBlock(service, 'private async tryDirectBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransferRoute')
+		];
+
+		assert.deepStrictEqual({
+			typedEvent: common.includes("readonly directFallbackReason?: 'unavailable' | 'data-failure';"),
+			importsTypedErrors: service.includes('TurboFileDirectDataError') && service.includes('TurboFileDirectUnavailableError'),
+			typedMapping: fallbackMapping.includes('error instanceof TurboFileDirectUnavailableError')
+				&& fallbackMapping.includes('error instanceof TurboFileDirectDataError')
+				&& fallbackMapping.includes("directFallbackReason: 'unavailable'")
+				&& fallbackMapping.includes("directFallbackReason: 'data-failure'"),
+			plansUseTypedMapping: [singlePlan, batchPlan].every(block => block.includes("attempt.route === 'direct'")
+				&& block.includes("nextAttempt")
+				&& block.includes("route === 'relay'")
+				&& block.includes('getDirectFallbackProgress(error)')
+				&& block.includes('directFallback.detail')
+				&& block.includes('directFallbackReason: directFallback.directFallbackReason')),
+			fixedFallbackDetails: fallbackMapping.includes('直连不可用，正在中转。')
+				&& fallbackMapping.includes('直连传输失败，正在中转。'),
+			typedMappingDoesNotInspectMessages: !fallbackMapping.includes('.message') && !fallbackMapping.includes('formatTransferError'),
+			retryCarriesStrategyAndRoute: wrapper.includes("strategy: directStrategy, route"),
+			sixStrategiesProvided: directEntries.every(entry => /runVerifiedDirectRouteAttempt\([^\n]+, '[a-z]+-direct', route =>/.test(entry))
+		}, {
+			typedEvent: true,
+			importsTypedErrors: true,
+			typedMapping: true,
+			plansUseTypedMapping: true,
+			fixedFallbackDetails: true,
+			typedMappingDoesNotInspectMessages: true,
+			retryCarriesStrategyAndRoute: true,
+			sixStrategiesProvided: true
+		});
 	});
 
 	test('keeps batch cut cleanup outside direct route retries and terminal after copied data', () => {

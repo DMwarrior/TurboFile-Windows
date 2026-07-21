@@ -357,6 +357,7 @@ export interface ITurboFileTransferProgressEvent {
 	readonly detail?: string;
 	readonly strategy?: ITurboFileTransferResult['strategy'];
 	readonly route?: 'source-push' | 'target-pull' | 'relay';
+	readonly directFallbackReason?: 'unavailable' | 'data-failure';
 	readonly completedItems?: number;
 	readonly totalItems?: number;
 	readonly currentName?: string;
