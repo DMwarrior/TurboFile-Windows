@@ -5,24 +5,13 @@
 
 export type TurboFilePaneSide = 'left' | 'right';
 
-export interface ITurboFilePostTransferRefreshPlan {
-	readonly sides: readonly TurboFilePaneSide[];
-	readonly sequential: boolean;
-}
-
 export function createTurboFilePostTransferRefreshPlan(
 	operation: 'copy' | 'move',
 	sourceSide: TurboFilePaneSide,
-	targetSide: TurboFilePaneSide,
-	sameDevice: boolean
-): ITurboFilePostTransferRefreshPlan {
+	targetSide: TurboFilePaneSide
+): readonly TurboFilePaneSide[] {
 	if (operation === 'copy') {
-		return { sides: [targetSide], sequential: false };
+		return [targetSide];
 	}
-
-	const sides: TurboFilePaneSide[] = sourceSide === targetSide ? [targetSide] : [sourceSide, targetSide];
-	return {
-		sides,
-		sequential: sameDevice && sides.length > 1
-	};
+	return sourceSide === targetSide ? [targetSide] : [sourceSide, targetSide];
 }

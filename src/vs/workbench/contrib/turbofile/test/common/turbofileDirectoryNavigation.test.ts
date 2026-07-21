@@ -51,6 +51,35 @@ suite('TurboFileDirectoryNavigation', () => {
 		assert.ok(block.includes('this.sshService.listLocalDirectory(path, force)'));
 	});
 
+	test('loads complete remote attributes for foreground sorting and keeps background prefetch lightweight', () => {
+		const source = readEditor();
+		const load = methodBlock(source, 'private async loadPaneDirectory', 'private async recoverMissingPanePath');
+		const prefetch = methodBlock(source, 'private prefetchPaneDirectory', 'private getPaneDirectoryCacheKey');
+
+		assert.ok(load.includes("const loadsAttributes = needsAttributes || (isRemote && purpose === 'foreground');"));
+		assert.ok(load.includes('? await this.sshService.listRemoteDirectory('));
+		assert.ok(load.includes(': await this.sshService.listRemoteDirectoryNames('));
+		assert.ok(prefetch.includes('this.prefetchPaneDirectoryNow(device, path, this.paneSortNeedsAttributes(side));'));
+		assert.ok(prefetch.includes("intent === 'hover' && this.paneSortNeedsAttributes(side)"));
+		assert.ok(prefetch.includes("await this.loadPaneDirectory(device, path, false, 'prefetch', needsAttributes)"));
+		assert.ok(source.includes('this.enqueuePaneDirectoryPrefetch(device, path);'));
+	});
+
+	test('never displays or progressively re-sorts incomplete attribute listings', () => {
+		const source = readEditor();
+		const navigation = methodBlock(source, 'private async navigatePaneDirectory', 'private renderFileList');
+		const enrich = methodBlock(source, 'private async enrichVisibleRows', 'private scheduleEnrichRetryIfNeeded');
+		const setDevice = methodBlock(source, 'private setPaneDevice', 'private capturePaneSelectionForCurrentPage');
+
+		assert.ok(source.includes('private paneListingSatisfiesSort'));
+		assert.ok(source.includes('isTurboFileListingReadyForSort(items, this.paneStates[side].sortKey)'));
+		assert.ok(navigation.includes('this.paneDirectoryEntrySatisfiesSort(side, cached)'));
+		assert.ok(setDevice.includes('this.paneListingSatisfiesSort(side, snapshot.items)'));
+		assert.ok(setDevice.includes('this.paneDirectoryEntrySatisfiesSort(side, cached)'));
+		assert.ok(enrich.includes('if (this.paneSortNeedsAttributes(side))'));
+		assert.ok(!enrich.includes('state.items = this.sortPaneItems(side, state.items);'));
+	});
+
 	test('remote directory listing uses the reused SFTP session path from 1.124', () => {
 		const servicePath = path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 		const source = fs.readFileSync(servicePath, 'utf8');

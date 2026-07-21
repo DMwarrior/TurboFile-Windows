@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { IDisposable } from '../../../../base/common/lifecycle.js';
 import Severity from '../../../../base/common/severity.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -11,6 +12,14 @@ import { localize } from '../../../../nls.js';
 import { ConfirmResult, IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EditorInputCapabilities, IEditorIdentifier, IUntypedEditorInput, Verbosity } from '../../../common/editor.js';
 import { EditorInput, IEditorCloseHandler } from '../../../common/editor/editorInput.js';
+import { getNextTurboFileDragOperation, TurboFileDragOperation } from './turbofileDragDrop.js';
+
+export const TURBOFILE_TAB_TITLE_MAX_LENGTH = 40;
+export const TURBOFILE_TAB_COLOR_COUNT = 6;
+
+export function isTurboFileTabTitleTooLong(title: string): boolean {
+	return Array.from(title.trim()).length > TURBOFILE_TAB_TITLE_MAX_LENGTH;
+}
 
 export class TurboFileEditorInput extends EditorInput implements IEditorCloseHandler {
 	static readonly ID = 'workbench.input.turbofile';
@@ -20,6 +29,11 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 	override readonly closeHandler = this;
 
 	private readonly resourceValue: URI;
+	private customTitle: string | undefined;
+	private readonly dragOperations: Record<'left' | 'right', TurboFileDragOperation> = {
+		left: 'copy',
+		right: 'copy'
+	};
 	private runningTaskCount = 0;
 	private cancelRunningTasksForClose: (() => Promise<void>) | undefined;
 	private cleanupForClose: (() => void) | undefined;
@@ -51,11 +65,11 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 	}
 
 	override getName(): string {
-		return `传输 ${this.ordinal}`;
+		return this.customTitle ?? localize('turbofile.newTab', '新标签页');
 	}
 
 	override getTitle(_verbosity?: Verbosity): string {
-		return `传输 ${this.ordinal}`;
+		return this.getName();
 	}
 
 	override getDescription(_verbosity?: Verbosity): string {
@@ -64,6 +78,41 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 
 	override getIcon(): ThemeIcon {
 		return Codicon.remoteExplorer;
+	}
+
+	override getLabelExtraClasses(): string[] {
+		return [
+			'turbofile-transfer-tab',
+			`turbofile-tab-color-${this.getTabColorSlot()}`
+		];
+	}
+
+	getTabColorSlot(): number {
+		return (this.ordinal - 1) % TURBOFILE_TAB_COLOR_COUNT;
+	}
+
+	setCustomTitle(title: string): boolean {
+		const customTitle = title.trim() || undefined;
+		if (customTitle && isTurboFileTabTitleTooLong(customTitle)) {
+			return false;
+		}
+		if (this.customTitle !== customTitle) {
+			this.customTitle = customTitle;
+			this._onDidChangeLabel.fire();
+		}
+		return true;
+	}
+
+	getDragOperation(side: 'left' | 'right'): TurboFileDragOperation {
+		return this.dragOperations[side];
+	}
+
+	setDragOperation(side: 'left' | 'right', operation: TurboFileDragOperation): void {
+		this.dragOperations[side] = operation;
+	}
+
+	toggleDragOperation(side: 'left' | 'right'): TurboFileDragOperation {
+		return this.dragOperations[side] = getNextTurboFileDragOperation(this.dragOperations[side]);
 	}
 
 	override matches(otherInput: EditorInput | IUntypedEditorInput): boolean {
@@ -80,6 +129,10 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 
 	setCleanupForClose(handler: () => void): void {
 		this.cleanupForClose = handler;
+	}
+
+	setEditorPaneRegistration(registration: IDisposable): void {
+		this._register(registration);
 	}
 
 	override dispose(): void {

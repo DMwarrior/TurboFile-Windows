@@ -70,14 +70,29 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;'));
 	});
 
-	test('reserves the TurboFile bottom taskbar height for the terminal panel', () => {
+	test('reserves the native statusbar slot without adding blank space to the transfer page', () => {
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+		const contribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofile.contribution.ts'), 'utf8');
+		const activateShell = contribution.slice(contribution.indexOf('private activateTurboFileShell(): void'), contribution.indexOf('private async openTurboFilePage'));
+		const transferPage = css.slice(css.indexOf('.turbofile-transfer-page {'), css.indexOf('.turbofile-transfer-page.has-live-transfer {'));
 
-		assert.ok(css.includes('--turbofile-taskbar-height: 24px;'));
-		assert.ok(css.includes('body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-taskbar)'));
-		assert.ok(css.includes('.part.panel.bottom .pane-body.integrated-terminal'));
-		assert.ok(css.includes('padding-bottom: var(--turbofile-taskbar-height);'));
-		assert.ok(css.includes('height: var(--turbofile-taskbar-height);'));
+		assert.deepStrictEqual({
+			hasNativeTaskbarHeight: css.includes('--turbofile-taskbar-height: 22px;'),
+			usesNativeTaskbarHeight: css.includes('height: var(--turbofile-taskbar-height);'),
+			transferPageHasDuplicateBottomSpace: transferPage.includes('padding-bottom:'),
+			patchesIntegratedTerminalPadding: css.includes('.part.panel.bottom .pane-body.integrated-terminal'),
+			hidesNativeStatusbar: activateShell.includes('setPartHidden(true, Parts.STATUSBAR_PART)'),
+			checksNativeStatusbarVisibility: activateShell.includes('if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window))'),
+			usesMemoryOnlyStatusbarOverride: activateShell.includes("this.configurationService.updateValue('workbench.statusBar.visible', true, ConfigurationTarget.MEMORY)")
+		}, {
+			hasNativeTaskbarHeight: true,
+			usesNativeTaskbarHeight: true,
+			transferPageHasDuplicateBottomSpace: false,
+			patchesIntegratedTerminalPadding: false,
+			hidesNativeStatusbar: false,
+			checksNativeStatusbarVisibility: true,
+			usesMemoryOnlyStatusbarOverride: true
+		});
 	});
 
 	test('packages the drag extension with deferred replacement without enabling win32 versioned update', () => {

@@ -115,6 +115,24 @@ export class EditorPanes extends Disposable {
 
 	private registerListeners(): void {
 		this._register(this.workspaceTrustService.onDidChangeTrust(() => this.onDidChangeWorkspaceTrust()));
+		this._register(this.editorPanesRegistry.onDidDeregisterEditorPane(descriptor => this.releaseEditorPane(descriptor)));
+	}
+
+	private releaseEditorPane(descriptor: IEditorPaneDescriptor): void {
+		const index = this.editorPanes.findIndex(editorPane => descriptor.describes(editorPane));
+		if (index < 0) {
+			return;
+		}
+
+		const editorPane = this.editorPanes[index];
+		if (this._activeEditorPane === editorPane) {
+			this.doHideActiveEditorPane();
+		}
+
+		this.mapEditorPaneToPendingSetInput.delete(editorPane);
+		editorPane.getContainer()?.remove();
+		this.editorPanes.splice(index, 1);
+		this._store.delete(editorPane);
 	}
 
 	private onDidChangeWorkspaceTrust() {

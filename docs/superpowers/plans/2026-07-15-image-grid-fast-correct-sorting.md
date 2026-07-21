@@ -1,5 +1,7 @@
 # 图片网格快速且正确的排序实施计划
 
+> 此计划中的图片头元数据预热已被 `2026-07-17-image-grid-instant-file-sort.md` 取代。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让图片网格的名称、类型、修改日期和原始像素面积排序全部正确，并使元数据就绪后的排序切换只进行同步内存排序。

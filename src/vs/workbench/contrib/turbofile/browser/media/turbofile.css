@@ -132,7 +132,9 @@ body.turbofile-shell {
 	   keeps the nav, the expand/collapse toggle and the bottom taskbar aligned exactly with the
 	   file-browser (editor) boundary. */
 	--turbofile-page-nav-width: 54px;
-	--turbofile-taskbar-height: 24px;
+	/* Use VS Code's native 22px statusbar slot. The taskbar must not resize the integrated terminal
+	   pane because xterm calculates its rows from the unpadded panel height. */
+	--turbofile-taskbar-height: 22px;
 }
 
 body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
@@ -171,13 +173,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .terminal-tab,
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.panel .xterm {
 	background-color: var(--vscode-terminal-background, var(--vscode-editor-background)) !important;
-}
-
-body.turbofile-shell.turbofile-main-editor-visible:has(.turbofile-taskbar) .monaco-workbench .part.panel.bottom .pane-body.integrated-terminal {
-	/* The fixed TurboFile taskbar sits outside VS Code's panel layout; shrink terminal content so
-	   the last prompt line and horizontal scrollbar remain above the blue task/log bar. */
-	box-sizing: border-box;
-	padding-bottom: var(--turbofile-taskbar-height);
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench {
@@ -264,22 +259,9 @@ body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-
 	height: 100% !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] {
-	width: 64px !important;
-	min-width: 64px !important;
-	max-width: 64px !important;
-}
-
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-name,
 body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-description,
 body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-separator {
 	display: none !important;
-}
-
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label {
-	justify-content: center;
-	padding-left: 0 !important;
-	padding-right: 0 !important;
 }
 
 body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label .codicon,
@@ -288,6 +270,47 @@ body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-con
 	width: 22px !important;
 	height: 22px !important;
 	line-height: 22px !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-document-tab::before {
+	opacity: 0.62;
+	transition: color 120ms ease, opacity 120ms ease;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before {
+	transform: translateY(1px);
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab.active .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab.active .monaco-icon-label.turbofile-document-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:hover .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:hover .monaco-icon-label.turbofile-document-tab::before {
+	opacity: 1;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-0::before {
+	color: var(--vscode-charts-blue) !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-1::before {
+	color: var(--vscode-charts-green) !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-2::before {
+	color: var(--vscode-charts-orange) !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-3::before {
+	color: var(--vscode-charts-purple) !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-4::before {
+	color: var(--vscode-charts-red) !important;
+}
+
+body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-5::before {
+	color: var(--vscode-charts-cyan) !important;
 }
 
 body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.titlebar,
@@ -327,7 +350,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	min-height: 0;
 	display: grid;
 	grid-template-rows: minmax(0, 1fr);
-	padding-bottom: 24px;
 	box-sizing: border-box;
 	overflow: hidden;
 }
@@ -1985,6 +2007,53 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	-webkit-appearance: none;
 }
 
+.turbofile-toolbar-button.turbofile-drag-operation-button {
+	width: 24px;
+	min-width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+}
+
+.turbofile-drag-operation-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 18px;
+	box-sizing: border-box;
+	border: 1px solid currentColor;
+	border-radius: 2px;
+	font-size: 10px;
+	font-weight: 400;
+	line-height: 1;
+	white-space: nowrap;
+}
+
+.turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy {
+	color: #3b82f6;
+}
+
+.turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy {
+	color: #2fae7b;
+}
+
+.turbofile-drag-operation-button.is-move {
+	color: #ef6670;
+}
+
+.turbofile-drag-operation-button:hover,
+.turbofile-drag-operation-button:active,
+.turbofile-drag-operation-button:focus,
+.turbofile-drag-operation-button:focus-visible {
+	border: 0;
+	outline: 0;
+	background: transparent;
+	box-shadow: none;
+}
+
 .turbofile-toolbar-button .codicon,
 .turbofile-toolbar-button .turbofile-bi-icon {
 	box-shadow: none;
@@ -2542,9 +2611,12 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 }
 
 .turbofile-file-meta {
+	min-width: 0;
 	color: var(--turbofile-browser-font-color, var(--vscode-descriptionForeground));
 	text-align: right;
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	font-size: calc(var(--turbofile-browser-font-size, 14px) - 1px);
 }
 
@@ -6490,4 +6562,20 @@ body.turbofile-shell .turbofile-theme-toggle {
 		width: 76px;
 		height: 76px;
 	}
+}
+.turbofile-recycle-bin-button .turbofile-recycle-bin-icon {
+	display: block;
+	width: 20px;
+	height: 20px;
+	object-fit: contain;
+	pointer-events: none;
+	user-select: none;
+}
+
+.turbofile-trash-pathbar {
+	gap: 7px;
+}
+
+.turbofile-trash-pathbar > .codicon {
+	color: var(--vscode-charts-orange);
 }

@@ -15,6 +15,15 @@ export interface TurboFileSortableItem {
 	readonly type: TurboFileFileType;
 	readonly directory?: boolean;
 	readonly parent?: boolean;
+	readonly attrsPending?: boolean;
+}
+
+export function turboFileSortNeedsAttributes(key: TurboFileSortKey): boolean {
+	return key === 'modified' || key === 'size';
+}
+
+export function isTurboFileListingReadyForSort(items: readonly TurboFileSortableItem[], key: TurboFileSortKey): boolean {
+	return !turboFileSortNeedsAttributes(key) || !items.some(item => !item.parent && item.attrsPending);
 }
 
 export function sortTurboFileItems<T extends TurboFileSortableItem>(items: readonly T[], key: TurboFileSortKey, direction: TurboFileSortDirection): T[] {

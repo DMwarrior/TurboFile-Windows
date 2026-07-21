@@ -38,25 +38,32 @@ suite('TurboFileTerminalPanel', () => {
 		assert.ok(!editor.includes('this.terminalService.safeDisposeTerminal(instance);') || editor.includes('void this.terminalService.safeDisposeTerminal(instance);'));
 	});
 
-	test('shows the taskbar for running tasks while the current page terminal is visible', () => {
+	test('always renders the taskbar independently from terminal visibility', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderTransferPage = editor.slice(
+			editor.indexOf('private renderTransferPage(): HTMLElement'),
+			editor.indexOf('private registerTransferPageDragAndDrop')
+		);
 
 		assert.ok(editor.includes('private isTerminalPanelVisibleForCurrentPage(): boolean'));
-		assert.ok(editor.includes('private shouldRenderTaskbar(): boolean'));
-		assert.ok(editor.includes("return !this.isTerminalPanelVisibleForCurrentPage() || this.tasks.some(task => task.status === 'running');"));
 		assert.ok(editor.includes('const terminalPanelVisible = this.isTerminalPanelVisibleForCurrentPage();'));
-		assert.ok(editor.includes('const shouldRenderTaskbar = this.shouldRenderTaskbar();'));
 		assert.ok(editor.includes('if (terminalPanelVisible) {'));
-		assert.ok(editor.includes('if (shouldRenderTaskbar) {'));
+		assert.ok(renderTransferPage.includes('page.appendChild(this.renderTaskbar());'));
+		assert.ok(!renderTransferPage.includes('shouldRenderTaskbar'));
+		assert.ok(!editor.includes('private shouldRenderTaskbar(): boolean'));
 	});
 
-	test('creates, refreshes, and removes the taskbar as terminal task state changes', () => {
+	test('creates or refreshes the taskbar without removing it for terminal state', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const refreshTaskbar = editor.slice(
+			editor.indexOf('private refreshTaskbar(): void'),
+			editor.indexOf('private isTerminalPanelVisibleForCurrentPage(): boolean')
+		);
 
-		assert.ok(editor.includes('if (!this.shouldRenderTaskbar()) {'));
-		assert.ok(editor.includes('current?.remove();'));
-		assert.ok(editor.includes("const transferPage = this.container.querySelector<HTMLElement>('.turbofile-transfer-page');"));
-		assert.ok(editor.includes('transferPage?.appendChild(this.renderTaskbar());'));
-		assert.ok(editor.includes('current.replaceWith(this.renderTaskbar());'));
+		assert.ok(refreshTaskbar.includes("const transferPage = this.container.querySelector<HTMLElement>('.turbofile-transfer-page');"));
+		assert.ok(refreshTaskbar.includes('transferPage?.appendChild(this.renderTaskbar());'));
+		assert.ok(refreshTaskbar.includes('current.replaceWith(this.renderTaskbar());'));
+		assert.ok(!refreshTaskbar.includes('current?.remove();'));
+		assert.ok(!refreshTaskbar.includes('shouldRenderTaskbar'));
 	});
 });

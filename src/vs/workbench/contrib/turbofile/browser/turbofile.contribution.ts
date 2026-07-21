@@ -3,20 +3,24 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, clearNode } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, clearNode, EventType } from '../../../../base/browser/dom.js';
+import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
+import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
@@ -25,13 +29,17 @@ import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { WorkbenchPhase, registerWorkbenchContribution2, IWorkbenchContribution } from '../../../common/contributions.js';
-import { EditorExtensions, EditorsOrder } from '../../../common/editor.js';
+import { ResourceContextKey } from '../../../common/contextkeys.js';
+import { EditorExtensions, EditorsOrder, GroupIdentifier, GroupModelChangeKind } from '../../../common/editor.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewsRegistry, ViewContainer, ViewContainerLocation, IViewDescriptorService } from '../../../common/views.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { TurboFileEditor } from './turbofileEditor.js';
+import { ensureTurboFileTransferTabsLeft, getTurboFileTransferTargetIndex } from './turbofileDocumentTabAffinity.js';
+import { findTurboFileEditorInputForResource, renameTurboFileEditorInput } from './turbofileTabRename.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 
 interface TurboFileActivityEntry {
@@ -116,7 +124,7 @@ function createTurboFileTransferEditorInput(instantiationService: IInstantiation
 		static override readonly ID = editorPaneId;
 	}
 
-	Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	const editorPaneRegistration = Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 		EditorPaneDescriptor.create(
 			TurboFileTransferEditor,
 			TurboFileTransferEditor.ID,
@@ -127,7 +135,9 @@ function createTurboFileTransferEditorInput(instantiationService: IInstantiation
 		]
 	);
 
-	return instantiationService.createInstance(TurboFileTransferEditorInput, instanceId, ordinal, editorPaneId);
+	const input = instantiationService.createInstance(TurboFileTransferEditorInput, instanceId, ordinal, editorPaneId);
+	input.setEditorPaneRegistration(editorPaneRegistration);
+	return input;
 }
 
 function getActiveTurboFileEditorInput(editorService: IEditorService): TurboFileEditorInput | undefined {
@@ -195,17 +205,47 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	static readonly ID = 'workbench.contrib.turbofile.startup';
 	private isOpeningTurboFilePage = false;
 	private readonly activePagesByInstanceId = new Map<string, TurboFileWorkbenchPage>();
+	private readonly normalizingTabGroups = new Set<GroupIdentifier>();
 
 	constructor(
 		@IEditorService private readonly editorService: IEditorService,
+		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IViewsService private readonly viewsService: IViewsService,
-		@IInstantiationService private readonly instantiationService: IInstantiationService
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IQuickInputService private readonly quickInputService: IQuickInputService
 	) {
 		super();
 		this.activateTurboFileShell();
 		this.renderNavigation();
 		void this.openTurboFilePage('transfer', true);
+		this._register(addDisposableListener(document, EventType.KEY_DOWN, event => {
+			const keyboardEvent = new StandardKeyboardEvent(event);
+			if (
+				keyboardEvent.keyCode !== KeyCode.F2 ||
+				keyboardEvent.ctrlKey ||
+				keyboardEvent.shiftKey ||
+				keyboardEvent.altKey ||
+				keyboardEvent.metaKey
+			) {
+				return;
+			}
+
+			const focusedElement = document.activeElement;
+			if (!(focusedElement instanceof HTMLElement) || !focusedElement.matches('.tab[data-resource-name^="transfer-"]')) {
+				return;
+			}
+
+			const input = this.getActiveTurboFileEditorInput();
+			if (!input) {
+				return;
+			}
+
+			keyboardEvent.preventDefault();
+			keyboardEvent.stopPropagation();
+			void renameTurboFileEditorInput(input, this.quickInputService);
+		}));
 
 		this._register(viewsService.onDidChangeViewContainerVisibility(event => {
 			if (!event.visible) {
@@ -232,6 +272,21 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			this.activateTurboFileShell();
 			this.renderNavigation();
 		}));
+		this._register(this.editorService.onDidEditorsChange(event => {
+			if (event.event.kind !== GroupModelChangeKind.EDITOR_OPEN && event.event.kind !== GroupModelChangeKind.EDITOR_MOVE) {
+				return;
+			}
+			const group = this.editorGroupsService.getGroup(event.groupId);
+			if (!group || this.normalizingTabGroups.has(group.id)) {
+				return;
+			}
+			this.normalizingTabGroups.add(group.id);
+			try {
+				ensureTurboFileTransferTabsLeft(group);
+			} finally {
+				this.normalizingTabGroups.delete(group.id);
+			}
+		}));
 	}
 
 	private activateTurboFileShell(): void {
@@ -242,8 +297,11 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
 		}
-		if (this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
-			this.layoutService.setPartHidden(true, Parts.STATUSBAR_PART);
+		// Keep the native statusbar layout slot visible even when an older TurboFile profile persisted
+		// `workbench.statusBar.visible: false`. The fixed taskbar occupies this exact 22px region; without
+		// the slot, the panel and xterm extend behind it and the terminal's last row is obscured.
+		if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
+			void this.configurationService.updateValue('workbench.statusBar.visible', true, ConfigurationTarget.MEMORY);
 		}
 		this.resizeTurboFileSideBar();
 		this.layoutService.layout();
@@ -265,14 +323,22 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	}
 
 	private async openOrRevealTurboFileEditor(): Promise<TurboFileEditorInput> {
-		const input = this.getActiveTurboFileEditorInput() ?? getMostRecentTurboFileEditorInput(this.editorService) ?? this.createTurboFileEditorInput();
-		await this.editorService.openEditor(input, { pinned: true });
+		const existingInput = this.getActiveTurboFileEditorInput() ?? getMostRecentTurboFileEditorInput(this.editorService);
+		if (existingInput) {
+			await this.editorService.openEditor(existingInput, { pinned: true });
+			return existingInput;
+		}
+
+		const input = this.createTurboFileEditorInput();
+		const editors = this.editorService.activeEditorPane?.group.editors ?? [];
+		await this.editorService.openEditor(input, { pinned: true, index: getTurboFileTransferTargetIndex(editors) });
 		return input;
 	}
 
 	private async openNewTransferPage(): Promise<TurboFileEditorInput> {
 		const input = this.createTurboFileEditorInput();
-		await this.editorService.openEditor(input, { pinned: true });
+		const editors = this.editorService.activeEditorPane?.group.editors ?? [];
+		await this.editorService.openEditor(input, { pinned: true, index: getTurboFileTransferTargetIndex(editors) });
 		await this.viewsService.openViewContainer(TURBOFILE_ACTIVITY_ENTRIES[0].containerId, false);
 		turboFileActivePage = 'transfer';
 		this.activePagesByInstanceId.set(input.instanceId, 'transfer');
@@ -407,8 +473,14 @@ class OpenTurboFileAction extends Action2 {
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const editorService = accessor.get(IEditorService);
 		const instantiationService = accessor.get(IInstantiationService);
-		const input = getActiveTurboFileEditorInput(editorService) ?? getMostRecentTurboFileEditorInput(editorService) ?? createTurboFileTransferEditorInput(instantiationService);
-		await editorService.openEditor(input, { pinned: true });
+		let input = getActiveTurboFileEditorInput(editorService) ?? getMostRecentTurboFileEditorInput(editorService);
+		if (input) {
+			await editorService.openEditor(input, { pinned: true });
+		} else {
+			input = createTurboFileTransferEditorInput(instantiationService);
+			const editors = editorService.activeEditorPane?.group.editors ?? [];
+			await editorService.openEditor(input, { pinned: true, index: getTurboFileTransferTargetIndex(editors) });
+		}
 		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer', targetInstanceId: input.instanceId });
 	}
 }
@@ -433,8 +505,37 @@ class NewTurboFileTransferPageAction extends Action2 {
 		const editorService = accessor.get(IEditorService);
 		const instantiationService = accessor.get(IInstantiationService);
 		const input = createTurboFileTransferEditorInput(instantiationService);
-		await editorService.openEditor(input, { pinned: true });
+		const editors = editorService.activeEditorPane?.group.editors ?? [];
+		await editorService.openEditor(input, { pinned: true, index: getTurboFileTransferTargetIndex(editors) });
 		turboFileWorkbenchBridge.run({ type: 'showPage', page: 'transfer', targetInstanceId: input.instanceId });
+	}
+}
+
+class RenameTurboFileTransferTabAction extends Action2 {
+	constructor() {
+		super({
+			id: 'turbofile.renameTransferTab',
+			title: localize2('renameTurboFileTransferTab', '重命名标签页'),
+			f1: false,
+			menu: {
+				id: MenuId.EditorTitleContext,
+				when: ResourceContextKey.Scheme.isEqualTo(TurboFileEditorInput.RESOURCE_SCHEME),
+				group: '2_files',
+				order: 1
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor, resource?: URI): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const input = URI.isUri(resource)
+			? findTurboFileEditorInputForResource(editorService, resource)
+			: getActiveTurboFileEditorInput(editorService);
+		if (!input) {
+			return;
+		}
+
+		await renameTurboFileEditorInput(input, accessor.get(IQuickInputService));
 	}
 }
 
@@ -479,4 +580,5 @@ for (const entry of TURBOFILE_VISIBLE_ACTIVITY_ENTRIES) {
 
 registerAction2(OpenTurboFileAction);
 registerAction2(NewTurboFileTransferPageAction);
+registerAction2(RenameTurboFileTransferTabAction);
 registerWorkbenchContribution2(TurboFileStartupContribution.ID, TurboFileStartupContribution, WorkbenchPhase.AfterRestored);

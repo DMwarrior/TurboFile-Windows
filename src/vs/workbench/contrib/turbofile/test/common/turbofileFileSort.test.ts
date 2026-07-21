@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { sortTurboFileItems, TurboFileSortDirection, TurboFileSortKey, TurboFileSortableItem } from '../../common/turbofileFileSort.js';
+import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey, TurboFileSortableItem } from '../../common/turbofileFileSort.js';
 
 suite('TurboFileFileSort', () => {
 	const item = (name: string, options: Partial<TurboFileSortableItem> = {}): TurboFileSortableItem => ({
@@ -37,6 +37,44 @@ suite('TurboFileFileSort', () => {
 			['..', 'docs', 'alpha.png', 'beta.txt', 'zeta.txt'],
 			['..', 'docs', 'alpha.png', 'beta.txt', 'zeta.txt']
 		]);
+	});
+
+	test('sorts every key correctly in both directions before rendering', () => {
+		assert.deepStrictEqual([
+			names('name', 'descending'),
+			names('modified', 'descending'),
+			names('size', 'ascending'),
+			names('type', 'descending')
+		], [
+			['..', 'docs', 'zeta.txt', 'beta.txt', 'alpha.png'],
+			['..', 'docs', 'beta.txt', 'zeta.txt', 'alpha.png'],
+			['..', 'docs', 'zeta.txt', 'beta.txt', 'alpha.png'],
+			['..', 'docs', 'beta.txt', 'zeta.txt', 'alpha.png']
+		]);
+	});
+
+	test('requires complete attributes only for modified-time and size sorting', () => {
+		const pending = [item('pending.txt', { attrsPending: true })];
+
+		assert.deepStrictEqual({
+			modifiedNeedsAttributes: turboFileSortNeedsAttributes('modified'),
+			sizeNeedsAttributes: turboFileSortNeedsAttributes('size'),
+			nameNeedsAttributes: turboFileSortNeedsAttributes('name'),
+			typeNeedsAttributes: turboFileSortNeedsAttributes('type'),
+			modifiedReady: isTurboFileListingReadyForSort(pending, 'modified'),
+			sizeReady: isTurboFileListingReadyForSort(pending, 'size'),
+			nameReady: isTurboFileListingReadyForSort(pending, 'name'),
+			typeReady: isTurboFileListingReadyForSort(pending, 'type')
+		}, {
+			modifiedNeedsAttributes: true,
+			sizeNeedsAttributes: true,
+			nameNeedsAttributes: false,
+			typeNeedsAttributes: false,
+			modifiedReady: false,
+			sizeReady: false,
+			nameReady: true,
+			typeReady: true
+		});
 	});
 
 	test('applies the same sort key to folders as to files (folders ordered among themselves by the key)', () => {

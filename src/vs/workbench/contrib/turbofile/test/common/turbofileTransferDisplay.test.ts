@@ -4,9 +4,29 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { getVisibleTransferStartedAt, shouldStartTransferTiming, chooseDisplayTransferSpeed } from '../../common/turbofileTransferDisplay.js';
+import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming } from '../../common/turbofileTransferDisplay.js';
 
 suite('TurboFileTransferDisplay', () => {
+	test('tracks a total only for exactly one ordinary file', () => {
+		assert.deepStrictEqual(createTurboFileTransferSizePolicy([{ directory: false, rawSize: 4096 }]), {
+			trackTotalBytes: true,
+			totalBytes: 4096
+		});
+		assert.deepStrictEqual(createTurboFileTransferSizePolicy([{ directory: true, rawSize: 0 }]), { trackTotalBytes: false });
+		assert.deepStrictEqual(createTurboFileTransferSizePolicy([
+			{ directory: false, rawSize: 10 },
+			{ directory: false, rawSize: 20 }
+		]), { trackTotalBytes: false });
+	});
+
+	test('never exposes a protocol-reported total for an unknown-total selection', () => {
+		assert.strictEqual(resolveTurboFileVisibleTotalBytes({
+			trackTotalBytes: false,
+			listedTotalBytes: 0,
+			reportedTotalBytes: 8192
+		}), undefined);
+	});
+
 	test('shows rsync as visibly started before first bytes without starting data timing', () => {
 		assert.strictEqual(shouldStartTransferTiming({
 			phase: 'transfer',

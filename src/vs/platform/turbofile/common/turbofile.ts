@@ -42,6 +42,12 @@ export interface ITurboFileSshService {
 	transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult>;
 	cancelTransfer(progressId: string): Promise<ITurboFileFileOperationResult>;
 	createDirectory(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult>;
+	movePathsToTrash(request: ITurboFileMoveToTrashRequest): Promise<ITurboFileTrashOperationResult>;
+	listTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashListing>;
+	restoreTrashItems(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult>;
+	permanentlyDeleteTrashItems(request: ITurboFileTrashItemsRequest): Promise<ITurboFileTrashOperationResult>;
+	emptyTrash(device: ITurboFileTrashDevice): Promise<ITurboFileTrashOperationResult>;
+	getTrashState(device: ITurboFileTrashDevice): Promise<ITurboFileTrashState>;
 	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
 	/**
 	 * Deletes many paths in as few round trips as possible (POSIX remote: a single `xargs -0 rm`).
@@ -68,6 +74,8 @@ export interface ITurboFileSshService {
 	 * the caller can fall back to the per-image path.
 	 */
 	readImageBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[], maxWidth?: number): Promise<ITurboFileImageBatchEntry[]>;
+	/** Reads file stat and original image dimensions in bounded batches for stable grid sorting. */
+	readImageMetadataBatch(endpoint: ITurboFileTransferEndpoint, paths: readonly string[]): Promise<ITurboFileImageMetadataEntry[]>;
 	createImageResource(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileImageResourceOptions): Promise<ITurboFileImageResourceResult>;
 	releaseImageResource(url: string): Promise<void>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
@@ -174,6 +182,74 @@ export interface ITurboFileTransferEndpoint {
 	readonly preferredProtocol?: TurboFileTransferProtocol;
 }
 
+export interface ITurboFileTrashDevice {
+	readonly kind: TurboFileEndpointKind;
+	readonly connection?: ITurboFileSshConnectionOptions;
+	readonly label?: string;
+	readonly localUserIdentity?: string;
+	readonly windows?: boolean;
+}
+
+export interface ITurboFileTrashSource {
+	readonly endpoint: ITurboFileTransferEndpoint;
+	readonly type: TurboFileFileType;
+	readonly knownSize?: number;
+}
+
+export interface ITurboFileMoveToTrashRequest {
+	readonly device: ITurboFileTrashDevice;
+	readonly sources: readonly ITurboFileTrashSource[];
+}
+
+export interface ITurboFileTrashItemsRequest {
+	readonly device: ITurboFileTrashDevice;
+	readonly items: readonly ITurboFileTrashItem[];
+}
+
+export interface ITurboFileRestoreTrashRequest extends ITurboFileTrashItemsRequest {
+	readonly conflictPolicy: 'cancel' | 'keepBoth';
+}
+
+export interface ITurboFileTrashItem {
+	readonly id: string;
+	readonly originalName: string;
+	readonly originalPath: string;
+	readonly deletedAt: number;
+	readonly type: TurboFileFileType;
+	readonly knownSize?: number;
+	readonly volumeId: string;
+	readonly trashRoot: string;
+	readonly payloadPath: string;
+	readonly deviceIdentity: string;
+	readonly damaged?: boolean;
+	readonly damageMessage?: string;
+}
+
+export interface ITurboFileTrashItemResult {
+	readonly id?: string;
+	readonly path: string;
+	readonly ok: boolean;
+	readonly message: string;
+	readonly conflict?: boolean;
+	readonly restoredPath?: string;
+}
+
+export interface ITurboFileTrashOperationResult extends ITurboFileFileOperationResult {
+	readonly completed: number;
+	readonly failed: number;
+	readonly results: readonly ITurboFileTrashItemResult[];
+}
+
+export interface ITurboFileTrashListing extends ITurboFileFileOperationResult {
+	readonly items: readonly ITurboFileTrashItem[];
+	readonly inaccessibleVolumes: readonly string[];
+}
+
+export interface ITurboFileTrashState extends ITurboFileFileOperationResult {
+	readonly hasItems: boolean;
+	readonly itemCount: number;
+}
+
 export interface ITurboFileTransferRequest {
 	readonly source: ITurboFileTransferEndpoint;
 	readonly target: ITurboFileTransferEndpoint;
@@ -224,7 +300,16 @@ export interface ITurboFileWindowsDragItem {
 export interface ITurboFileStartWindowsDragRequest {
 	readonly source: ITurboFileTransferEndpoint;
 	readonly items: readonly ITurboFileWindowsDragItem[];
+	readonly operation?: 'copy' | 'move';
 	readonly progressId?: string;
+}
+
+export interface ITurboFileImageMetadataEntry {
+	readonly path: string;
+	readonly size: number;
+	readonly modified: number;
+	readonly width?: number;
+	readonly height?: number;
 }
 
 export interface ITurboFileStartWindowsDragResult extends ITurboFileFileOperationResult {

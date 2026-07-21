@@ -27,4 +27,20 @@ suite('TurboFileWindowsPath', () => {
 
 		assert.deepStrictEqual(paths, ['C:\\Users\\me\\Desktop\\missing']);
 	});
+
+	test('resolves very large Explorer selections concurrently with a fixed upper bound', async () => {
+		const inputs = Array.from({ length: 100 }, (_, index) => `C:\\Data\\${String(index).padStart(3, '0')}.png`);
+		let active = 0;
+		let maximumActive = 0;
+		const paths = await normalizeWindowsTransferPaths(inputs, async path => {
+			active++;
+			maximumActive = Math.max(maximumActive, active);
+			await new Promise<void>(resolve => setTimeout(resolve, 1));
+			active--;
+			return path;
+		});
+
+		assert.deepStrictEqual(paths, inputs);
+		assert.strictEqual(maximumActive, 16);
+	});
 });

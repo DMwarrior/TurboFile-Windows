@@ -9,6 +9,26 @@ import * as path from 'path';
 import { getTurboFileImageGridPasteTargetSide } from '../../common/turbofileImageGridClipboard.js';
 
 suite('TurboFileImageGridPane', () => {
+	test('retains each pane image root across renders caused by the opposite pane', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderImageGrid = editor.slice(editor.indexOf('private renderImageGridPage('), editor.indexOf('private reflowAttachedImageGridBody('));
+		const releaseState = editor.slice(editor.indexOf('private releaseImageGridState('), editor.indexOf('private releaseAllImageGridStates('));
+
+		assert.deepStrictEqual({
+			stateOwnsRoot: editor.includes('retainedPaneRoot?: HTMLElement;'),
+			stateOwnsDisposables: editor.includes('paneDomDisposables?: DisposableStore;'),
+			reusesRoot: renderImageGrid.includes('state.retainedPaneRoot'),
+			disposesListeners: releaseState.includes('state.paneDomDisposables?.dispose()'),
+			clearsRoot: releaseState.includes('state.retainedPaneRoot = undefined')
+		}, {
+			stateOwnsRoot: true,
+			stateOwnsDisposables: true,
+			reusesRoot: true,
+			disposesListeners: true,
+			clearsRoot: true
+		});
+	});
+
 	test('pastes into the focused pane grid when clipboard came from the other side', () => {
 		assert.deepStrictEqual([
 			getTurboFileImageGridPasteTargetSide('right', 'left'),
@@ -41,15 +61,11 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns + 1);'));
 	});
 
-	test('sorts image grid size by pixel area and removes the separate dimensions option', () => {
+	test('sorts image grid from file-list metadata without scanning image headers', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const sortOptions = editor.slice(
 			editor.indexOf('const IMAGE_GRID_SORT_OPTIONS'),
-			editor.indexOf('const IMAGE_GRID_SORT_COLLATOR')
-		);
-		const comparator = editor.slice(
-			editor.indexOf('function compareImageGridImagesBy'),
-			editor.indexOf('function sortImageGridImages')
+			editor.indexOf('const IMAGE_GRID_COLUMN_MIN')
 		);
 		const setSortKey = editor.slice(
 			editor.indexOf('private setImageGridSortKey('),
@@ -59,10 +75,30 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(sortOptions.includes("{ key: 'size',"));
 		assert.ok(!sortOptions.includes("'dimensions'"));
 		assert.ok(editor.includes('private imageGridSortDescending = true;'));
-		assert.ok(comparator.includes("case 'size':"));
-		assert.ok(comparator.includes('getImageGridPixelArea(a) - getImageGridPixelArea(b)'));
-		assert.ok(!comparator.includes('a.item.rawSize'));
+		assert.ok(editor.includes('sortTurboFileImageGridItems('));
+		assert.ok(editor.includes('rawSize: image.item.rawSize'));
+		assert.ok(editor.includes('sizeKnown: !image.item.attrsPending'));
+		assert.ok(!editor.includes('this.sshService.readImageMetadataBatch(endpoint, paths)'));
+		assert.ok(!editor.includes('private prepareImageGridSortMetadata('));
+		assert.ok(!editor.includes('private resortImageGridAfterSizeUpdate('));
+		assert.ok(editor.includes('state.thumbnailLoadToken++;'));
+		assert.ok(editor.includes('const currentIndex = state.images.indexOf(image);'));
+		assert.ok(editor.includes('const currentIndex = state.images.indexOf(target.image);'));
+		assert.ok(editor.includes('state.previewPendingIndex = undefined;'));
 		assert.ok(setSortKey.includes('state.sortKey === key ? state.sortDescending : true'));
+	});
+
+	test('updates only the active image grid when sorting', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const applySort = editor.slice(
+			editor.indexOf('private applyImageGridSort('),
+			editor.indexOf('private resortImageGridState(')
+		);
+
+		assert.ok(applySort.includes('this.updateImageGridAfterSort(state);'));
+		assert.ok(!applySort.includes('this.render();'));
+		assert.ok(!applySort.includes('this.clearImageGridLoadedImageIndexes(state);'));
+		assert.ok(editor.includes('private updateImageGridAfterSort(state: TurboFileImageGridState): void'));
 	});
 
 	test('renders image-grid sort fields and direction as separate menu groups', () => {
@@ -84,6 +120,59 @@ suite('TurboFileImageGridPane', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		assert.ok(editor.includes('private updateImageGridAfterLocalMutation(state: TurboFileImageGridState): void'));
 		assert.ok(editor.includes('this.updateImageGridAfterLocalMutation(state);'));
+	});
+
+	test('routes explicit pane and image deletion through the recycle-bin service', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const deleteSelected = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async moveUserItemsToTrash('));
+		const deleteGrid = editor.slice(editor.indexOf('private async deleteSelectedImageGridItems('), editor.indexOf('private async deleteImageGridPreview('));
+		const deletePreview = editor.slice(editor.indexOf('private async deleteImageGridPreview('), editor.indexOf('private setImageGridColumns('));
+
+		assert.ok(deleteSelected.includes('moveUserItemsToTrash'));
+		assert.ok(deleteGrid.includes('moveUserItemsToTrash'));
+		assert.ok(deletePreview.includes('moveUserItemsToTrash'));
+		assert.ok(editor.includes('this.sshService.movePathsToTrash({'));
+	});
+
+	test('places the per-pane recycle-bin button immediately after explicit delete', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderPane = editor.slice(editor.indexOf('private renderPane('), editor.indexOf('private renderDeviceSelect('));
+		const deleteIndex = renderPane.indexOf("'删除选中项'");
+		const recycleIndex = renderPane.indexOf('this.appendRecycleBinButton(toolbar, side);');
+		const copyPathIndex = renderPane.indexOf("'复制当前路径'");
+
+		assert.ok(deleteIndex >= 0);
+		assert.ok(deleteIndex < recycleIndex);
+		assert.ok(recycleIndex < copyPathIndex);
+		assert.ok(editor.includes('trashMode: leaveTurboFileTrashView()'));
+	});
+
+	test('renders the bundled Windows Recycle Bin artwork without the old status badge', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+		const appendRecycleBinButton = editor.slice(editor.indexOf('private appendRecycleBinButton('), editor.indexOf('private createButton('));
+
+		assert.ok(appendRecycleBinButton.includes('getTurboFileRecycleBinIcon(state.trashHasItems)'));
+		assert.ok(appendRecycleBinButton.includes("document.createElement('img')"));
+		assert.ok(!appendRecycleBinButton.includes('renderIcon(Codicon.trash)'));
+		assert.ok(!css.includes('.turbofile-recycle-bin-button.is-full .turbofile-recycle-bin-icon::after'));
+	});
+
+	test('keeps the previous Chinese danger confirmation while ordinary deletion moves items to trash', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const deleteSelected = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async moveUserItemsToTrash('));
+		const deleteGrid = editor.slice(editor.indexOf('private async deleteSelectedImageGridItems('), editor.indexOf('private async deleteImageGridPreview('));
+		const deletePreview = editor.slice(editor.indexOf('private async deleteImageGridPreview('), editor.indexOf('private setImageGridColumns('));
+
+		assert.ok(deleteSelected.includes("showDialogConfirm('删除确认'"));
+		assert.ok(deleteSelected.includes('确定删除选中的'));
+		assert.ok(deleteGrid.includes("showDialogConfirm('删除图片'"));
+		assert.ok(deleteGrid.includes('确定删除选中的'));
+		assert.ok(deletePreview.includes("showDialogConfirm('删除图片'"));
+		for (const method of [deleteSelected, deleteGrid, deletePreview]) {
+			assert.ok(method.includes('moveUserItemsToTrash'));
+			assert.ok(!method.includes('moveToRecycleBinTitle'));
+		}
 	});
 
 	test('times out stalled preview element decodes so image preview can recover', () => {

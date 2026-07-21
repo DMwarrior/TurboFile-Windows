@@ -10,6 +10,34 @@ export const TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 300;
 export const TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 export const TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 
+export interface ITurboFileTransferSizeItem {
+	readonly directory?: boolean;
+	readonly rawSize: number;
+}
+
+export interface ITurboFileTransferSizePolicy {
+	readonly trackTotalBytes: boolean;
+	readonly totalBytes?: number;
+}
+
+export function createTurboFileTransferSizePolicy(items: readonly ITurboFileTransferSizeItem[]): ITurboFileTransferSizePolicy {
+	if (items.length !== 1 || items[0].directory) {
+		return { trackTotalBytes: false };
+	}
+	return { trackTotalBytes: true, totalBytes: Math.max(0, items[0].rawSize) };
+}
+
+export function resolveTurboFileVisibleTotalBytes(options: {
+	readonly trackTotalBytes: boolean;
+	readonly listedTotalBytes?: number;
+	readonly reportedTotalBytes?: number;
+}): number | undefined {
+	if (!options.trackTotalBytes) {
+		return undefined;
+	}
+	return Math.max(0, options.listedTotalBytes ?? 0, options.reportedTotalBytes ?? 0);
+}
+
 export function isTurboFileRsyncStrategy(strategy: string | undefined): boolean {
 	return strategy?.startsWith('rsync') ?? false;
 }

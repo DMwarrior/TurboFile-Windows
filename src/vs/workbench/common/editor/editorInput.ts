@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { equals } from '../../../base/common/arrays.js';
 import { Emitter } from '../../../base/common/event.js';
 import { URI } from '../../../base/common/uri.js';
 import { EditorInputCapabilities, Verbosity, GroupIdentifier, ISaveOptions, IRevertOptions, IMoveResult, IEditorDescriptor, IEditorPane, IUntypedEditorInput, EditorResourceAccessor, AbstractEditorInput, isEditorInput, IEditorIdentifier } from '../editor.js';
@@ -63,6 +64,7 @@ export abstract class EditorInput extends AbstractEditorInput {
 	protected readonly _onDidChangeDirty = this._register(new Emitter<void>());
 	protected readonly _onDidChangeLabel = this._register(new Emitter<void>());
 	protected readonly _onDidChangeCapabilities = this._register(new Emitter<void>());
+	private labelExtraClasses: string[] = [];
 
 	private readonly _onWillDispose = this._register(new Emitter<void>());
 
@@ -169,7 +171,19 @@ export abstract class EditorInput extends AbstractEditorInput {
 	 * Returns the extra classes to apply to the label of this input.
 	 */
 	getLabelExtraClasses(): string[] {
-		return [];
+		return [...this.labelExtraClasses];
+	}
+
+	/**
+	 * Replaces transient classes applied to the label of this input.
+	 */
+	setLabelExtraClasses(classes: readonly string[]): void {
+		if (equals(this.labelExtraClasses, classes)) {
+			return;
+		}
+
+		this.labelExtraClasses = [...classes];
+		this._onDidChangeLabel.fire();
 	}
 
 	/**
