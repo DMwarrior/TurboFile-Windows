@@ -534,6 +534,9 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& transferBetweenSshDevices.includes('throw error;'),
 			concurrentAttemptDefersTypedErrors: concurrentBatch.includes('runTurboFileConcurrentBatchAttempt({')
 				&& concurrentBatch.includes('controller.captureDirectError(error)'),
+			recordsOnlySuccessfulChildResults: concurrentBatch.includes('controller.recordResult(result)'),
+			relayFallbackUsesDirectionalAttempt: concurrentBatch.includes("request.strategyHint === 'relay'")
+				&& concurrentBatch.includes('transferAttemptToDirectionalStrategy(request.source, request.targetDirectory, this.getInitialBatchTransferAttempt(request, items))'),
 			completeUsesChosenStrategy: concurrentBatch.includes("'complete', 'Batch transfer completed.'")
 				&& concurrentBatch.includes('strategy: chosenStrategy')
 				&& concurrentBatch.includes('this.createBatchTransferResult(failed === 0, chosenStrategy,')
@@ -541,6 +544,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			childCoreCanPreserveTypedErrors: true,
 			sshPlanCanPreserveTypedErrors: true,
 			concurrentAttemptDefersTypedErrors: true,
+			recordsOnlySuccessfulChildResults: true,
+			relayFallbackUsesDirectionalAttempt: true,
 			completeUsesChosenStrategy: true
 		});
 	});

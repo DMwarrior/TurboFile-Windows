@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { ITurboFileBatchTransferFailure, ITurboFileBatchTransferResult, ITurboFileTransferAttempt } from './turbofile.js';
+import type { ITurboFileBatchTransferFailure, ITurboFileBatchTransferResult, ITurboFileTransferAttempt, ITurboFileTransferResult } from './turbofile.js';
 import { TurboFileDirectDataError, TurboFileDirectUnavailableError } from './turbofileDirectRoute.js';
 
 export interface ITurboFileBatchTransferFlowOptions {
@@ -18,7 +18,7 @@ export interface ITurboFileBatchTransferFlowOptions {
 }
 
 export interface ITurboFileConcurrentBatchAttemptController {
-	recordStrategy(strategy: ITurboFileBatchTransferResult['strategy']): void;
+	recordResult(result: ITurboFileTransferResult): void;
 	captureDirectError(error: unknown): boolean;
 }
 
@@ -57,7 +57,11 @@ export async function runTurboFileConcurrentBatchAttempt(options: ITurboFileConc
 	let unavailableError: TurboFileDirectUnavailableError | undefined;
 	let dataError: TurboFileDirectDataError | undefined;
 	await options.run({
-		recordStrategy: value => strategy ??= value,
+		recordResult: result => {
+			if (result.ok) {
+				strategy ??= result.strategy;
+			}
+		},
 		captureDirectError: error => {
 			if (error instanceof TurboFileDirectDataError) {
 				dataError ??= error;

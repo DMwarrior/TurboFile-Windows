@@ -3580,7 +3580,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const workerLimit = items.some(item => item.sourceType === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
 		const preserveDirectErrors = request.strategyHint === 'direct' && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh';
-		const fallbackStrategy = getTransferStrategy(request.source, request.targetDirectory);
+		const fallbackStrategy = request.strategyHint === 'relay'
+			? transferAttemptToDirectionalStrategy(request.source, request.targetDirectory, this.getInitialBatchTransferAttempt(request, items))
+			: getTransferStrategy(request.source, request.targetDirectory);
 
 		try {
 			const chosenStrategy = await runTurboFileConcurrentBatchAttempt({
@@ -3611,7 +3613,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 								strategyHint: disableRsync && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh' ? 'direct' : request.strategyHint
 							}, preserveDirectErrors);
 							strategies.add(result.strategy);
-							controller.recordStrategy(result.strategy);
+							controller.recordResult(result);
 							if (result.ok) {
 								successfulItems.push(item);
 								completedBytes += result.bytes;

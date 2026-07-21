@@ -172,17 +172,20 @@ suite('TurboFileBatchTransferFlow', () => {
 		]);
 	});
 
-	for (const strategy of ['scp-relay', 'sftp-relay'] as const) {
-		test(`returns the actual ${strategy} child strategy selected by a concurrent batch attempt`, async () => {
+	for (const [failedStrategy, successfulStrategy] of [
+		['scp-direct', 'scp-relay'],
+		['sftp-direct', 'sftp-relay']
+	] as const) {
+		test(`ignores a failed ${failedStrategy} result before a successful ${successfulStrategy} result`, async () => {
 			const actual = await runTurboFileConcurrentBatchAttempt({
 				fallbackStrategy: 'scp-direct',
 				run: async controller => {
-					controller.recordStrategy(strategy);
-					controller.recordStrategy(strategy);
+					controller.recordResult({ ok: false, strategy: failedStrategy, bytes: 0, message: 'failed' });
+					controller.recordResult({ ok: true, strategy: successfulStrategy, bytes: 10, message: 'complete' });
 				}
 			});
 
-			assert.strictEqual(actual, strategy);
+			assert.strictEqual(actual, successfulStrategy);
 		});
 	}
 });

@@ -1,5 +1,20 @@
 # Task 4 报告：进度轮询解耦和准确的中转原因
 
+## Fresh review follow-up：批量结果协议选择顺序
+
+- 并发批量协调器由 `recordStrategy` 改为接收完整的 `recordResult`，并且只记录 `result.ok === true` 的成功子结果。失败的 direct 子结果即使先返回，也不会抢占后续真正承载数据的 relay strategy。
+- SCP 和 SFTP 均覆盖“失败 direct 结果先完成、成功 relay 结果后完成”的顺序，最终 parent `complete` 事件与 batch result 都使用成功的 `scp-relay` / `sftp-relay`。
+- 零成功结果时，仅当本轮请求明确为 `strategyHint: 'relay'`，fallback 才通过 `getInitialBatchTransferAttempt(request, items)` 与 `transferAttemptToDirectionalStrategy(...)` 计算；因此不会再由默认规划误报成 direct，同时保留其他路径原有策略语义。
+- typed direct error 的完整收敛、data-failure 优先级、取消语义与 batch move 最终成功后清源规则均保持不变。
+
+### TDD 与验证
+
+- RED：先将行为测试改为调用 `recordResult` 并加入 failure-first 场景；`npm run compile-check-ts-native` 按预期报两处 `recordResult` 不存在。
+- GREEN：最小实现后 `npm run compile-check-ts-native` 退出码 0。
+- 精确测试：`turbofileBatchTransferFlow.test.js` 10 passing；`turbofileSshMainServiceStatic.test.js` 35 passing。
+- 相关回归：DirectRoute 13、TarProgress 3、1.148Baseline 2、TransferPlan 8、TransferDisplay 6 passing。
+- 本轮合计 77 项通过，0 失败；`git diff --check` 无 whitespace error，仅有仓库既有 LF/CRLF 提示。
+
 ## 结果
 
 - SCP 与 SFTP 直连仍启动 `beginRemoteFileGrowthTiming` / `beginRemotePathGrowthTiming` 发布目标增长进度，但数据命令不再把该 probe 的 `lastActivityAt` / `markActivity` 接入 `execRemote` inactivity watchdog。目标暂不增长或 probe 自身失败不会再关闭仍工作的数据通道。
