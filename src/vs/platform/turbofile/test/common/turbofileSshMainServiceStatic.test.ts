@@ -441,13 +441,54 @@ suite('TurboFileSshMainServiceStatic', () => {
 			registersBeforeConnect: connect.indexOf('this.registerTransferCancelHandler(progressId') >= 0 && connect.indexOf('this.registerTransferCancelHandler(progressId') < connect.indexOf('client.connect('),
 			cancelEndsClient: connect.includes('client.end();'),
 			cancelRejectsTyped: connect.includes('reject(new TurboFileTransferCanceledError())'),
-			cleanupOrder: verification.indexOf('credential?.cleanupCommand') < verification.indexOf('unregisterCancel();') && verification.indexOf('unregisterCancel();') < verification.lastIndexOf('client.end();')
+			keepsConnectedClientAlive: !verification.includes('this.registerTransferCancelHandler(progressId, () => client.end())'),
+			cleanupBeforeEnd: verification.indexOf('credential?.cleanupCommand') < verification.lastIndexOf('client.end();')
 		}, {
 			usesCancelableConnect: true,
 			registersBeforeConnect: true,
 			cancelEndsClient: true,
 			cancelRejectsTyped: true,
-			cleanupOrder: true
+			keepsConnectedClientAlive: true,
+			cleanupBeforeEnd: true
+		});
+	});
+
+	test('keeps temporary direct credentials cancelable and cleanup-safe', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const wrapper = methodBlock(service, 'private async runVerifiedDirectRouteAttempt<T>', 'private async verifyDirectSshRoute');
+		const verification = methodBlock(service, 'private async verifyDirectSshRoute', 'private async resolveRemoteRsyncSshBinary');
+		const batchTar = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
+		const directTar = methodBlock(service, 'private async tryDirectTarTransferRoute', 'private async tryDirectRsyncTransfer');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const credential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
+		const exec = methodBlock(service, 'private execRemote(client: ISSHClient', 'private execRemoteBytes');
+		const execBytes = methodBlock(service, 'private execRemoteBytes', 'private execRemoteWithInput');
+
+		assert.deepStrictEqual({
+			prechecksRun: wrapper.includes('run: async (route, retry) => {\n\t\t\t\tthis.throwIfTransferCanceled(progressId);') && wrapper.indexOf('this.throwIfTransferCanceled(progressId);') < wrapper.indexOf("if (retry) {") && wrapper.indexOf("if (retry) {") < wrapper.indexOf('return await run(route, retry);'),
+			prechecksVerify: wrapper.includes('verify: async route => {\n\t\t\t\tthis.throwIfTransferCanceled(progressId);'),
+			strictVerifierRead: verification.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, progressId, true)'),
+			legacyFallback: credential.includes('strictPrivateKeyRead = false') && credential.includes('this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined)'),
+			legacyCallersNonStrict: [batchTar, directTar, directScp].every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId)')),
+			checksCancelBeforeSetup: credential.indexOf('this.throwIfTransferCanceled(progressId);') > credential.indexOf('const privateKey =') && credential.indexOf('this.throwIfTransferCanceled(progressId);') < credential.indexOf('const identityPath ='),
+			keepsClientsAliveForCleanup: [batchTar, directTar, directScp].every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('client.end();')),
+			cancelableDataExec: batchTar.includes('progressId: request.progressId') && directTar.includes('progressId: request.progressId') && (directScp.match(/progressId: request\.progressId/g)?.length ?? 0) >= 2,
+			execPrechecksCancellation: [exec, execBytes].every(block => {
+				const precheck = block.indexOf('this.throwIfTransferCanceled(options.progressId);');
+				return precheck >= 0
+					&& precheck < block.indexOf('this.registerTransferCancelHandler(options.progressId')
+					&& precheck < block.indexOf('client.exec(');
+			})
+		}, {
+			prechecksRun: true,
+			prechecksVerify: true,
+			strictVerifierRead: true,
+			legacyFallback: true,
+			legacyCallersNonStrict: true,
+			checksCancelBeforeSetup: true,
+			keepsClientsAliveForCleanup: true,
+			cancelableDataExec: true,
+			execPrechecksCancellation: true
 		});
 	});
 

@@ -43,11 +43,23 @@
 2. 在主服务静态测试中增加 connect 前注册取消、取消 end+typed reject、verifier cleanup 顺序及新分类调用断言；exact test 得到 `27 passing, 2 failing`。
 3. 最小实现后，common exact test 为 `14 passing (6ms)`，static exact test 为 `29 passing (56ms)`。
 
+### 独立审查修复 RED：取消时的私钥清理与兼容 fallback
+
+1. 先增加精确静态断言，要求 wrapper 在 retry 进度、真实 run 和 verify 前检查取消；verifier 使用 strict 私钥读取；旧三条数据路径保持非 strict；setup 前检查取消；临时 key 路径不提前 end client；SCP 两个数据 exec 都传 progressId。
+2. 尚未修改实现时，静态 exact test 得到 `28 passing, 2 failing`：verifier 的提前 end 单项失败，其余七个目标字段均为 `false`。
+3. 最小实现后，静态 exact test 得到 `30 passing`。
+
+### 自审补充 RED：exec 已取消预检查竞态
+
+1. 增加精确静态断言，要求 `execRemote` 与 `execRemoteBytes` 在注册取消 handler 和调用 `client.exec` 前同步检查已置位的取消状态。
+2. 尚未修改实现时，静态 exact test 得到 `29 passing, 1 failing`，唯一失败字段为 `execPrechecksCancellation: false`。
+3. 两个 exec 入口增加最小预检查后，`npm run compile-check-ts-native` 通过，静态 exact test 得到 `30 passing (57ms)`。
+
 ### 公共协调器测试
 
 - 初次执行 exact 命令时，受保护的现有 `out` 中缺少 `turbofileDirectRoute.test.js`，runner 报 `ERR_MODULE_NOT_FOUND`，未进入断言阶段。
 - 随后复用 Task 1 已接受的隔离方式：临时脚本只原样 transpile direct-route source/test 与静态 test，并生成 runner 所需的最小 utils/errors 模块。
-- 再次执行 exact 命令 `npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileDirectRoute.test.ts`；审阅修复后的最终结果为 `14 passing (6ms)`。
+- 再次执行 exact 命令 `npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileDirectRoute.test.ts`；最终结果为 `14 passing (7ms)`。
 - 没有运行 gulp/watch/compile-client/npm compile；临时脚本与五个定向 `out` 文件在提交前删除。
 
 ### 最终 Step 6 顺序
@@ -55,7 +67,7 @@
 1. `npm run compile-check-ts-native`：退出码 0，无 TypeScript 错误。
 2. common exact test：`14 passing (6ms)`。
 3. `npm run compile-check-ts-native`：退出码 0，无 TypeScript 错误。
-4. static exact test：`29 passing (56ms)`。
+4. static exact test：`30 passing (50ms)`。
 
 ## 关键变更
 
@@ -75,14 +87,19 @@
 - marker 使用 `printf %s` 和独立 shell quoting，输出必须精确等于 `__TURBOFILE_DIRECT_READY__`。
 - marker exec 复用 `DIRECT_TRANSFER_STALL_TIMEOUT_MS` 总上限；超时属于执行端 exec 内部不确定性，返回 `indeterminate`。
 - `connect(config, progressId?)` 在 `client.connect` 前注册 cancel handler；取消会先 settle，再 `client.end()` 并 reject typed cancellation。只有 verifier 传 progressId，其他连接调用保持原行为。
-- 连接成功后 verifier 继续注册生命周期 cancel handler 并再次检查取消；marker exec 也传入 progressId。
+- 连接成功后的 verifier 不再注册会提前 end client 的生命周期 handler；setup 和 marker exec 各自用 progressId 立即关闭 channel，cleanup 不带 progressId 并使用仍存活的 client，最后才 end。
 - wrapper 在 run/verify 边界把已置位取消状态规范化为 `TurboFileTransferCanceledError`，已有 typed cancellation 原样传播。
+- wrapper 在 retry 进度前、真实 run 前和 verify 边界均预检查取消，取消后不会再启动数据命令。
+- `execRemote` 与 `execRemoteBytes` 在注册 channel 取消 handler 和启动 `client.exec` 前同步预检查，已取消请求不会跨过 exec 边界。
 
 ### 凭据生命周期
 
 - 密码、内嵌私钥、本机私钥路径统一经 `prepareRemoteScpCredential`。
 - 私钥只写入执行端 `/tmp`；正常路径在 `finally` 删除。
 - setup/chmod 半失败时 helper 按已知 identity path best-effort 删除后重抛，避免在返回 cleanupCommand 前遗留私钥。
+- helper 在读 key 后、写入前检查取消；setup 取消后保留 client 完成 best-effort cleanup。
+- verifier 通过 strict 选项把 unreadable privateKeyPath 归为 `indeterminate`；batch tar/direct tar/direct SCP 默认恢复既有 `.catch(() => undefined)` fallback。
+- 三条临时 key 数据路径取消时只终止 setup/data channel，finally cleanup 完成后才 end client；SCP mkdir 与实际 scp exec 均传 progressId。SFTP/rsync 取消方式未改。
 - 未记录命令、凭据或 stderr。
 
 ## 自审
@@ -91,7 +108,7 @@
 - 主服务中八个禁止的旧负状态符号均已消失。
 - `directSshRouteCache.set` 只有 wrapper 最终成功分支一处；没有失败清除或负状态写入。
 - verifier 不触碰 source/target 业务 path，仅执行 marker。
-- cleanup 均在 verifier `finally`；setup 尚未成功返回凭据时的半写入补偿由 helper catch 单独负责。
+- cleanup 均先于 client end；setup 尚未成功返回凭据时的半写入补偿由 helper catch 单独负责。
 - 正常旧六入口没有调用 verifier，首个网络操作仍为真实数据命令。
 
 ## 风险与后续边界

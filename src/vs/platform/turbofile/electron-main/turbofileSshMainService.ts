@@ -3484,7 +3484,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		let credential: IRemoteScpCredential | undefined;
 		let lastActivityAt = Date.now();
 		try {
@@ -3527,7 +3526,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
 			}
-			unregisterCancel();
 			client.end();
 		}
 	}
@@ -5515,7 +5513,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		let credential: IRemoteScpCredential | undefined;
 		let lastActivityAt = Date.now();
 		const markActivity = (): void => {
@@ -5562,7 +5559,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
 			}
-			unregisterCancel();
 			client.end();
 		}
 	}
@@ -5698,9 +5694,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const result = await runTurboFileDirectRouteFlow({
 			routes,
 			run: async (route, retry) => {
+				this.throwIfTransferCanceled(progressId);
 				if (retry) {
 					this.fireTransferProgress({ progressId }, 0, 0, 'prepare', '直连重试', true, { route });
 				}
+				this.throwIfTransferCanceled(progressId);
 				try {
 					return await run(route, retry);
 				} catch (error) {
@@ -5712,6 +5710,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			},
 			verify: async route => {
+				this.throwIfTransferCanceled(progressId);
 				try {
 					return await this.verifyDirectSshRoute(source, target, route, progressId);
 				} catch (error) {
@@ -5771,12 +5770,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return 'indeterminate';
 		}
 
-		const unregisterCancel = this.registerTransferCancelHandler(progressId, () => client.end());
 		let credential: IRemoteScpCredential | undefined;
 		try {
 			this.throwIfTransferCanceled(progressId);
 			try {
-				credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, progressId);
+				credential = await this.prepareRemoteScpCredential(client, remoteEndpoint.connection, progressId, true);
 			} catch (error) {
 				if (error instanceof TurboFileTransferCanceledError) {
 					throw error;
@@ -5806,7 +5804,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
-			unregisterCancel();
 			client.end();
 		}
 	}
@@ -5898,7 +5895,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
 		let credential: IRemoteScpCredential | undefined;
 		let stopGrowthTiming: () => void = () => undefined;
 		let lastActivityAt = Date.now();
@@ -5923,7 +5919,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const scpCommand = `${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath, sourceIsDirectory)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`;
 
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true, { strategy: 'scp-direct', route });
-			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId: request.progressId });
 			this.throwIfTransferCanceled(request.progressId);
 			markActivity();
 			stopGrowthTiming = sourceIsDirectory
@@ -5941,7 +5937,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await this.execRemote(client, scpCommand, {
 				inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS,
 				inactivityMessage: `Direct SCP ${route} produced no target growth for ${DIRECT_TRANSFER_STALL_TIMEOUT_MS} ms.`,
-				getActivityTime: () => lastActivityAt
+				getActivityTime: () => lastActivityAt,
+				progressId: request.progressId
 			});
 			this.throwIfTransferCanceled(request.progressId);
 			if (!sourceIsDirectory) {
@@ -5964,16 +5961,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
 			}
-			unregisterCancel();
 			client.end();
 		}
 	}
 
-	private async prepareRemoteScpCredential(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions, progressId: string | undefined): Promise<IRemoteScpCredential> {
+	private async prepareRemoteScpCredential(client: ISSHClient, remoteConnection: ITurboFileSshConnectionOptions, progressId: string | undefined, strictPrivateKeyRead = false): Promise<IRemoteScpCredential> {
 		if (remoteConnection.password) {
 			return {};
 		}
-		const privateKey = remoteConnection.privateKey ?? await this.readPrivateKey(remoteConnection.privateKeyPath);
+		const privateKey = remoteConnection.privateKey ?? (strictPrivateKeyRead
+			? await this.readPrivateKey(remoteConnection.privateKeyPath)
+			: await this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined));
+		this.throwIfTransferCanceled(progressId);
 		if (!privateKey) {
 			return {};
 		}
@@ -8579,6 +8578,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private execRemote(client: ISSHClient, command: string, options: IRemoteExecOptions = {}): Promise<void> {
+		this.throwIfTransferCanceled(options.progressId);
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			let totalTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -8695,6 +8695,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private execRemoteBytes(client: ISSHClient, command: string, options: IRemoteExecOptions = {}): Promise<Buffer> {
+		this.throwIfTransferCanceled(options.progressId);
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			let totalTimeout: ReturnType<typeof setTimeout> | undefined;
