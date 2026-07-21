@@ -492,6 +492,45 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
+	test('bounds direct validation cancellation and credential cleanup', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const batchTar = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
+		const directTar = methodBlock(service, 'private async tryDirectTarTransferRoute', 'private async tryDirectRsyncTransfer');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const remoteSize = methodBlock(service, 'private async getRemotePathSize(sftp:', 'private async getRemotePathSizeByCommand');
+		const remoteSizeByCommand = methodBlock(service, 'private async getRemotePathSizeByCommand', 'private async getRemotePathContentSizeByCommand');
+		const remoteContentSizeByCommand = methodBlock(service, 'private async getRemotePathContentSizeByCommand', 'private async getPathHumanSize');
+		const tarValidation = directTar.indexOf('const targetSize = await this.getRemotePathContentSizeByCommand(request.target, request.progressId)');
+		const tarPostcheck = directTar.indexOf('this.throwIfTransferCanceled(request.progressId);', tarValidation);
+		const scpValidation = directScp.indexOf('const targetSize = await this.withDirectorySftp(request.target');
+		const scpPostcheck = directScp.indexOf('this.throwIfTransferCanceled(request.progressId);', scpValidation);
+		const cleanup = 'await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);';
+
+		assert.deepStrictEqual({
+			batchTarPostchecksDataCommand: batchTar.indexOf('this.throwIfTransferCanceled(request.progressId);') > batchTar.indexOf('await this.execRemote(client, command'),
+			directTarPostchecksValidation: tarValidation >= 0 && tarPostcheck > tarValidation && tarPostcheck < directTar.indexOf('if (targetSize !== expectedBytes)'),
+			directScpPostchecksValidation: scpValidation >= 0 && scpPostcheck > scpValidation && scpPostcheck < directScp.indexOf('if (targetSize !== bytes)'),
+			sizeHelpersPropagateCancellation: remoteSize.includes('progressId?: string')
+				&& (remoteSize.match(/this\.throwIfTransferCanceled\(progressId\);/g)?.length ?? 0) >= 4
+				&& remoteSize.includes('this.getRemotePathSize(sftp, joinRemotePath(remotePath, entry.filename), progressId)')
+				&& remoteSizeByCommand.includes('progressId?: string')
+				&& remoteSizeByCommand.includes('this.execRemoteBytes(client, buildWindowsSizeCommand(endpoint.path), { progressId })')
+				&& remoteSizeByCommand.includes('this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path), { progressId })')
+				&& remoteSizeByCommand.includes('this.getRemotePathSize(sftp, endpoint.path, progressId)')
+				&& remoteContentSizeByCommand.includes('progressId?: string')
+				&& remoteContentSizeByCommand.includes('this.getRemotePathSizeByCommand(endpoint, progressId)')
+				&& remoteContentSizeByCommand.includes('this.execRemoteBytes(client, buildPosixContentSizeCommand(endpoint.path), { progressId })')
+				&& remoteContentSizeByCommand.includes('this.getRemotePathSize(sftp, endpoint.path, progressId)'),
+			cleanupIsShortAndUncancelable: [batchTar, directTar, directScp].every(block => block.includes(cleanup))
+		}, {
+			batchTarPostchecksDataCommand: true,
+			directTarPostchecksValidation: true,
+			directScpPostchecksValidation: true,
+			sizeHelpersPropagateCancellation: true,
+			cleanupIsShortAndUncancelable: true
+		});
+	});
+
 	test('uses Chinese recycle-bin permanent deletion confirmations', () => {
 		const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 		const editor = fs.readFileSync(editorPath, 'utf8');

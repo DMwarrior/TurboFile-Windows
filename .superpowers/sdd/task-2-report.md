@@ -55,6 +55,12 @@
 2. 尚未修改实现时，静态 exact test 得到 `29 passing, 1 failing`，唯一失败字段为 `execPrechecksCancellation: false`。
 3. 两个 exec 入口增加最小预检查后，`npm run compile-check-ts-native` 通过，静态 exact test 得到 `30 passing (57ms)`。
 
+### 二次复审 RED：验证后取消窗口与 cleanup 上限
+
+1. 增加精确静态断言，覆盖 batch tar 既有数据命令后检查、direct tar/SCP 验证 await 后检查、size helper 的可选 `progressId` 传播与递归 SFTP 检查，以及三处凭据 cleanup 的 2 秒总上限。
+2. 尚未修改实现时，静态 exact test 得到 `30 passing, 1 failing`；batch tar 既有后置检查为 `true`，其余四组目标字段均为 `false`。
+3. 最小实现后，`npm run compile-check-ts-native` 通过，静态 exact test 得到 `31 passing (53ms)`。
+
 ### 公共协调器测试
 
 - 初次执行 exact 命令时，受保护的现有 `out` 中缺少 `turbofileDirectRoute.test.js`，runner 报 `ERR_MODULE_NOT_FOUND`，未进入断言阶段。
@@ -65,9 +71,9 @@
 ### 最终 Step 6 顺序
 
 1. `npm run compile-check-ts-native`：退出码 0，无 TypeScript 错误。
-2. common exact test：`14 passing (6ms)`。
+2. common exact test：`14 passing (7ms)`。
 3. `npm run compile-check-ts-native`：退出码 0，无 TypeScript 错误。
-4. static exact test：`30 passing (50ms)`。
+4. static exact test：`31 passing (50ms)`。
 
 ## 关键变更
 
@@ -91,6 +97,8 @@
 - wrapper 在 run/verify 边界把已置位取消状态规范化为 `TurboFileTransferCanceledError`，已有 typed cancellation 原样传播。
 - wrapper 在 retry 进度前、真实 run 前和 verify 边界均预检查取消，取消后不会再启动数据命令。
 - `execRemote` 与 `execRemoteBytes` 在注册 channel 取消 handler 和启动 `client.exec` 前同步预检查，已取消请求不会跨过 exec 边界。
+- direct tar 的 size command/SFTP fallback 仅在该调用链上传递 `progressId`，命令 channel 可立即取消，递归 SFTP 每层、每项检查；size await 后再次检查再比较或返回成功。
+- direct SCP 在单次远程 SFTP stat await 后、mismatch 处理与成功返回前再次检查取消；batch tar 保留既有数据命令后检查。
 
 ### 凭据生命周期
 
@@ -100,6 +108,7 @@
 - helper 在读 key 后、写入前检查取消；setup 取消后保留 client 完成 best-effort cleanup。
 - verifier 通过 strict 选项把 unreadable privateKeyPath 归为 `indeterminate`；batch tar/direct tar/direct SCP 默认恢复既有 `.catch(() => undefined)` fallback。
 - 三条临时 key 数据路径取消时只终止 setup/data channel，finally cleanup 完成后才 end client；SCP mkdir 与实际 scp exec 均传 progressId。SFTP/rsync 取消方式未改。
+- batch tar、direct tar、direct SCP 的凭据 cleanup 均不传 `progressId`，但使用 `{ timeoutMs: 2000 }` 限定总等待，随后才 end client。
 - 未记录命令、凭据或 stderr。
 
 ## 自审

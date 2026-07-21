@@ -3524,7 +3524,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return this.createBatchTransferResult(true, 'tar-direct', bytes, 'Batch direct tar completed.', items.length, 0, [], startedAt, request.progressId);
 		} finally {
 			if (credential?.cleanupCommand) {
-				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
 			client.end();
 		}
@@ -5542,7 +5542,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			this.throwIfTransferCanceled(request.progressId);
 			if (expectedBytes > 0) {
-				const targetSize = await this.getRemotePathContentSizeByCommand(request.target).catch(() => expectedBytes);
+				const targetSize = await this.getRemotePathContentSizeByCommand(request.target, request.progressId).catch(() => expectedBytes);
+				this.throwIfTransferCanceled(request.progressId);
 				if (targetSize !== expectedBytes) {
 					throw new Error(`Direct tar size mismatch: expected ${expectedBytes}, got ${targetSize}.`);
 				}
@@ -5557,7 +5558,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw error;
 		} finally {
 			if (credential?.cleanupCommand) {
-				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
 			client.end();
 		}
@@ -5943,6 +5944,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(request.progressId);
 			if (!sourceIsDirectory) {
 				const targetSize = await this.withDirectorySftp(request.target, async sftp => (await this.remoteStat(sftp, request.target.path)).size).catch(() => 0);
+				this.throwIfTransferCanceled(request.progressId);
 				if (targetSize !== bytes) {
 					await this.withDirectorySftp(request.target, sftp => this.unlinkRemote(sftp, request.target.path)).catch(() => undefined);
 					throw new Error(`Direct SCP size mismatch: expected ${bytes}, got ${targetSize}.`);
@@ -5959,7 +5961,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} finally {
 			stopGrowthTiming();
 			if (credential?.cleanupCommand) {
-				await this.execRemote(client, credential.cleanupCommand).catch(() => undefined);
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
 			client.end();
 		}
@@ -9066,26 +9068,32 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}), REMOTE_DIRECTORY_READ_TIMEOUT_MS, `Remote directory read timed out after ${REMOTE_DIRECTORY_READ_TIMEOUT_MS} ms: ${remotePath}`);
 	}
 
-	private async getRemotePathSize(sftp: ISFTPWrapper, remotePath: string): Promise<number> {
+	private async getRemotePathSize(sftp: ISFTPWrapper, remotePath: string, progressId?: string): Promise<number> {
+		this.throwIfTransferCanceled(progressId);
 		const stats = await this.remoteStat(sftp, remotePath);
+		this.throwIfTransferCanceled(progressId);
 		if (!stats.isDirectory()) {
 			return stats.size;
 		}
 
 		let total = 0;
 		const entries = await this.readRemoteDirectory(sftp, remotePath);
+		this.throwIfTransferCanceled(progressId);
 		for (const entry of entries) {
+			this.throwIfTransferCanceled(progressId);
 			if (entry.filename === '.' || entry.filename === '..') {
 				continue;
 			}
 			if (entry.attrs.isDirectory() || entry.attrs.isFile()) {
-				total += await this.getRemotePathSize(sftp, joinRemotePath(remotePath, entry.filename));
+				total += await this.getRemotePathSize(sftp, joinRemotePath(remotePath, entry.filename), progressId);
+				this.throwIfTransferCanceled(progressId);
 			}
 		}
 		return total;
 	}
 
-	private async getRemotePathSizeByCommand(endpoint: ITurboFileTransferEndpoint): Promise<number> {
+	private async getRemotePathSizeByCommand(endpoint: ITurboFileTransferEndpoint, progressId?: string): Promise<number> {
+		this.throwIfTransferCanceled(progressId);
 		if (endpoint.kind !== 'ssh') {
 			return getLocalPathSize(endpoint.path);
 		}
@@ -9093,31 +9101,43 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			if (looksLikeWindowsPath(endpoint.path)) {
 				return await this.withDirectorySshClient(endpoint, async client => {
-					const output = await this.execRemoteBytes(client, buildWindowsSizeCommand(endpoint.path));
+					const output = await this.execRemoteBytes(client, buildWindowsSizeCommand(endpoint.path), { progressId });
+					this.throwIfTransferCanceled(progressId);
 					return parseSizeCommandOutput(output.toString());
 				});
 			}
 
 			return await this.withDirectorySshClient(endpoint, async client => {
-				const output = await this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path));
+				const output = await this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path), { progressId });
+				this.throwIfTransferCanceled(progressId);
 				return parseSizeCommandOutput(output.toString());
 			});
-		} catch {
-			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError) {
+				throw error;
+			}
+			this.throwIfTransferCanceled(progressId);
+			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path, progressId));
 		}
 	}
 
-	private async getRemotePathContentSizeByCommand(endpoint: ITurboFileTransferEndpoint): Promise<number> {
+	private async getRemotePathContentSizeByCommand(endpoint: ITurboFileTransferEndpoint, progressId?: string): Promise<number> {
+		this.throwIfTransferCanceled(progressId);
 		if (endpoint.kind !== 'ssh' || looksLikeWindowsPath(endpoint.path)) {
-			return this.getRemotePathSizeByCommand(endpoint);
+			return this.getRemotePathSizeByCommand(endpoint, progressId);
 		}
 		try {
 			return await this.withDirectorySshClient(endpoint, async client => {
-				const output = await this.execRemoteBytes(client, buildPosixContentSizeCommand(endpoint.path));
+				const output = await this.execRemoteBytes(client, buildPosixContentSizeCommand(endpoint.path), { progressId });
+				this.throwIfTransferCanceled(progressId);
 				return parseSizeCommandOutput(output.toString());
 			});
-		} catch {
-			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path));
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError) {
+				throw error;
+			}
+			this.throwIfTransferCanceled(progressId);
+			return this.withDirectorySftp(endpoint, sftp => this.getRemotePathSize(sftp, endpoint.path, progressId));
 		}
 	}
 
