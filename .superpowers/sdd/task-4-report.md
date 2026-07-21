@@ -75,3 +75,12 @@
 - 本任务环境没有执行真实双 SSH 主机端到端传输；SCP/SFTP 的长时间无目标增长行为由精确静态契约保护，真实 OpenSSH/网络行为仍依赖现有集成边界。
 - 移除的只是与目标增长 probe 耦合的数据 inactivity watchdog；若底层 SSH 通道永久无输出但 TCP/keepalive 仍存活，结束时间由 OpenSSH keepalive、通道退出或用户取消决定。这是 brief 指定的取舍，避免把展示轮询误作数据活性证明。
 - `directFallbackReason` 当前是新增的可选诊断字段；进度监听器仍可读取固定 `detail`，既有 UI 展示保持不变且未新增可见映射，不会造成兼容性破坏。
+
+## Fresh review 修复补充
+
+- Fresh review 发现显式批量 SCP/SFTP 的子任务会把 typed direct error 过早转成普通失败结果，导致父批量计划无法区分“直连不可用”和“直连数据失败”；同时最终 parent `complete` 事件没有携带实际数据承载 strategy。
+- 新增生产使用的 `runTurboFileConcurrentBatchAttempt` 协调器。并发 worker 只捕获 `TurboFileDirectUnavailableError` / `TurboFileDirectDataError`，保持原有 `mapLimit` 并发参数不变；所有 worker 完整 settle 后才向父计划抛出 typed error，且 data-failure 优先于 unavailable。这样 relay 不会与尚未结束的 direct worker 重叠。
+- `transferFileCore` 与 SSH-to-SSH 子计划仅在内部显式批量 direct 调用时保留 typed error；公开单文件接口、普通失败结果和取消语义保持不变。
+- 并发批量任务从实际 child result 选择一次 `chosenStrategy`，并同时用于最终 parent `complete` 事件与 batch result；SCP relay 和 SFTP relay 均有行为级回归测试。
+- TDD RED：新增行为断言后 `8 passing, 2 failing`，失败原因均为协调器尚不存在。GREEN：相关七个套件共 `77 passing, 0 failing`：BatchFlow 10、DirectRoute 13、SshMainStatic 35、TarProgress 3、1.148Baseline 2、TransferPlan 8、TransferDisplay 6。
+- 主代理独立复验：`npm run compile-check-ts-native` 退出码 0；上述 77 项定向 Mocha 回归全部通过；`git diff --check` 无 whitespace error，仅有仓库既有 LF/CRLF 提示。

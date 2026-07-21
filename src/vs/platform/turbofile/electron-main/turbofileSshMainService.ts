@@ -18,7 +18,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
-import { runTurboFileBatchTransferFlow } from '../common/turbofileBatchTransferFlow.js';
+import { runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../common/turbofileBatchTransferFlow.js';
 import { createLocalBatchTarPlans, createRemoteBatchTarSourcePlan, createTarNullListBuffer, isTurboFileBatchCommandSafe, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
@@ -881,7 +881,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async transferFileCore(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult> {
+	private async transferFileCore(request: ITurboFileTransferRequest, preserveDirectErrors = false): Promise<ITurboFileTransferResult> {
 		const strategy = getTransferStrategy(request.source, request.target);
 		const startedAt = Date.now();
 		try {
@@ -1025,11 +1025,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 
 			if (request.source.kind === 'ssh' && request.target.kind === 'ssh') {
-				return await this.transferBetweenSshDevices(request, startedAt);
+				return await this.transferBetweenSshDevices(request, startedAt, preserveDirectErrors);
 			}
 
 			throw new Error('Unsupported transfer endpoint combination.');
 		} catch (error) {
+			if (preserveDirectErrors && (error instanceof TurboFileDirectUnavailableError || error instanceof TurboFileDirectDataError)) {
+				throw error;
+			}
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 				return {
 					ok: false,
@@ -1056,7 +1059,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async transferBetweenSshDevices(request: ITurboFileTransferRequest, startedAt: number): Promise<ITurboFileTransferResult> {
+	private async transferBetweenSshDevices(request: ITurboFileTransferRequest, startedAt: number, preserveDirectErrors = false): Promise<ITurboFileTransferResult> {
 		if (request.source.kind !== 'ssh' || request.target.kind !== 'ssh') {
 			throw new Error('SSH-to-SSH transfer requires SSH endpoints.');
 		}
@@ -1099,6 +1102,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			} catch (error) {
 				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
 					throw new TurboFileTransferCanceledError();
+				}
+				if (preserveDirectErrors && attempt.route === 'direct' && (error instanceof TurboFileDirectUnavailableError || error instanceof TurboFileDirectDataError)) {
+					throw error;
 				}
 				const nextAttempt = plan.attempts[index + 1];
 				const directFallback = attempt.route === 'direct' && nextAttempt?.route === 'relay' ? getDirectFallbackProgress(error) : undefined;
@@ -3573,52 +3579,64 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		});
 		const workerLimit = items.some(item => item.sourceType === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
+		const preserveDirectErrors = request.strategyHint === 'direct' && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh';
+		const fallbackStrategy = getTransferStrategy(request.source, request.targetDirectory);
 
 		try {
-			await mapLimit(items, workerLimit, async (item, index) => {
-				this.throwIfTransferCanceled(request.progressId);
-				const childProgressId = `${request.progressId ?? 'turbofile-batch'}-${index}-${randomUUID()}`;
-				childProgressIds.add(childProgressId);
-				const childSource = disableRsync ? { ...request.source, path: item.sourcePath, supportsRsync: false } : { ...request.source, path: item.sourcePath };
-				const childTarget = disableRsync ? { ...request.targetDirectory, path: this.joinBatchTargetPath(request.targetDirectory, item.targetName), supportsRsync: false } : { ...request.targetDirectory, path: this.joinBatchTargetPath(request.targetDirectory, item.targetName) };
-				const disposable = this.onDynamicTransferProgress(childProgressId)(event => {
-					const nextTransferredBytes = Math.max(0, event.transferredBytes);
-					aggregateTransferredBytes += nextTransferredBytes - transferredByItem[index];
-					transferredByItem[index] = nextTransferredBytes;
-					const nextTotalBytes = Math.max(totalByItem[index], event.totalBytes);
-					aggregateTotalBytes += nextTotalBytes - totalByItem[index];
-					totalByItem[index] = nextTotalBytes;
-					this.fireBatchAggregateProgress(request, aggregateTransferredBytes, Math.max(expectedBytes, aggregateTotalBytes), event.phase, event.detail ?? 'Batch transfer in progress.', completedItems, items.length, item.displayName ?? item.targetName, false, event.strategy);
-				});
-				try {
-					const result = await this.transferFileCore({
-						source: childSource,
-						target: childTarget,
-						sourceType: item.sourceType,
-						expectedBytes: item.expectedBytes,
-						progressId: childProgressId,
-						strategyHint: disableRsync && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh' ? 'direct' : request.strategyHint
+			const chosenStrategy = await runTurboFileConcurrentBatchAttempt({
+				fallbackStrategy,
+				run: async controller => {
+					await mapLimit(items, workerLimit, async (item, index) => {
+						this.throwIfTransferCanceled(request.progressId);
+						const childProgressId = `${request.progressId ?? 'turbofile-batch'}-${index}-${randomUUID()}`;
+						childProgressIds.add(childProgressId);
+						const childSource = disableRsync ? { ...request.source, path: item.sourcePath, supportsRsync: false } : { ...request.source, path: item.sourcePath };
+						const childTarget = disableRsync ? { ...request.targetDirectory, path: this.joinBatchTargetPath(request.targetDirectory, item.targetName), supportsRsync: false } : { ...request.targetDirectory, path: this.joinBatchTargetPath(request.targetDirectory, item.targetName) };
+						const disposable = this.onDynamicTransferProgress(childProgressId)(event => {
+							const nextTransferredBytes = Math.max(0, event.transferredBytes);
+							aggregateTransferredBytes += nextTransferredBytes - transferredByItem[index];
+							transferredByItem[index] = nextTransferredBytes;
+							const nextTotalBytes = Math.max(totalByItem[index], event.totalBytes);
+							aggregateTotalBytes += nextTotalBytes - totalByItem[index];
+							totalByItem[index] = nextTotalBytes;
+							this.fireBatchAggregateProgress(request, aggregateTransferredBytes, Math.max(expectedBytes, aggregateTotalBytes), event.phase, event.detail ?? 'Batch transfer in progress.', completedItems, items.length, item.displayName ?? item.targetName, false, event.strategy);
+						});
+						try {
+							const result = await this.transferFileCore({
+								source: childSource,
+								target: childTarget,
+								sourceType: item.sourceType,
+								expectedBytes: item.expectedBytes,
+								progressId: childProgressId,
+								strategyHint: disableRsync && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh' ? 'direct' : request.strategyHint
+							}, preserveDirectErrors);
+							strategies.add(result.strategy);
+							controller.recordStrategy(result.strategy);
+							if (result.ok) {
+								successfulItems.push(item);
+								completedBytes += result.bytes;
+								const nextTransferredBytes = Math.max(transferredByItem[index], result.bytes);
+								aggregateTransferredBytes += nextTransferredBytes - transferredByItem[index];
+								transferredByItem[index] = nextTransferredBytes;
+								const nextTotalBytes = Math.max(totalByItem[index], result.bytes);
+								aggregateTotalBytes += nextTotalBytes - totalByItem[index];
+								totalByItem[index] = nextTotalBytes;
+							} else if (result.canceled) {
+								throw new TurboFileTransferCanceledError();
+							} else {
+								failures.push({ name: item.displayName ?? item.targetName, path: item.sourcePath, message: result.message });
+							}
+						} catch (error) {
+							if (!preserveDirectErrors || !controller.captureDirectError(error)) {
+								throw error;
+							}
+						} finally {
+							completedItems++;
+							childProgressIds.delete(childProgressId);
+							disposable.dispose();
+							this.fireBatchAggregateProgress(request, aggregateTransferredBytes, Math.max(expectedBytes, aggregateTotalBytes), 'transfer', 'Batch transfer in progress.', completedItems, items.length, item.displayName ?? item.targetName, false);
+						}
 					});
-					if (result.ok) {
-						successfulItems.push(item);
-						strategies.add(result.strategy);
-						completedBytes += result.bytes;
-						const nextTransferredBytes = Math.max(transferredByItem[index], result.bytes);
-						aggregateTransferredBytes += nextTransferredBytes - transferredByItem[index];
-						transferredByItem[index] = nextTransferredBytes;
-						const nextTotalBytes = Math.max(totalByItem[index], result.bytes);
-						aggregateTotalBytes += nextTotalBytes - totalByItem[index];
-						totalByItem[index] = nextTotalBytes;
-					} else if (result.canceled) {
-						throw new TurboFileTransferCanceledError();
-					} else {
-						failures.push({ name: item.displayName ?? item.targetName, path: item.sourcePath, message: result.message });
-					}
-				} finally {
-					completedItems++;
-					childProgressIds.delete(childProgressId);
-					disposable.dispose();
-					this.fireBatchAggregateProgress(request, aggregateTransferredBytes, Math.max(expectedBytes, aggregateTotalBytes), 'transfer', 'Batch transfer in progress.', completedItems, items.length, item.displayName ?? item.targetName, false);
 				}
 			});
 
@@ -3628,14 +3646,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			const bytes = Math.max(completedBytes, aggregateTransferredBytes, expectedBytes > 0 && failures.length === 0 ? expectedBytes : 0);
 			this.fireTransferProgress(request, bytes, Math.max(bytes, expectedBytes), 'complete', 'Batch transfer completed.', true, {
+				strategy: chosenStrategy,
 				completedItems: successfulItems.length,
 				totalItems: items.length
 			});
 			const failed = failures.length;
-			return this.createBatchTransferResult(failed === 0, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), bytes, failed === 0 ? 'Batch transfer completed.' : `Batch transfer completed with ${failed} failure(s).`, successfulItems.length, failed, failures, startedAt, request.progressId);
+			return this.createBatchTransferResult(failed === 0, chosenStrategy, bytes, failed === 0 ? 'Batch transfer completed.' : `Batch transfer completed with ${failed} failure(s).`, successfulItems.length, failed, failures, startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
-				return this.createBatchTransferResult(false, [...strategies][0] ?? getTransferStrategy(request.source, request.targetDirectory), Math.max(completedBytes, aggregateTransferredBytes), TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, request.progressId, true);
+				return this.createBatchTransferResult(false, [...strategies][0] ?? fallbackStrategy, Math.max(completedBytes, aggregateTransferredBytes), TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, request.progressId, true);
 			}
 			throw error;
 		} finally {

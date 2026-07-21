@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
-import { ITurboFileBatchTransferFlowOptions, runTurboFileBatchTransferFlow } from '../../common/turbofileBatchTransferFlow.js';
+import { ITurboFileBatchTransferFlowOptions, runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../../common/turbofileBatchTransferFlow.js';
 import { TurboFileDirectDataError, TurboFileDirectUnavailableError } from '../../common/turbofileDirectRoute.js';
 import type { ITurboFileBatchTransferFailure, ITurboFileBatchTransferResult, ITurboFileTransferAttempt } from '../../common/turbofile.js';
 
@@ -134,4 +134,55 @@ suite('TurboFileBatchTransferFlow', () => {
 
 		assert.deepStrictEqual({ ok: actual?.ok, cleanupCalls }, { ok: true, cleanupCalls: 0 });
 	});
+
+	test('defers typed direct batch errors until every concurrent worker settles', async () => {
+		const events: string[] = [];
+		const unavailableError = new TurboFileDirectUnavailableError([]);
+		const dataError = new TurboFileDirectDataError('target-pull', []);
+		let releaseSecondWorker!: () => void;
+		const firstWorkerCaptured = new Promise<void>(resolve => releaseSecondWorker = resolve);
+
+		await assert.rejects(runTurboFileConcurrentBatchAttempt({
+			fallbackStrategy: 'scp-direct',
+			run: async controller => {
+				await Promise.all([
+					(async () => {
+						assert.strictEqual(controller.captureDirectError(unavailableError), true);
+						events.push('unavailable-captured');
+						releaseSecondWorker();
+					})(),
+					(async () => {
+						await firstWorkerCaptured;
+						assert.strictEqual(controller.captureDirectError(dataError), true);
+						events.push('data-failure-captured');
+					})()
+				]);
+				events.push('workers-settled');
+			}
+		}), error => {
+			events.push('error-thrown');
+			return error === dataError;
+		});
+
+		assert.deepStrictEqual(events, [
+			'unavailable-captured',
+			'data-failure-captured',
+			'workers-settled',
+			'error-thrown'
+		]);
+	});
+
+	for (const strategy of ['scp-relay', 'sftp-relay'] as const) {
+		test(`returns the actual ${strategy} child strategy selected by a concurrent batch attempt`, async () => {
+			const actual = await runTurboFileConcurrentBatchAttempt({
+				fallbackStrategy: 'scp-direct',
+				run: async controller => {
+					controller.recordStrategy(strategy);
+					controller.recordStrategy(strategy);
+				}
+			});
+
+			assert.strictEqual(actual, strategy);
+		});
+	}
 });

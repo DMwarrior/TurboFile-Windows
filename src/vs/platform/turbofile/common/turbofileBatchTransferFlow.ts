@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { ITurboFileBatchTransferFailure, ITurboFileBatchTransferResult, ITurboFileTransferAttempt } from './turbofile.js';
+import { TurboFileDirectDataError, TurboFileDirectUnavailableError } from './turbofileDirectRoute.js';
 
 export interface ITurboFileBatchTransferFlowOptions {
 	readonly attempts: readonly ITurboFileTransferAttempt[];
@@ -14,6 +15,16 @@ export interface ITurboFileBatchTransferFlowOptions {
 	readonly createCleanupFailureResult: (result: ITurboFileBatchTransferResult, failures: readonly ITurboFileBatchTransferFailure[]) => ITurboFileBatchTransferResult;
 	readonly onIncompleteResult: (result: ITurboFileBatchTransferResult) => void;
 	readonly onAttemptError: (error: Error, attempt: ITurboFileTransferAttempt, nextAttempt: ITurboFileTransferAttempt | undefined) => void;
+}
+
+export interface ITurboFileConcurrentBatchAttemptController {
+	recordStrategy(strategy: ITurboFileBatchTransferResult['strategy']): void;
+	captureDirectError(error: unknown): boolean;
+}
+
+export interface ITurboFileConcurrentBatchAttemptOptions {
+	readonly fallbackStrategy: ITurboFileBatchTransferResult['strategy'];
+	readonly run: (controller: ITurboFileConcurrentBatchAttemptController) => Promise<void>;
 }
 
 export async function runTurboFileBatchTransferFlow(options: ITurboFileBatchTransferFlowOptions): Promise<ITurboFileBatchTransferResult | undefined> {
@@ -39,4 +50,31 @@ export async function runTurboFileBatchTransferFlow(options: ITurboFileBatchTran
 		return cleanupFailures.length ? options.createCleanupFailureResult(result, cleanupFailures) : result;
 	}
 	return undefined;
+}
+
+export async function runTurboFileConcurrentBatchAttempt(options: ITurboFileConcurrentBatchAttemptOptions): Promise<ITurboFileBatchTransferResult['strategy']> {
+	let strategy: ITurboFileBatchTransferResult['strategy'] | undefined;
+	let unavailableError: TurboFileDirectUnavailableError | undefined;
+	let dataError: TurboFileDirectDataError | undefined;
+	await options.run({
+		recordStrategy: value => strategy ??= value,
+		captureDirectError: error => {
+			if (error instanceof TurboFileDirectDataError) {
+				dataError ??= error;
+				return true;
+			}
+			if (error instanceof TurboFileDirectUnavailableError) {
+				unavailableError ??= error;
+				return true;
+			}
+			return false;
+		}
+	});
+	if (dataError) {
+		throw dataError;
+	}
+	if (unavailableError) {
+		throw unavailableError;
+	}
+	return strategy ?? options.fallbackStrategy;
 }

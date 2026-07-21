@@ -520,6 +520,31 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
+	test('preserves concurrent batch typed errors and uses the chosen strategy for completion', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const transferFileCore = methodBlock(service, 'private async transferFileCore', 'private async transferBetweenSshDevices');
+		const transferBetweenSshDevices = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
+		const concurrentBatch = methodBlock(service, 'private async runConcurrentBatchTransfer', 'private fireBatchAggregateProgress');
+
+		assert.deepStrictEqual({
+			childCoreCanPreserveTypedErrors: transferFileCore.includes('preserveDirectErrors')
+				&& transferFileCore.includes('error instanceof TurboFileDirectUnavailableError')
+				&& transferFileCore.includes('error instanceof TurboFileDirectDataError'),
+			sshPlanCanPreserveTypedErrors: transferBetweenSshDevices.includes('preserveDirectErrors')
+				&& transferBetweenSshDevices.includes('throw error;'),
+			concurrentAttemptDefersTypedErrors: concurrentBatch.includes('runTurboFileConcurrentBatchAttempt({')
+				&& concurrentBatch.includes('controller.captureDirectError(error)'),
+			completeUsesChosenStrategy: concurrentBatch.includes("'complete', 'Batch transfer completed.'")
+				&& concurrentBatch.includes('strategy: chosenStrategy')
+				&& concurrentBatch.includes('this.createBatchTransferResult(failed === 0, chosenStrategy,')
+		}, {
+			childCoreCanPreserveTypedErrors: true,
+			sshPlanCanPreserveTypedErrors: true,
+			concurrentAttemptDefersTypedErrors: true,
+			completeUsesChosenStrategy: true
+		});
+	});
+
 	test('keeps batch cut cleanup outside direct route retries and terminal after copied data', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const batchTransferFlow = fs.readFileSync(batchTransferFlowPath(), 'utf8');
