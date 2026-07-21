@@ -120,43 +120,44 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
 
-	test('starts one native drag at dragstart without a window-edge handoff', () => {
+	test('keeps internal drops in Chromium and hands the frozen session to Windows only after leaving the window', () => {
 		const editor = readTurboFileEditor();
-		const beginNative = methodBlock(editor, 'private beginNativeFileDrag', 'private async runNativeFileDrag');
+		const beginSession = methodBlock(editor, 'private beginFileDragSession', 'private handoffFileDragSessionToWindows');
+		const handoff = methodBlock(editor, 'private handoffFileDragSessionToWindows', 'private async runNativeFileDrag');
 
 		assert.deepStrictEqual({
-			cancelsChromiumDrag: beginNative.includes('event.preventDefault();'),
-			startsExactlyOnce: beginNative.includes('void this.runNativeFileDrag(session);'),
-			fileRowsReuseEntry: editor.includes('this.beginNativeFileDrag(side, event);'),
-			imageGridReusesEntry: editor.includes('this.beginNativeFileDrag(state.side, event);'),
-			noPointerHandoff: !editor.includes('maybeStartWindowsFileDragFromPointer'),
-			noPageLeaveHandoff: !editor.includes('handleTransferPageDragLeave'),
-			noDualSessionFlag: !editor.includes('hasStartedNativeWindowsDrag')
+			keepsChromiumDrag: !beginSession.includes('event.preventDefault();') && !beginSession.includes('runNativeFileDrag'),
+			fileRowsReuseEntry: editor.includes('this.beginFileDragSession(side, event);'),
+			imageGridReusesEntry: editor.includes('this.beginFileDragSession(state.side, event);'),
+			pageExitHandsOff: editor.includes('private handleTransferPageDragLeave') && editor.includes('this.handoffFileDragSessionToWindows();'),
+			pointerExitFallback: editor.includes('private maybeHandoffFileDragSessionToWindows'),
+			handoffClearsBeforeNativeStart: handoff.indexOf('this.clearCurrentFileDragState();') < handoff.indexOf('void this.runNativeFileDrag(session);'),
+			noRenderDuringHandoff: !handoff.includes('this.render()')
 		}, {
-			cancelsChromiumDrag: true,
-			startsExactlyOnce: true,
+			keepsChromiumDrag: true,
 			fileRowsReuseEntry: true,
 			imageGridReusesEntry: true,
-			noPointerHandoff: true,
-			noPageLeaveHandoff: true,
-			noDualSessionFlag: true
+			pageExitHandsOff: true,
+			pointerExitFallback: true,
+			handoffClearsBeforeNativeStart: true,
+			noRenderDuringHandoff: true
 		});
 	});
 
 	test('records internal native drops before executing frozen selections', () => {
 		const editor = readTurboFileEditor();
 		const recordDrop = methodBlock(editor, 'private recordNativeInternalDrop', 'private executeNativeInternalDrop');
-		const executeDrop = methodBlock(editor, 'private executeNativeInternalDrop', 'private beginNativeFileDrag');
+		const executeDrop = methodBlock(editor, 'private executeNativeInternalDrop', 'private beginFileDragSession');
 
 		assert.deepStrictEqual({
 			recordsImmutableTarget: recordDrop.includes('dropTurboFileNativeDragSessionInternally(session, target)'),
-			notifiesMain: recordDrop.includes('this.sshService.completeWindowsFileDrag(session.id)'),
+			settlesBeforeExecuting: recordDrop.includes("settleTurboFileNativeDragSession(dropped, 'completed')") && recordDrop.includes('this.deferAfterDrag(() => this.executeNativeInternalDrop(completed));'),
 			frozenPaneItems: executeDrop.includes('session.items'),
 			frozenTransferOverride: editor.includes('sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined'),
 			frozenDirectoryOverride: editor.includes('sourceItemsOverride: readonly TurboFileFileItem[] | undefined = undefined')
 		}, {
 			recordsImmutableTarget: true,
-			notifiesMain: true,
+			settlesBeforeExecuting: true,
 			frozenPaneItems: true,
 			frozenTransferOverride: true,
 			frozenDirectoryOverride: true
