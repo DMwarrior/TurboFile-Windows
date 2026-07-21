@@ -156,6 +156,11 @@ body.turbofile-shell.turbofile-main-editor-visible .part.statusbar {
 	background-color: var(--vscode-activityBar-background) !important;
 }
 
+body.turbofile-shell .part.statusbar .statusbar-item[id="status.problems"],
+body.turbofile-shell .part.statusbar .statusbar-item[id="status.problemsVisibility"] {
+	display: none !important;
+}
+
 /* The side bar always hosts the TurboFile navigation. Keep its TurboFile background even when a
    document editor is active (which hides the main TurboFile editor pane and therefore drops the
    `turbofile-main-editor-visible` class), so the left nav looks identical whether or not a
@@ -259,57 +264,57 @@ body.turbofile-shell.turbofile-main-editor-visible:not(.turbofile-transfer-tabs-
 	height: 100% !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-description,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .label-separator {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab[data-resource-name^="transfer-"] .label-description,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab[data-resource-name^="transfer-"] .label-separator {
 	display: none !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .tab-label .codicon,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab[data-resource-name^="transfer-"] .monaco-icon-label::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab[data-resource-name^="transfer-"] .tab-label .codicon,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab[data-resource-name^="transfer-"] .monaco-icon-label::before {
 	font-size: 22px !important;
 	width: 22px !important;
 	height: 22px !important;
 	line-height: 22px !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-document-tab::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-document-tab::before {
 	opacity: 0.62;
 	transition: color 120ms ease, opacity 120ms ease;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-transfer-tab::before {
 	transform: translateY(1px);
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab.active .monaco-icon-label.turbofile-transfer-tab::before,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab.active .monaco-icon-label.turbofile-document-tab::before,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:hover .monaco-icon-label.turbofile-transfer-tab::before,
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab:hover .monaco-icon-label.turbofile-document-tab::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab.active .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab.active .monaco-icon-label.turbofile-document-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab:hover .monaco-icon-label.turbofile-transfer-tab::before,
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab:hover .monaco-icon-label.turbofile-document-tab::before {
 	opacity: 1;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-0::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-0::before {
 	color: var(--vscode-charts-blue) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-1::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-1::before {
 	color: var(--vscode-charts-green) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-2::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-2::before {
 	color: var(--vscode-charts-orange) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-3::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-3::before {
 	color: var(--vscode-charts-purple) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-4::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-4::before {
 	color: var(--vscode-charts-red) !important;
 }
 
-body.turbofile-shell .monaco-workbench .part.editor > .content .editor-group-container.turbofile-main-editor-group .tabs-container .tab .monaco-icon-label.turbofile-tab-color-5::before {
+body.turbofile-shell .monaco-workbench .part.editor .tabs-container .tab .monaco-icon-label.turbofile-tab-color-5::before {
 	color: var(--vscode-charts-cyan) !important;
 }
 

@@ -43,4 +43,18 @@ suite('TurboFile Editor Pane Lifecycle', () => {
 		assert.ok(disposeBlock.includes('this.releaseEditorGroupClassReference();'));
 		assert.ok(!disposeBlock.includes("this.editorGroupContainer?.classList.remove('turbofile-main-editor-group')"));
 	});
+
+	test('keeps global TurboFile visibility classes owned by every visible page', () => {
+		const editorPath = path.resolve(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
+		const editor = fs.readFileSync(editorPath, 'utf8');
+		const disposeStart = editor.indexOf('override dispose(): void');
+		const disposeBlock = editor.slice(disposeStart, editor.indexOf('\n\tprivate ', disposeStart));
+
+		assert.ok(editor.includes('const turboFileVisibleEditors = new WeakMap<HTMLElement, Set<TurboFileEditor>>();'));
+		assert.ok(editor.includes('private syncGlobalEditorVisibility(): boolean'));
+		assert.ok(disposeBlock.includes('this.isEditorVisible = false;'));
+		assert.ok(disposeBlock.includes('this.syncGlobalEditorVisibility()'));
+		assert.ok(!disposeBlock.includes("document.body.classList.remove('turbofile-main-editor-visible')"));
+		assert.ok(!disposeBlock.includes("document.body.classList.remove('turbofile-transfer-tabs-visible')"));
+	});
 });

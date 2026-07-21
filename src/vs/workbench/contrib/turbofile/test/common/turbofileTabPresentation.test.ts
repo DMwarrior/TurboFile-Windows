@@ -34,6 +34,23 @@ suite('TurboFileTabPresentation', () => {
 		assert.ok(css.includes('.tab:hover'));
 	});
 
+	test('keeps transfer tab presentation independent from editor pane disposal', () => {
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+		const colorRule = css.slice(
+			css.indexOf('.monaco-icon-label.turbofile-tab-color-0::before'),
+			css.indexOf('var(--vscode-charts-blue)')
+		);
+		const iconRule = css.slice(
+			css.indexOf('.monaco-icon-label.turbofile-transfer-tab::before'),
+			css.indexOf('opacity: 0.62')
+		);
+
+		assert.ok(colorRule.length > 0);
+		assert.ok(iconRule.length > 0);
+		assert.ok(!colorRule.includes('.turbofile-main-editor-group'));
+		assert.ok(!iconRule.includes('.turbofile-main-editor-group'));
+	});
+
 	test('preserves the transfer icon vertical position', () => {
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 

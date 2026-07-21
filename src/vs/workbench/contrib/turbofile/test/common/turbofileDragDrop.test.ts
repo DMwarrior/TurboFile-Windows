@@ -8,9 +8,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getNextTurboFileDragOperation, getTurboFileDirectoryMoveRefreshPaths, getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage } from '../../common/turbofileDragDrop.js';
 
+function readTurboFileEditor(): string {
+	return fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+}
+
+function methodBlock(source: string, start: string, end: string): string {
+	const startIndex = source.indexOf(start);
+	const endIndex = source.indexOf(end, startIndex);
+	assert.ok(startIndex >= 0, `Missing start marker: ${start}`);
+	assert.ok(endIndex > startIndex, `Missing end marker after ${start}: ${end}`);
+	return source.slice(startIndex, endIndex);
+}
+
 suite('TurboFileDragDrop', () => {
 	test('permits a same-pane move even when pane-to-pane drags copy', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const beginDragStart = editor.indexOf('private beginFileRowDrag');
 		const beginDragEnd = editor.indexOf('private tryStartImmediateLocalWindowsDrag', beginDragStart);
 		const beginDrag = editor.slice(beginDragStart, beginDragEnd);
@@ -43,7 +55,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('renders side-colored mode buttons and routes drag snapshots', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 
 		assert.deepStrictEqual({
@@ -73,7 +85,7 @@ suite('TurboFileDragDrop', () => {
 
 	test('passes the snapshotted mode through pane-to-Windows drags', () => {
 		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const requestStart = contract.indexOf('export interface ITurboFileStartWindowsDragRequest');
 		const requestBlock = contract.slice(requestStart, contract.indexOf('export interface ITurboFileImageMetadataEntry', requestStart));
 
@@ -100,14 +112,35 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('keeps local file drops inside TurboFile panes instead of bubbling to the workbench opener', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 
 		assert.ok(editor.includes('private consumeTurboFileDropEvent(event: DragEvent): void'));
 		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
 
+	test('uses the 1.148 window-edge handoff for Windows drags', () => {
+		const editor = readTurboFileEditor();
+		const interceptor = methodBlock(editor, 'private registerWindowFileDropInterceptor', 'private shouldInterceptExternalFileDrop');
+		const pointerStart = methodBlock(editor, 'private maybeStartWindowsFileDragFromPointer', 'private renderTransferPage');
+
+		assert.deepStrictEqual({
+			windowOnlyHandlesExternalDrops: !interceptor.includes('handleWindowTurboFileDragOver') && !interceptor.includes('handleWindowTurboFileDragLeave'),
+			noEarlyStartMargin: !editor.includes('WINDOWS_NATIVE_DRAG_START_MARGIN'),
+			exactWindowEdge: pointerStart.includes('event.clientX <= 0')
+				&& pointerStart.includes('event.clientY <= 0')
+				&& pointerStart.includes('event.clientX >= ownerWindow.innerWidth - 1')
+				&& pointerStart.includes('event.clientY >= ownerWindow.innerHeight - 1'),
+			operationPreserved: pointerStart.includes('this.currentFileDragOperation ?? this.getCurrentDragOperation(side)')
+		}, {
+			windowOnlyHandlesExternalDrops: true,
+			noEarlyStartMargin: true,
+			exactWindowEdge: true,
+			operationPreserved: true
+		});
+	});
+
 	test('normalizes external Windows paths before transferring them', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 
 		assert.ok(editor.includes('await this.sshService.normalizeLocalWindowsPaths(sourcePaths)'));
 		assert.ok(editor.includes('await this.resolveExternalTransferItems(normalizedSourcePaths)'));
@@ -116,7 +149,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('starts folder and multi-item transfers without renderer size discovery', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const batchStart = editor.indexOf('private async transferItemsBatch');
 		const batchEnd = editor.indexOf('private insertOptimisticPaneItem', batchStart);
 		const batch = editor.slice(batchStart, batchEnd);
@@ -128,7 +161,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('deletes cut sources before refreshing source and target panes', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async pasteInternalTransferClipboard');
 		const block = editor.slice(start, editor.indexOf('private isSameTransferTarget', start));
 		const deleteIndex = block.indexOf('await this.deleteInternalClipboardSources');
@@ -139,7 +172,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('refreshes external cut source and target only after source cleanup', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferExternalPaths');
 		const block = editor.slice(start, editor.indexOf('private async pasteWindowsClipboardFiles', start));
 		const deleteIndex = block.indexOf('await this.deleteExternalSourceItems');
@@ -152,7 +185,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('refreshes both panes after pane-to-Windows cut batches finish', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferItemsToWindowsDirectory');
 		const block = editor.slice(start, editor.indexOf('private async transferSelected', start));
 
@@ -162,7 +195,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('uses copy progress for a single cut and permanently removes the source only after success', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferSelected');
 		const block = editor.slice(start, editor.indexOf('private async transferItem', start));
 		const transferIndex = block.indexOf('await this.transferItem(');
@@ -178,7 +211,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('keeps batch cut cleanup permanently separate from explicit recycle-bin deletion', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 		const service = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts'), 'utf8');
 		const cleanupStart = service.indexOf('private async deleteBatchSources');
 		const cleanupBlock = service.slice(cleanupStart, service.indexOf('private joinBatchTargetPath', cleanupStart));
@@ -192,7 +225,7 @@ suite('TurboFileDragDrop', () => {
 	});
 
 	test('defers post-drop transfers until after drag image teardown frames', () => {
-		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const editor = readTurboFileEditor();
 
 		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(() => {'));
 		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(action);'));

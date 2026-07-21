@@ -74,7 +74,6 @@ const IMAGE_RESOURCE_TTL_MS = 10 * 60 * 1000;
 const IMAGE_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 1000;
 const WINDOWS_DRAG_COPY_HOOK_TIMEOUT_MS = 45000;
 const WINDOWS_DRAG_COPY_HOOK_POLL_MS = 50;
-const WINDOWS_DRAG_HELPER_TARGET_GRACE_MS = 1000;
 const TURBOFILE_WINDOWS_DRAG_COPY_HOOK_CLSID = '{D650A1FA-43C6-4B8F-8C83-80B028353F64}';
 const TRANSFER_CANCELED_MESSAGE = 'Transfer canceled.';
 const REMOTE_DIRECTORY_SFTP_IDLE_MS = 5 * 60 * 1000;
@@ -4701,7 +4700,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async startCapturedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, _window: BrowserWindow): Promise<ITurboFileStartWindowsDragResult> {
+	private async startCapturedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileStartWindowsDragResult> {
 		if (request.source.kind === 'ssh' && !request.source.connection) {
 			return { ok: false, message: 'Missing SSH source connection for Windows drag.' };
 		}
@@ -4712,72 +4711,31 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const token = randomUUID();
 		const fakeDirectoryName = createWindowsDragFakeDirectoryName(token);
 		const paths = this.getWindowsDragCopyHookPaths(token, fakeDirectoryName);
-		let dragSource: ChildProcess | undefined;
 		try {
 			await this.ensureWindowsDragCopyHookRegistered();
 			await fsp.rm(paths.activeRoot, { recursive: true, force: true }).catch(() => undefined);
 			await fsp.rm(paths.targetFile, { force: true }).catch(() => undefined);
 			await fsp.mkdir(paths.fakeDirectory, { recursive: true });
 			await fsp.mkdir(dirname(paths.targetFile), { recursive: true });
-			this.cancelChromiumWindowsDrag(_window);
-			dragSource = this.startWindowsDragSourceHelper(paths.fakeDirectory);
+			window.webContents.startDrag({
+				file: paths.fakeDirectory,
+				files: [paths.fakeDirectory],
+				icon: createWindowsDragIcon()
+			});
 
-			const targetDirectory = await this.waitForWindowsDragSourceHelperResult(dragSource, paths.targetFile, fakeDirectoryName);
+			const targetDirectory = await this.waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName);
 			return { ok: true, message: 'Windows drop target captured.', targetDirectory };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return {
 				ok: false,
 				message,
-				canceled: message.includes('timed out') || message.includes('canceled')
+				canceled: message.includes('timed out')
 			};
 		} finally {
-			if (dragSource && dragSource.exitCode === null && !dragSource.killed) {
-				dragSource.kill();
-			}
 			await fsp.rm(paths.activeRoot, { recursive: true, force: true }).catch(() => undefined);
 			await fsp.rm(paths.targetFile, { force: true }).catch(() => undefined);
 		}
-	}
-
-	private cancelChromiumWindowsDrag(window: BrowserWindow): void {
-		if (window.isDestroyed() || window.webContents.isDestroyed()) {
-			return;
-		}
-		window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-		window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-	}
-
-	private startWindowsDragSourceHelper(fakeDirectory: string): ChildProcess {
-		return spawn(this.resolveWindowsDragSourceHelperPath(), [fakeDirectory], {
-			stdio: 'ignore',
-			windowsHide: true
-		});
-	}
-
-	private waitForWindowsDragSourceHelperResult(child: ChildProcess, targetFile: string, fakeDirectoryName: string): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const onError = (error: Error): void => {
-				child.removeListener('exit', onExit);
-				reject(error);
-			};
-			const onExit = async (code: number | null): Promise<void> => {
-				child.removeListener('error', onError);
-				if (code === 2) {
-					reject(new Error('Windows drag was canceled.'));
-				} else if (code !== 0) {
-					reject(new Error(`Windows drag helper failed with exit code ${code ?? 'unknown'}.`));
-				} else {
-					try {
-						resolve(await this.waitForWindowsDragCopyHookTarget(targetFile, fakeDirectoryName, WINDOWS_DRAG_HELPER_TARGET_GRACE_MS));
-					} catch (error) {
-						reject(error);
-					}
-				}
-			};
-			child.once('error', onError);
-			child.once('exit', onExit);
-		});
 	}
 
 	private getWindowsDragCopyHookPaths(token: string, fakeDirectoryName: string): { readonly activeRoot: string; readonly fakeDirectory: string; readonly targetFile: string } {
@@ -4950,21 +4908,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const found = candidates.find(candidate => existsSync(candidate));
 		if (!found) {
 			throw new Error(`TurboFile Windows drag extension DLL was not found. Run scripts\\build-turbofile-drag-ext.ps1. Checked: ${candidates.join(', ')}`);
-		}
-		return found;
-	}
-
-	private resolveWindowsDragSourceHelperPath(): string {
-		const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
-		const candidates = [
-			join(process.cwd(), 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragSource.exe'),
-			join(app.getAppPath(), 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragSource.exe'),
-			resourcesPath ? join(resourcesPath, 'app', 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragSource.exe') : undefined,
-			resourcesPath ? join(resourcesPath, 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragSource.exe') : undefined
-		].filter((candidate): candidate is string => !!candidate);
-		const found = candidates.find(candidate => existsSync(candidate));
-		if (!found) {
-			throw new Error(`TurboFile Windows drag source helper was not found. Run scripts\\build-turbofile-drag-ext.ps1. Checked: ${candidates.join(', ')}`);
 		}
 		return found;
 	}

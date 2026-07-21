@@ -95,6 +95,14 @@ suite('TurboFileTitlebar', () => {
 		});
 	});
 
+	test('hides VS Code problem counters without hiding the TurboFile taskbar', () => {
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+
+		assert.ok(css.includes('.statusbar-item[id="status.problems"]'));
+		assert.ok(css.includes('.statusbar-item[id="status.problemsVisibility"]'));
+		assert.ok(css.includes('display: none !important;'));
+	});
+
 	test('packages the drag extension with deferred replacement without enabling win32 versioned update', () => {
 		const inno = fs.readFileSync(path.join(process.cwd(), 'build/win32/code.iss'), 'utf8');
 		const product = fs.readFileSync(path.join(process.cwd(), 'product.json'), 'utf8');

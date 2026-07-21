@@ -141,6 +141,7 @@ const turboFileTerminalPageByTerminalId = new Map<number, string>();
 const turboFileLastActiveTerminalByPageId = new Map<string, number>();
 const turboFileTerminalPanelHiddenByPageId = new Set<string>();
 const turboFileEditorGroupReferenceCounts = new WeakMap<HTMLElement, number>();
+const turboFileVisibleEditors = new WeakMap<HTMLElement, Set<TurboFileEditor>>();
 let turboFileTerminalPanelVisibilityInProgress = false;
 let turboFileTerminalPanelVisibilityChangeDepth = 0;
 let turboFileTerminalPanelVisibilityResetHandle: number | undefined;
@@ -1046,8 +1047,7 @@ export class TurboFileEditor extends EditorPane {
 	override setVisible(visible: boolean): void {
 		super.setVisible(visible);
 		this.isEditorVisible = visible;
-		document.body.classList.toggle('turbofile-main-editor-visible', visible);
-		this.updateTransferTabsVisibility();
+		this.syncGlobalEditorVisibility();
 		if (visible) {
 			void this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
@@ -1060,9 +1060,11 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	override dispose(): void {
-		document.body.classList.remove('turbofile-main-editor-visible');
-		document.body.classList.remove('turbofile-transfer-tabs-visible');
-		document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark', 'turbofile-theme-switching');
+		this.isEditorVisible = false;
+		const hasVisibleTurboFileEditor = this.syncGlobalEditorVisibility();
+		if (!hasVisibleTurboFileEditor) {
+			document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark', 'turbofile-theme-switching');
+		}
 		if (this.appearanceTransitionTimer !== undefined) {
 			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
 			this.appearanceTransitionTimer = undefined;
@@ -3008,7 +3010,29 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateTransferTabsVisibility(): void {
-		document.body.classList.toggle('turbofile-transfer-tabs-visible', this.isEditorVisible && this.activePage === 'transfer');
+		this.syncGlobalEditorVisibility();
+	}
+
+	private syncGlobalEditorVisibility(): boolean {
+		const body = document.body;
+		let visibleEditors = turboFileVisibleEditors.get(body);
+		if (this.isEditorVisible) {
+			if (!visibleEditors) {
+				visibleEditors = new Set<TurboFileEditor>();
+				turboFileVisibleEditors.set(body, visibleEditors);
+			}
+			visibleEditors.add(this);
+		} else {
+			visibleEditors?.delete(this);
+		}
+
+		const hasVisibleEditor = (visibleEditors?.size ?? 0) > 0;
+		body.classList.toggle('turbofile-main-editor-visible', hasVisibleEditor);
+		body.classList.toggle('turbofile-transfer-tabs-visible', !!visibleEditors && Array.from(visibleEditors).some(editor => editor.activePage === 'transfer'));
+		if (!hasVisibleEditor) {
+			turboFileVisibleEditors.delete(body);
+		}
+		return hasVisibleEditor;
 	}
 
 	private notifyActivePageChanged(): void {
