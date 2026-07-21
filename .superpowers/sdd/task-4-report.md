@@ -15,6 +15,13 @@
 - 相关回归：DirectRoute 13、TarProgress 3、1.148Baseline 2、TransferPlan 8、TransferDisplay 6 passing。
 - 本轮合计 77 项通过，0 失败；`git diff --check` 无 whitespace error，仅有仓库既有 LF/CRLF 提示。
 
+### Residual follow-up：取消结果协议标记
+
+- 取消结果的候选集合改名为 `successfulStrategies`，且只在 `result.ok` 分支加入策略。失败 child 不再污染取消结果。
+- 若取消前已有成功 child，返回该成功数据承载策略；若尚无成功 child，则返回本轮已计算的 attempt fallback（包括 relay directional strategy）。
+- RED：新增静态契约后精确测试为 34 passing / 1 failing，失败项准确指出失败策略集合和取消 fallback 仍使用旧逻辑。
+- GREEN：`npm run compile-check-ts-native` 退出码 0；Static 35、BatchFlow 10、DirectRoute 13，共 58 项通过，0 失败。
+
 ## 结果
 
 - SCP 与 SFTP 直连仍启动 `beginRemoteFileGrowthTiming` / `beginRemotePathGrowthTiming` 发布目标增长进度，但数据命令不再把该 probe 的 `lastActivityAt` / `markActivity` 接入 `execRemote` inactivity watchdog。目标暂不增长或 probe 自身失败不会再关闭仍工作的数据通道。

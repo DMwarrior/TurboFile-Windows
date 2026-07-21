@@ -3569,7 +3569,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		let aggregateTotalBytes = totalByItem.reduce((sum, value) => sum + value, 0);
 		const successfulItems: ITurboFileBatchTransferItem[] = [];
 		const failures: ITurboFileBatchTransferFailure[] = [];
-		const strategies = new Set<ITurboFileTransferResult['strategy']>();
+		const successfulStrategies = new Set<ITurboFileTransferResult['strategy']>();
 		const childProgressIds = new Set<string>();
 		let completedItems = 0;
 		let completedBytes = 0;
@@ -3612,9 +3612,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 								progressId: childProgressId,
 								strategyHint: disableRsync && request.source.kind === 'ssh' && request.targetDirectory.kind === 'ssh' ? 'direct' : request.strategyHint
 							}, preserveDirectErrors);
-							strategies.add(result.strategy);
 							controller.recordResult(result);
 							if (result.ok) {
+								successfulStrategies.add(result.strategy);
 								successfulItems.push(item);
 								completedBytes += result.bytes;
 								const nextTransferredBytes = Math.max(transferredByItem[index], result.bytes);
@@ -3656,7 +3656,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return this.createBatchTransferResult(failed === 0, chosenStrategy, bytes, failed === 0 ? 'Batch transfer completed.' : `Batch transfer completed with ${failed} failure(s).`, successfulItems.length, failed, failures, startedAt, request.progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
-				return this.createBatchTransferResult(false, [...strategies][0] ?? fallbackStrategy, Math.max(completedBytes, aggregateTransferredBytes), TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, request.progressId, true);
+				return this.createBatchTransferResult(false, [...successfulStrategies][0] ?? fallbackStrategy, Math.max(completedBytes, aggregateTransferredBytes), TRANSFER_CANCELED_MESSAGE, successfulItems.length, failures.length, failures, startedAt, request.progressId, true);
 			}
 			throw error;
 		} finally {

@@ -525,6 +525,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const transferFileCore = methodBlock(service, 'private async transferFileCore', 'private async transferBetweenSshDevices');
 		const transferBetweenSshDevices = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
 		const concurrentBatch = methodBlock(service, 'private async runConcurrentBatchTransfer', 'private fireBatchAggregateProgress');
+		const successfulResultBranch = concurrentBatch.indexOf('if (result.ok) {');
+		const canceledResult = concurrentBatch.indexOf('TRANSFER_CANCELED_MESSAGE');
 
 		assert.deepStrictEqual({
 			childCoreCanPreserveTypedErrors: transferFileCore.includes('preserveDirectErrors')
@@ -535,6 +537,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 			concurrentAttemptDefersTypedErrors: concurrentBatch.includes('runTurboFileConcurrentBatchAttempt({')
 				&& concurrentBatch.includes('controller.captureDirectError(error)'),
 			recordsOnlySuccessfulChildResults: concurrentBatch.includes('controller.recordResult(result)'),
+			cancellationTracksOnlySuccessfulStrategies: concurrentBatch.includes("const successfulStrategies = new Set<ITurboFileTransferResult['strategy']>();")
+				&& concurrentBatch.indexOf('successfulStrategies.add(result.strategy);') > successfulResultBranch,
+			cancellationUsesSuccessfulStrategyOrAttemptFallback: concurrentBatch.includes('[...successfulStrategies][0] ?? fallbackStrategy')
+				&& concurrentBatch.indexOf('[...successfulStrategies][0] ?? fallbackStrategy') < canceledResult,
 			relayFallbackUsesDirectionalAttempt: concurrentBatch.includes("request.strategyHint === 'relay'")
 				&& concurrentBatch.includes('transferAttemptToDirectionalStrategy(request.source, request.targetDirectory, this.getInitialBatchTransferAttempt(request, items))'),
 			completeUsesChosenStrategy: concurrentBatch.includes("'complete', 'Batch transfer completed.'")
@@ -545,6 +551,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			sshPlanCanPreserveTypedErrors: true,
 			concurrentAttemptDefersTypedErrors: true,
 			recordsOnlySuccessfulChildResults: true,
+			cancellationTracksOnlySuccessfulStrategies: true,
+			cancellationUsesSuccessfulStrategyOrAttemptFallback: true,
 			relayFallbackUsesDirectionalAttempt: true,
 			completeUsesChosenStrategy: true
 		});
