@@ -161,6 +161,36 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(block.includes('this.refreshLocalPanesForWindowsPaths'));
 	});
 
+	test('uses copy progress for a single cut and permanently removes the source only after success', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const start = editor.indexOf('private async transferSelected');
+		const block = editor.slice(start, editor.indexOf('private async transferItem', start));
+		const transferIndex = block.indexOf('await this.transferItem(');
+		const cleanupIndex = block.indexOf('await this.deleteInternalClipboardSources(');
+		const refreshIndex = block.indexOf('await Promise.all([', cleanupIndex);
+
+		assert.ok(block.includes('if (sourceItems.length > 1)'));
+		assert.ok(!block.includes("if (operation === 'move' || sourceItems.length > 1)"));
+		assert.ok(transferIndex >= 0);
+		assert.ok(cleanupIndex > transferIndex);
+		assert.ok(refreshIndex > cleanupIndex);
+		assert.ok(!block.includes('moveUserItemsToTrash'));
+	});
+
+	test('keeps batch cut cleanup permanently separate from explicit recycle-bin deletion', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const service = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts'), 'utf8');
+		const cleanupStart = service.indexOf('private async deleteBatchSources');
+		const cleanupBlock = service.slice(cleanupStart, service.indexOf('private joinBatchTargetPath', cleanupStart));
+		const explicitDeleteStart = editor.indexOf('private async deleteSelected');
+		const explicitDeleteBlock = editor.slice(explicitDeleteStart, editor.indexOf('private removePaneItems', explicitDeleteStart));
+
+		assert.ok(cleanupBlock.includes('fsp.rm('));
+		assert.ok(cleanupBlock.includes('buildPosixDeleteManyFromInputCommand(true)'));
+		assert.ok(!cleanupBlock.includes('movePathsToTrash'));
+		assert.ok(explicitDeleteBlock.includes('moveUserItemsToTrash'));
+	});
+
 	test('defers post-drop transfers until after drag image teardown frames', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 

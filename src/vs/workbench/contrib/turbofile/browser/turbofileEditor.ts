@@ -140,6 +140,7 @@ interface TurboFilePaneDoubleClickState {
 const turboFileTerminalPageByTerminalId = new Map<number, string>();
 const turboFileLastActiveTerminalByPageId = new Map<string, number>();
 const turboFileTerminalPanelHiddenByPageId = new Set<string>();
+const turboFileEditorGroupReferenceCounts = new WeakMap<HTMLElement, number>();
 let turboFileTerminalPanelVisibilityInProgress = false;
 let turboFileTerminalPanelVisibilityChangeDepth = 0;
 let turboFileTerminalPanelVisibilityResetHandle: number | undefined;
@@ -816,6 +817,7 @@ export class TurboFileEditor extends EditorPane {
 	private taskSequence = 1;
 	private readonly tasks: TurboFileTask[] = [];
 	private editorGroupContainer: HTMLElement | undefined;
+	private hasEditorGroupClassReference = false;
 	private currentInput: TurboFileEditorInput | undefined;
 	private isEditorVisible = false;
 	private aboutDialogElement: HTMLElement | undefined;
@@ -887,7 +889,7 @@ export class TurboFileEditor extends EditorPane {
 
 	protected createEditor(parent: HTMLElement): void {
 		this.editorGroupContainer = parent.closest('.editor-group-container') as HTMLElement | undefined;
-		this.editorGroupContainer?.classList.add('turbofile-main-editor-group');
+		this.acquireEditorGroupClassReference();
 		this.container = $('.turbofile-workbench');
 		parent.appendChild(this.container);
 		this.deviceStore = this.instantiationService.createInstance(TurboFileDeviceStore);
@@ -921,6 +923,32 @@ export class TurboFileEditor extends EditorPane {
 		void this.refreshPane('left');
 		void this.refreshPane('right');
 		void this.prefetchDefaultDeviceDirectories();
+	}
+
+	private acquireEditorGroupClassReference(): void {
+		if (!this.editorGroupContainer || this.hasEditorGroupClassReference) {
+			return;
+		}
+
+		const referenceCount = turboFileEditorGroupReferenceCounts.get(this.editorGroupContainer) ?? 0;
+		turboFileEditorGroupReferenceCounts.set(this.editorGroupContainer, referenceCount + 1);
+		this.editorGroupContainer.classList.add('turbofile-main-editor-group');
+		this.hasEditorGroupClassReference = true;
+	}
+
+	private releaseEditorGroupClassReference(): void {
+		if (!this.editorGroupContainer || !this.hasEditorGroupClassReference) {
+			return;
+		}
+
+		const referenceCount = turboFileEditorGroupReferenceCounts.get(this.editorGroupContainer) ?? 0;
+		if (referenceCount <= 1) {
+			turboFileEditorGroupReferenceCounts.delete(this.editorGroupContainer);
+			this.editorGroupContainer.classList.remove('turbofile-main-editor-group');
+		} else {
+			turboFileEditorGroupReferenceCounts.set(this.editorGroupContainer, referenceCount - 1);
+		}
+		this.hasEditorGroupClassReference = false;
 	}
 
 	private async ensureTurboFileChrome(): Promise<void> {
@@ -1039,7 +1067,7 @@ export class TurboFileEditor extends EditorPane {
 			getWindow(this.container).clearTimeout(this.appearanceTransitionTimer);
 			this.appearanceTransitionTimer = undefined;
 		}
-		this.editorGroupContainer?.classList.remove('turbofile-main-editor-group');
+		this.releaseEditorGroupClassReference();
 		this.closeAboutDialog();
 		this.removeTitlebarAppMenu();
 		this.removeTitlebarThemeToggle();
@@ -9601,19 +9629,24 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		if (operation === 'move' || sourceItems.length > 1) {
+		if (operation === 'move' && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
+			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt);
+		}
+
+		if (sourceItems.length > 1) {
 			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt);
 		}
 
 		const batch = sourceItems.length > 1;
-		const label = batch ? `复制 ${sourceItems.length} 项` : `复制 ${sourceItems[0].name}`;
+		const actionLabel = operation === 'move' ? '剪切' : '复制';
+		const label = batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`;
 		const task = this.beginTask('transfer', label, `${sourceDevice.name} -> ${targetDevice.name}`);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
 		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, sourceItems);
-		if (!batch) {
+		if (!batch && operation === 'copy') {
 			task.retryTransfer = { sourceSide, targetSide, sourceItem: { ...sourceItems[0] } };
 		}
 
@@ -9678,6 +9711,16 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 
+		if (operation === 'move' && failed === 0) {
+			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, sourceSide, sourceItems);
+			if (cleanupFailures.length) {
+				this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 98);
+				await this.refreshTransferPanes('move', sourceSide, targetSide);
+				this.finishTask(task, 'error', `目标已复制，但删除来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy: [...strategies].join(', ') || undefined, error: cleanupFailures[0] });
+				return false;
+			}
+		}
+
 		this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
 		await Promise.all([
 			this.refreshPane(sourceSide, { force: true }),
@@ -9690,8 +9733,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const successMessage = batch
-			? `批量传输完成：${completed} 项，${formatSize(totalBytes)}。`
-			: `传输完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
+			? `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${completed} 项，${formatSize(totalBytes)}。`
+			: `${operation === 'move' ? '剪切传输' : '传输'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
 		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
 		return true;
 	}

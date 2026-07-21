@@ -6,7 +6,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { suite, test } from 'mocha';
 import { EditorPaneDescriptor, EditorPaneRegistry } from '../../../../browser/editor.js';
 
 suite('TurboFile Editor Pane Lifecycle', () => {
@@ -45,5 +44,19 @@ suite('TurboFile Editor Pane Lifecycle', () => {
 		listener.dispose();
 
 		assert.strictEqual(notificationCount, 1);
+	});
+
+	test('keeps the shared editor-group class until the final transfer pane closes', () => {
+		const editorPath = path.resolve(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
+		const editor = fs.readFileSync(editorPath, 'utf8');
+		const createStart = editor.indexOf('protected createEditor(parent: HTMLElement): void');
+		const createBlock = editor.slice(createStart, editor.indexOf('private async ensureTurboFileChrome', createStart));
+		const disposeStart = editor.indexOf('override dispose(): void');
+		const disposeBlock = editor.slice(disposeStart, editor.indexOf('\n\tprivate ', disposeStart));
+
+		assert.ok(editor.includes('const turboFileEditorGroupReferenceCounts = new WeakMap<HTMLElement, number>();'));
+		assert.ok(createBlock.includes('this.acquireEditorGroupClassReference();'));
+		assert.ok(disposeBlock.includes('this.releaseEditorGroupClassReference();'));
+		assert.ok(!disposeBlock.includes("this.editorGroupContainer?.classList.remove('turbofile-main-editor-group')"));
 	});
 });
