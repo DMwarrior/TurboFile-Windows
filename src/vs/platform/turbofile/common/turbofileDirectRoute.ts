@@ -5,15 +5,16 @@
 
 export type TurboFileDirectSshRoute = 'source-push' | 'target-pull';
 export type TurboFileDirectVerification = 'available' | 'unavailable' | 'indeterminate';
+export type TurboFileDirectRouteStage = 'initial' | 'retry';
 
 export interface ITurboFileDirectRouteFailure {
 	readonly route: TurboFileDirectSshRoute;
-	readonly failure: unknown;
+	readonly stage: TurboFileDirectRouteStage;
 }
 
 export class TurboFileDirectUnavailableError extends Error {
 	readonly route: TurboFileDirectSshRoute | undefined;
-	override readonly cause: unknown;
+	readonly stage: TurboFileDirectRouteStage | undefined;
 	readonly failures: readonly ITurboFileDirectRouteFailure[];
 
 	constructor(failures: readonly ITurboFileDirectRouteFailure[]) {
@@ -22,20 +23,19 @@ export class TurboFileDirectUnavailableError extends Error {
 		this.failures = [...failures];
 		const latestFailure = this.failures[this.failures.length - 1];
 		this.route = latestFailure?.route;
-		this.cause = latestFailure?.failure;
+		this.stage = latestFailure?.stage;
 	}
 }
 
 export class TurboFileDirectDataError extends Error {
 	readonly route: TurboFileDirectSshRoute;
-	override readonly cause: unknown;
+	readonly stage = 'retry' as const;
 	readonly failures: readonly ITurboFileDirectRouteFailure[];
 
-	constructor(route: TurboFileDirectSshRoute, cause: unknown, failures: readonly ITurboFileDirectRouteFailure[]) {
+	constructor(route: TurboFileDirectSshRoute, failures: readonly ITurboFileDirectRouteFailure[]) {
 		super('The direct SSH transfer failed after verification.');
 		this.name = 'TurboFileDirectDataError';
 		this.route = route;
-		this.cause = cause;
 		this.failures = [...failures];
 	}
 }
@@ -68,7 +68,7 @@ export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRo
 				throw error;
 			}
 			failure = error;
-			failures.push({ route, failure });
+			failures.push({ route, stage: 'initial' });
 		}
 
 		let verification: TurboFileDirectVerification = 'indeterminate';
@@ -89,8 +89,8 @@ export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRo
 			if (options.isCancellationError(error)) {
 				throw error;
 			}
-			failures.push({ route, failure: error });
-			throw new TurboFileDirectDataError(route, error, failures);
+			failures.push({ route, stage: 'retry' });
+			throw new TurboFileDirectDataError(route, failures);
 		}
 	}
 

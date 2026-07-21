@@ -153,13 +153,19 @@ suite('TurboFileDirectRoute', () => {
 		assert.ok(result instanceof TurboFileDirectUnavailableError);
 		assert.strictEqual(result.name, 'TurboFileDirectUnavailableError');
 		assert.strictEqual(result.route, 'target-pull');
-		assert.strictEqual(result.cause, secondFailure);
+		assert.strictEqual(Reflect.get(result, 'stage'), 'initial');
+		assert.strictEqual(Object.prototype.hasOwnProperty.call(result, 'cause'), false);
+		assert.ok(!Object.values(result).includes(firstFailure));
+		assert.ok(!Object.values(result).includes(secondFailure));
 		assert.deepStrictEqual(result.failures, [
-			{ route: 'source-push', failure: firstFailure },
-			{ route: 'target-pull', failure: secondFailure }
+			{ route: 'source-push', stage: 'initial' },
+			{ route: 'target-pull', stage: 'initial' }
 		]);
+		assert.ok(result.failures.every(failure => !Object.prototype.hasOwnProperty.call(failure, 'failure')));
 		assert.ok(!result.message.includes(firstFailure.message));
 		assert.ok(!result.message.includes(secondFailure.message));
+		assert.ok(!JSON.stringify(result).includes(firstFailure.message));
+		assert.ok(!JSON.stringify(result).includes(secondFailure.message));
 		assert.deepStrictEqual(calls, ['run:source-push:false', 'verify:source-push', 'run:target-pull:false', 'verify:target-pull']);
 	});
 
@@ -187,13 +193,19 @@ suite('TurboFileDirectRoute', () => {
 		assert.ok(result instanceof TurboFileDirectDataError);
 		assert.strictEqual(result.name, 'TurboFileDirectDataError');
 		assert.strictEqual(result.route, 'source-push');
-		assert.strictEqual(result.cause, retryFailure);
+		assert.strictEqual(Reflect.get(result, 'stage'), 'retry');
+		assert.strictEqual(Object.prototype.hasOwnProperty.call(result, 'cause'), false);
+		assert.ok(!Object.values(result).includes(firstFailure));
+		assert.ok(!Object.values(result).includes(retryFailure));
 		assert.deepStrictEqual(result.failures, [
-			{ route: 'source-push', failure: firstFailure },
-			{ route: 'source-push', failure: retryFailure }
+			{ route: 'source-push', stage: 'initial' },
+			{ route: 'source-push', stage: 'retry' }
 		]);
+		assert.ok(result.failures.every(failure => !Object.prototype.hasOwnProperty.call(failure, 'failure')));
 		assert.ok(!result.message.includes(firstFailure.message));
 		assert.ok(!result.message.includes(retryFailure.message));
+		assert.ok(!JSON.stringify(result).includes(firstFailure.message));
+		assert.ok(!JSON.stringify(result).includes(retryFailure.message));
 		assert.deepStrictEqual(calls, ['run:source-push:false', 'verify:source-push', 'run:source-push:true']);
 	});
 

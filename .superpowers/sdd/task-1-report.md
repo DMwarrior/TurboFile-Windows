@@ -18,10 +18,30 @@
 
 ## 正式测试状态
 
-正式测试文件已保留并通过 TypeScript 检查。当前运行中的极速传输锁定了 `out/`；遵循任务协调要求，未运行会生成或清理 `out/` 的编译、Gulp 或 watcher，正式 `test-node` 执行留待应用关闭后统一发射。
+正式测试文件已保留并通过 TypeScript 检查。初次提交时因 `out/` 被运行中的极速传输锁定而未执行；代码审查修复阶段已使用下述隔离发射方式完成正式 `test-node` 验证。
 
 ## 影响范围
 
 - `src/vs/platform/turbofile/common/turbofileDirectRoute.ts`
 - `src/vs/platform/turbofile/test/common/turbofileDirectRoute.test.ts`
 - 本报告
+
+## 代码审查修复
+
+- 移除诊断错误上的原始 `cause` 及 `failures[].failure`；协调器只持久化 `{ route, stage }`，其中 `stage` 为 `initial` 或 `retry`。
+- `verify` 仍在当前调用栈临时收到首次失败用于可用性复核，但协调器返回或抛错后不再保存该异常引用。
+- 正式测试现在断言密码、私钥路径或完整命令一类 secret 不会出现在错误 `message`、JSON 或公开属性中，同时保留 `class + route + stage` 分类能力。
+
+### TDD 与正式测试证据
+
+更新测试、尚未修改实现时，正式命令执行到行为断言并得到预期 RED：`11 passing, 2 failing`；两处失败均为脱敏错误缺少预期 `stage`。实现后执行：
+
+```powershell
+npm run compile-check-ts-native
+node .superpowers/tmp/transpile-task1.mjs
+npm run test-node -- --run src/vs/platform/turbofile/test/common/turbofileDirectRoute.test.ts
+```
+
+最终结果：`compile-check-ts-native` 退出码 0；12/12 个 `TurboFileDirectRoute` 行为测试全部通过，另有 1 个测试运行器 Errors 守卫通过，Mocha 输出 `13 passing (6ms)`，退出码 0。
+
+正常生成树当时不可用，因此临时脚本仅定向发射两个 Task 1 文件，并生成两个隔离测试基础设施模块：`ensureNoDisposablesAreLeakedInTestSuite` 调用保持在原始正式测试中，隔离模块为当前 suite 注册 teardown；`setUnexpectedErrorHandler` 供测试运行器使用。协调器不创建 disposable。验证后临时脚本和四个新 `out` 文件均已删除，未运行 Gulp、watch 或全量编译。
