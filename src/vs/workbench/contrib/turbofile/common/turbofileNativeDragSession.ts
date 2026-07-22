@@ -28,6 +28,35 @@ export interface TurboFileNativeDragSession<T> {
 	readonly internalTarget?: TurboFileNativeDragTarget;
 }
 
+export interface TurboFileNativeDragPointerPosition {
+	readonly clientX: number;
+	readonly clientY: number;
+	readonly screenX: number;
+	readonly screenY: number;
+}
+
+export interface TurboFileNativeDragViewportBounds {
+	readonly width: number;
+	readonly height: number;
+}
+
+/**
+ * Returns whether Chromium's file drag has left the workbench and must be handed to Windows OLE.
+ * Chromium can report every pointer coordinate as zero when a fast drag exits the native window;
+ * that event is an exit signal rather than an unusable sample and must not be ignored.
+ */
+export function shouldHandoffTurboFileDragToWindows(position: TurboFileNativeDragPointerPosition, bounds: TurboFileNativeDragViewportBounds): boolean {
+	const hasZeroCoordinates = position.clientX === 0
+		&& position.clientY === 0
+		&& position.screenX === 0
+		&& position.screenY === 0;
+	return hasZeroCoordinates
+		|| position.clientX <= 0
+		|| position.clientY <= 0
+		|| position.clientX >= bounds.width - 1
+		|| position.clientY >= bounds.height - 1;
+}
+
 export function createTurboFileNativeDragSession<T>(id: string, sourceSide: 'left' | 'right', operation: TurboFileDragOperation, items: readonly T[]): TurboFileNativeDragSession<T> {
 	return {
 		id,

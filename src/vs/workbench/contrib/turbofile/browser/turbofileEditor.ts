@@ -64,7 +64,7 @@ import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { createTurboFileCopyNames } from '../common/turbofileCopyName.js';
 import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage, TurboFileDragOperation } from '../common/turbofileDragDrop.js';
-import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
+import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, shouldHandoffTurboFileDragToWindows, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
 import { createTurboFilePostTransferRefreshPlan } from '../common/turbofileTransferRefresh.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
@@ -1670,16 +1670,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private maybeHandoffFileDragSessionToWindows(event: DragEvent): void {
-		if (!this.nativeDragSession || (event.clientX === 0 && event.clientY === 0 && event.screenX === 0 && event.screenY === 0)) {
+		if (!this.nativeDragSession) {
 			return;
 		}
 
 		const ownerWindow = getWindow(this.container);
-		const outsideWindow = event.clientX <= 0
-			|| event.clientY <= 0
-			|| event.clientX >= ownerWindow.innerWidth - 1
-			|| event.clientY >= ownerWindow.innerHeight - 1;
-		if (outsideWindow) {
+		if (shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
 			this.handoffFileDragSessionToWindows();
 		}
 	}

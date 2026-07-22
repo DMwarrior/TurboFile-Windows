@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, startTurboFileNativeDragSession } from '../../common/turbofileNativeDragSession.js';
+import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, shouldHandoffTurboFileDragToWindows, startTurboFileNativeDragSession } from '../../common/turbofileNativeDragSession.js';
 
 suite('TurboFileNativeDragSession', () => {
 	test('freezes the source snapshot and follows the native drag lifecycle', () => {
@@ -65,5 +65,21 @@ suite('TurboFileNativeDragSession', () => {
 			settleTurboFileNativeDragSession(dragging, 'failed').state,
 			settleTurboFileNativeDragSession(dragging, 'completed').state
 		], ['canceled', 'failed', 'completed']);
+	});
+
+	test('hands zero-coordinate and boundary drag events to Windows', () => {
+		const bounds = { width: 1920, height: 1080 };
+
+		assert.deepStrictEqual({
+			inside: shouldHandoffTurboFileDragToWindows({ clientX: 960, clientY: 540, screenX: 960, screenY: 540 }, bounds),
+			zeroCoordinates: shouldHandoffTurboFileDragToWindows({ clientX: 0, clientY: 0, screenX: 0, screenY: 0 }, bounds),
+			leftBoundary: shouldHandoffTurboFileDragToWindows({ clientX: 0, clientY: 540, screenX: 100, screenY: 540 }, bounds),
+			rightBoundary: shouldHandoffTurboFileDragToWindows({ clientX: 1919, clientY: 540, screenX: 2019, screenY: 540 }, bounds)
+		}, {
+			inside: false,
+			zeroCoordinates: true,
+			leftBoundary: true,
+			rightBoundary: true
+		});
 	});
 });

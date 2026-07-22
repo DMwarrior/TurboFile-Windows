@@ -26,6 +26,15 @@ async function exists(subdir: string) {
 	}
 }
 
+export async function hasCompiledEntryPoint(directory: string): Promise<boolean> {
+	try {
+		const stat = await fs.stat(path.join(directory, 'out', 'main.js'));
+		return stat.isFile();
+	} catch {
+		return false;
+	}
+}
+
 async function ensureNodeModules() {
 	if (!(await exists('node_modules'))) {
 		await runProcess(npm, ['ci']);
@@ -65,7 +74,7 @@ async function getElectronExecutableSubpath(): Promise<string | undefined> {
 }
 
 async function ensureCompiled() {
-	if (!(await exists('out'))) {
+	if (!(await hasCompiledEntryPoint(rootDir))) {
 		await runProcess(npm, ['run', 'compile']);
 	}
 }
