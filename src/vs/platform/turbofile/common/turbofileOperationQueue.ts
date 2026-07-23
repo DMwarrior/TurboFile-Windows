@@ -12,12 +12,20 @@ export interface ITurboFileOperationQueueOptions {
 export interface ITurboFileOperationAccess {
 	readonly read?: readonly string[];
 	readonly write?: readonly string[];
+	readonly limited?: readonly ITurboFileOperationLimitedAccess[];
+}
+
+export interface ITurboFileOperationLimitedAccess {
+	readonly key: string;
+	readonly limit: number;
+	readonly weight?: number;
 }
 
 interface ITurboFileQueuedOperation<T> {
 	readonly readKeys: readonly string[];
 	readonly writeKeys: readonly string[];
 	readonly keys: ReadonlySet<string>;
+	readonly limited: readonly ITurboFileOperationLimitedAccess[];
 	readonly operation: () => Promise<T>;
 	readonly options: ITurboFileOperationQueueOptions;
 	readonly resolve: (value: T | PromiseLike<T>) => void;
@@ -45,6 +53,7 @@ export class TurboFileOperationCanceledError extends Error {
 export class TurboFileOperationQueue {
 	private readonly pending: ITurboFileQueuedOperation<unknown>[] = [];
 	private readonly activeAccess = new Map<string, ITurboFileActiveAccess>();
+	private readonly activeLimited = new Map<string, number>();
 
 	run<T>(keys: readonly string[], operation: () => Promise<T>, options: ITurboFileOperationQueueOptions = {}): Promise<T> {
 		return this.runWithAccess({ write: keys }, operation, options);
@@ -64,11 +73,13 @@ export class TurboFileOperationQueue {
 		const writeKeys = [...new Set((access.write ?? []).filter(Boolean))].sort();
 		const writeKeySet = new Set(writeKeys);
 		const readKeys = [...new Set((access.read ?? []).filter(key => Boolean(key) && !writeKeySet.has(key)))].sort();
+		const limited = normalizeLimitedAccess(access.limited ?? []);
 		return new Promise<T>((resolve, reject) => {
 			const entry: ITurboFileQueuedOperation<T> = {
 				readKeys,
 				writeKeys,
 				keys: new Set([...readKeys, ...writeKeys]),
+				limited,
 				operation,
 				options,
 				resolve,
@@ -118,12 +129,17 @@ export class TurboFileOperationQueue {
 
 	private canStart(entry: ITurboFileQueuedOperation<unknown>, index: number): boolean {
 		for (const key of entry.writeKeys) {
-			if (this.activeAccess.has(key)) {
+			if ([...this.activeAccess.keys()].some(activeKey => operationKeysConflict(key, activeKey))) {
 				return false;
 			}
 		}
 		for (const key of entry.readKeys) {
-			if (this.activeAccess.get(key)?.writer) {
+			if ([...this.activeAccess].some(([activeKey, access]) => access.writer && operationKeysConflict(key, activeKey))) {
+				return false;
+			}
+		}
+		for (const claim of entry.limited) {
+			if ((this.activeLimited.get(claim.key) ?? 0) + (claim.weight ?? 1) > claim.limit) {
 				return false;
 			}
 		}
@@ -137,8 +153,9 @@ export class TurboFileOperationQueue {
 	}
 
 	private conflicts(entry: ITurboFileQueuedOperation<unknown>, earlier: ITurboFileQueuedOperation<unknown>): boolean {
-		return entry.writeKeys.some(key => earlier.keys.has(key))
-			|| entry.readKeys.some(key => earlier.writeKeys.includes(key));
+		return entry.writeKeys.some(key => [...earlier.keys].some(earlierKey => operationKeysConflict(key, earlierKey)))
+			|| entry.readKeys.some(key => earlier.writeKeys.some(earlierKey => operationKeysConflict(key, earlierKey)))
+			|| entry.limited.some(claim => earlier.limited.some(earlierClaim => claim.key === earlierClaim.key));
 	}
 
 	private acquire(entry: ITurboFileQueuedOperation<unknown>): void {
@@ -152,6 +169,9 @@ export class TurboFileOperationQueue {
 			} else {
 				this.activeAccess.set(key, { readers: 1, writer: false });
 			}
+		}
+		for (const claim of entry.limited) {
+			this.activeLimited.set(claim.key, (this.activeLimited.get(claim.key) ?? 0) + (claim.weight ?? 1));
 		}
 	}
 
@@ -167,6 +187,15 @@ export class TurboFileOperationQueue {
 				active.readers--;
 			}
 		}
+		for (const claim of entry.limited) {
+			const active = this.activeLimited.get(claim.key) ?? 0;
+			const weight = claim.weight ?? 1;
+			if (active <= weight) {
+				this.activeLimited.delete(claim.key);
+			} else {
+				this.activeLimited.set(claim.key, active - weight);
+			}
+		}
 	}
 
 	private notify(callback: (() => void) | undefined): void {
@@ -176,4 +205,45 @@ export class TurboFileOperationQueue {
 			// Observers only update UI state and must never strand acquired device keys.
 		}
 	}
+}
+
+function normalizeLimitedAccess(access: readonly ITurboFileOperationLimitedAccess[]): ITurboFileOperationLimitedAccess[] {
+	const claims = new Map<string, { limit: number; weight: number }>();
+	for (const claim of access) {
+		if (!claim.key) {
+			continue;
+		}
+		const limit = Math.max(1, Math.floor(claim.limit));
+		const weight = Math.min(limit, Math.max(1, Math.floor(claim.weight ?? 1)));
+		const existing = claims.get(claim.key);
+		claims.set(claim.key, {
+			limit: Math.min(existing?.limit ?? limit, limit),
+			weight: Math.max(existing?.weight ?? weight, weight)
+		});
+	}
+	return [...claims].map(([key, claim]) => ({ key, limit: claim.limit, weight: Math.min(claim.limit, claim.weight) })).sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function operationKeysConflict(left: string, right: string): boolean {
+	if (left === right) {
+		return true;
+	}
+	const leftPath = parsePathKey(left);
+	const rightPath = parsePathKey(right);
+	if (!leftPath || !rightPath || leftPath.device !== rightPath.device) {
+		return false;
+	}
+	return isSameOrAncestorPath(leftPath.path, rightPath.path) || isSameOrAncestorPath(rightPath.path, leftPath.path);
+}
+
+function parsePathKey(key: string): { readonly device: string; readonly path: string } | undefined {
+	if (!key.startsWith('path:')) {
+		return undefined;
+	}
+	const separator = key.indexOf('|', 5);
+	return separator < 0 ? undefined : { device: key.slice(5, separator), path: key.slice(separator + 1) };
+}
+
+function isSameOrAncestorPath(parent: string, child: string): boolean {
+	return parent === child || child.startsWith(parent.endsWith('/') ? parent : `${parent}/`);
 }

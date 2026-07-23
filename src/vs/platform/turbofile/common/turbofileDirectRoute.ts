@@ -31,12 +31,19 @@ export class TurboFileDirectDataError extends Error {
 	readonly route: TurboFileDirectSshRoute;
 	readonly stage = 'retry' as const;
 	readonly failures: readonly ITurboFileDirectRouteFailure[];
+	readonly transferCause!: unknown;
 
-	constructor(route: TurboFileDirectSshRoute, failures: readonly ITurboFileDirectRouteFailure[]) {
+	constructor(route: TurboFileDirectSshRoute, failures: readonly ITurboFileDirectRouteFailure[], transferCause?: unknown) {
 		super('The direct SSH transfer failed after verification.');
 		this.name = 'TurboFileDirectDataError';
 		this.route = route;
 		this.failures = [...failures];
+		Object.defineProperty(this, 'transferCause', {
+			value: transferCause,
+			enumerable: false,
+			configurable: false,
+			writable: false
+		});
 	}
 }
 
@@ -97,7 +104,7 @@ export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRo
 				throw error;
 			}
 			failures.push({ route, stage: 'retry' });
-			throw new TurboFileDirectDataError(route, failures);
+			throw new TurboFileDirectDataError(route, failures, error);
 		}
 	}
 

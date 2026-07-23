@@ -11,6 +11,7 @@ interface IResolveTransferPlanOptions {
 	readonly sourceType?: TurboFileFileType;
 	readonly itemCount?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+	readonly attemptProtocol?: TurboFileTransferAttemptProtocol;
 }
 
 type TransferShape = 'single-file' | 'multi-or-directory';
@@ -18,8 +19,9 @@ type TransferShape = 'single-file' | 'multi-or-directory';
 export function resolveTransferPlan(options: IResolveTransferPlanOptions): ITurboFileTransferPlan {
 	const shape = getTransferShape(options.sourceType, options.itemCount);
 	const attempts = createTransferAttempts(options, shape);
+	const protocolAttempts = options.attemptProtocol ? attempts.filter(attempt => attempt.protocol === options.attemptProtocol) : attempts;
 	return {
-		attempts: dedupeAttempts(applyStrategyHint(attempts, options.strategyHint))
+		attempts: dedupeAttempts(applyStrategyHint(protocolAttempts, options.strategyHint))
 	};
 }
 
@@ -53,21 +55,32 @@ function createLocalSshAttempts(protocol: TurboFileTransferProtocol, shape: Tran
 		case 'sftp':
 			return [attempt('sftp', 'local', `${reasonPrefix}: explicit SFTP.`)];
 		case 'scp':
-			return [attempt('scp', 'local', `${reasonPrefix}: explicit SCP.`)];
+			return [
+				attempt('scp', 'local', `${reasonPrefix}: explicit SCP.`),
+				attempt('sftp', 'local', `${reasonPrefix}: explicit SCP falls back to SFTP.`)
+			];
 		case 'rsync':
-			return [attempt('rsync', 'local', `${reasonPrefix}: explicit rsync.`)];
+			return [
+				attempt('rsync', 'local', `${reasonPrefix}: explicit rsync.`),
+				attempt('scp', 'local', `${reasonPrefix}: explicit rsync falls back to SCP.`),
+				attempt('sftp', 'local', `${reasonPrefix}: explicit rsync falls back to SFTP.`)
+			];
 		case 'tar':
 			return shape === 'multi-or-directory'
 				? [
 					attempt('tar', 'local', `${reasonPrefix}: explicit tar.`),
 					attempt('sftp', 'local', `${reasonPrefix}: explicit tar falls back to SFTP.`)
 				]
-				: [attempt('scp', 'local', `${reasonPrefix}: tar does not apply to a single file; use frozen SCP fast path.`)];
+				: [
+					attempt('scp', 'local', `${reasonPrefix}: tar does not apply to a single file; use frozen SCP fast path.`),
+					attempt('sftp', 'local', `${reasonPrefix}: single-file SCP falls back to SFTP.`)
+				];
 		case 'auto-fast':
 		default:
 			return shape === 'single-file'
 				? [
-					attempt('scp', 'local', `${reasonPrefix}: auto-fast single file uses the frozen SCP fast path.`)
+					attempt('scp', 'local', `${reasonPrefix}: auto-fast single file starts with SCP.`),
+					attempt('sftp', 'local', `${reasonPrefix}: SCP failure falls back to SFTP.`)
 				]
 				: [
 					attempt('tar', 'local', `${reasonPrefix}: auto-fast multi item or directory uses tar.`),
@@ -84,7 +97,9 @@ function createSshSshAttempts(source: ITurboFileTransferEndpoint, target: ITurbo
 	if (shape === 'single-file') {
 		return [
 			attempt('scp', 'direct', 'SSH to SSH auto-fast single file starts with direct SCP.'),
-			attempt('scp', 'relay', 'SSH to SSH auto-fast single file falls back to SCP relay.')
+			attempt('sftp', 'direct', 'SSH to SSH direct SCP failure falls back to direct SFTP.'),
+			attempt('scp', 'relay', 'SSH to SSH direct transports unavailable; use SCP relay.'),
+			attempt('sftp', 'relay', 'SSH to SSH SCP relay failure falls back to SFTP relay.')
 		];
 	}
 	return [
@@ -102,10 +117,10 @@ function createExplicitSshSshAttempts(protocol: TurboFileTransferAttemptProtocol
 		attempt(protocol, 'direct', `SSH to SSH explicit ${protocol} starts with optimistic direct.`),
 		attempt(protocol, 'relay', `SSH to SSH explicit ${protocol} falls back to same-protocol relay.`)
 	];
-	if (protocol === 'tar') {
+	if (protocol !== 'sftp') {
 		attempts.push(
-			attempt('sftp', 'direct', 'SSH to SSH explicit tar failure falls back to direct SFTP.'),
-			attempt('sftp', 'relay', 'SSH to SSH explicit tar failure falls back to SFTP relay.')
+			attempt('sftp', 'direct', `SSH to SSH explicit ${protocol} failure falls back to direct SFTP.`),
+			attempt('sftp', 'relay', `SSH to SSH explicit ${protocol} failure falls back to SFTP relay.`)
 		);
 	}
 	return attempts;

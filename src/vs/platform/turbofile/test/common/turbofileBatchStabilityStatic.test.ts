@@ -63,6 +63,14 @@ suite('TurboFileBatchStabilityStatic', () => {
 		assert.ok(!concurrent.includes("'Batch transfer in progress.', completedItems, items.length, item.displayName ?? item.targetName, true"));
 	});
 
+	test('never removes move sources after a partially successful batch', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const concurrent = methodBlock(service, 'private async runConcurrentBatchTransfer', 'private fireBatchAggregateProgress');
+
+		assert.ok(concurrent.includes("operation === 'move' && failures.length === 0 && successfulItems.length === items.length"));
+		assert.ok(!concurrent.includes("operation === 'move' && successfulItems.length"));
+	});
+
 	test('streams explicit rsync source lists instead of appending paths to commands', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const local = methodBlock(service, 'private async tryLocalBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransfer');

@@ -25,7 +25,7 @@ suite('TurboFileTransferPlan', function () {
 		supportsTar
 	});
 
-	test('uses frozen scp fast path for local to ssh single file auto-fast', () => {
+	test('falls back from scp to sftp for local to ssh single file auto-fast', () => {
 		const plan = resolveTransferPlan({
 			source: { ...local, path: 'D:\\Work\\test\\GanLaJiao_tongliao.zip' },
 			target: ssh(),
@@ -34,7 +34,24 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'scp', route: 'local' }
+			{ protocol: 'scp', route: 'local' },
+			{ protocol: 'sftp', route: 'local' }
+		]);
+	});
+
+	test('uses sftp before relay for ssh to ssh single file auto-fast', () => {
+		const plan = resolveTransferPlan({
+			source: ssh(),
+			target: ssh(),
+			sourceType: 'file',
+			itemCount: 1
+		});
+
+		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
+			{ protocol: 'scp', route: 'direct' },
+			{ protocol: 'sftp', route: 'direct' },
+			{ protocol: 'scp', route: 'relay' },
+			{ protocol: 'sftp', route: 'relay' }
 		]);
 	});
 
@@ -97,7 +114,7 @@ suite('TurboFileTransferPlan', function () {
 		});
 	});
 
-	test('does not cross protocol fallback for explicit rsync', () => {
+	test('keeps the explicit rsync fast path and falls back to scp then sftp', () => {
 		const plan = resolveTransferPlan({
 			source: { ...local, path: 'D:\\Work\\test\\1024x40' },
 			target: ssh('rsync'),
@@ -106,7 +123,33 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'rsync', route: 'local' }
+			{ protocol: 'rsync', route: 'local' },
+			{ protocol: 'scp', route: 'local' },
+			{ protocol: 'sftp', route: 'local' }
+		]);
+	});
+
+	test('keeps sftp as the final safety fallback for explicit scp', () => {
+		const localPlan = resolveTransferPlan({
+			source: { ...local, path: 'D:\\Work\\test\\file.bin' },
+			target: ssh('scp'),
+			sourceType: 'file'
+		});
+		const sshPlan = resolveTransferPlan({
+			source: ssh('scp'),
+			target: ssh('scp'),
+			sourceType: 'file'
+		});
+
+		assert.deepStrictEqual(localPlan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
+			{ protocol: 'scp', route: 'local' },
+			{ protocol: 'sftp', route: 'local' }
+		]);
+		assert.deepStrictEqual(sshPlan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
+			{ protocol: 'scp', route: 'direct' },
+			{ protocol: 'scp', route: 'relay' },
+			{ protocol: 'sftp', route: 'direct' },
+			{ protocol: 'sftp', route: 'relay' }
 		]);
 	});
 
@@ -120,7 +163,9 @@ suite('TurboFileTransferPlan', function () {
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
 			{ protocol: 'rsync', route: 'direct' },
-			{ protocol: 'rsync', route: 'relay' }
+			{ protocol: 'rsync', route: 'relay' },
+			{ protocol: 'sftp', route: 'direct' },
+			{ protocol: 'sftp', route: 'relay' }
 		]);
 	});
 
@@ -148,7 +193,9 @@ suite('TurboFileTransferPlan', function () {
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
 			{ protocol: 'scp', route: 'direct' },
-			{ protocol: 'scp', route: 'relay' }
+			{ protocol: 'scp', route: 'relay' },
+			{ protocol: 'sftp', route: 'direct' },
+			{ protocol: 'sftp', route: 'relay' }
 		]);
 	});
 
@@ -208,7 +255,23 @@ suite('TurboFileTransferPlan', function () {
 		});
 
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
-			{ protocol: 'scp', route: 'relay' }
+			{ protocol: 'scp', route: 'relay' },
+			{ protocol: 'sftp', route: 'relay' }
+		]);
+	});
+
+	test('isolates a concrete batch attempt from nested protocol fallbacks', () => {
+		const plan = resolveTransferPlan({
+			source: ssh(),
+			target: ssh(),
+			sourceType: 'file',
+			itemCount: 8,
+			strategyHint: 'direct',
+			attemptProtocol: 'sftp'
+		});
+
+		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
+			{ protocol: 'sftp', route: 'direct' }
 		]);
 	});
 });

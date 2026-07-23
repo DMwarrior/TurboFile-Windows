@@ -5021,6 +5021,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
 		const isRsyncProgress = strategy?.startsWith('rsync') ?? false;
+		const isFailed = event.state === 'failed';
+		const isCanceled = event.state === 'canceled';
+		const isCompleted = event.state ? event.state === 'completed' : event.phase === 'complete';
+		const isTerminal = isCompleted || isFailed || isCanceled;
 		const totalBytes = resolveTurboFileVisibleTotalBytes({
 			trackTotalBytes: task.trackTotalBytes,
 			listedTotalBytes: activeItem?.totalBytes ?? task.totalBytes,
@@ -5029,7 +5033,7 @@ export class TurboFileEditor extends EditorPane {
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes !== undefined && totalBytes > 0 ? totalBytes : event.transferredBytes);
 		const progress = totalBytes !== undefined && totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
-			: event.phase === 'complete' ? 100 : Math.max(8, task.progress);
+			: isCompleted ? 100 : Math.max(8, task.progress);
 		let detail = this.formatTransferProgressDetail(event, transferredBytes, totalBytes);
 		if (event.totalItems && event.totalItems > 1) {
 			const completedItems = Math.max(0, Math.min(event.completedItems ?? 0, event.totalItems));
@@ -5067,14 +5071,17 @@ export class TurboFileEditor extends EditorPane {
 			if (shouldStartTransferTimingValue && activeItem.transferStartedAt === undefined) {
 				activeItem.transferStartedAt = now;
 			}
-			activeItem.status = event.phase === 'complete' ? 'success' : 'running';
+			activeItem.status = isCompleted ? 'success' : isFailed ? 'error' : isCanceled ? 'canceled' : 'running';
 			activeItem.transferredBytes = transferredBytes;
 			activeItem.totalBytes = totalBytes ?? activeItem.totalBytes;
-			activeItem.progress = event.phase === 'complete' ? 100 : progress;
+			activeItem.progress = isCompleted ? 100 : progress;
 			activeItem.speedBytesPerSecond = speed;
 			activeItem.remainingMs = speed > 0 && totalBytes !== undefined && totalBytes > 0 && totalBytes > transferredBytes ? ((totalBytes - transferredBytes) / speed) * 1000 : undefined;
 			activeItem.strategy = strategy;
-			if (event.phase === 'complete') {
+			if (isFailed) {
+				activeItem.error = event.detail;
+			}
+			if (isTerminal) {
 				activeItem.endedAt = now;
 			}
 		}
@@ -5086,13 +5093,13 @@ export class TurboFileEditor extends EditorPane {
 		task.strategy = strategy;
 		task.progress = activeItem && aggregate.totalBytes !== undefined && aggregate.totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((aggregate.transferredBytes / aggregate.totalBytes) * 100)))
-			: event.phase === 'complete' ? 100 : progress;
+			: isCompleted ? 100 : progress;
 		task.detail = detail;
 		this.statusMessage = detail;
 		this.updateLiveTransferTicker();
 
 		const renderIntervalMs = strategy?.startsWith('rsync') ? RSYNC_PROGRESS_RENDER_INTERVAL_MS : TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
-		if (event.phase === 'complete' || (totalBytes !== undefined && totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
+		if (isTerminal || (totalBytes !== undefined && totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
 			task.lastProgressRenderAt = now;
 			if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
 				this.refreshTaskbar();
@@ -9604,11 +9611,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		if (operation === 'move' && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
-			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt);
-		}
-
-		if (sourceItems.length > 1) {
+		if (shouldUseBatchTransfer(operation, sourceItems.length)) {
 			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt);
 		}
 
@@ -15436,6 +15439,10 @@ function sortImageGridImages(images: TurboFileImageGridImage[], key: TurboFileIm
 		sizeKnown: !image.item.attrsPending && Number.isFinite(image.item.rawSize) && image.item.rawSize >= 0
 	})), key, descending).map(entry => entry.image);
 	images.splice(0, images.length, ...sorted);
+}
+
+function shouldUseBatchTransfer(operation: TurboFileDragOperation, itemCount: number): boolean {
+	return operation === 'move' || itemCount > 1;
 }
 
 function isArchiveFile(name: string): boolean {

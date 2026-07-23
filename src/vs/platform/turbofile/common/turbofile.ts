@@ -154,6 +154,7 @@ export type TurboFileTransferProtocol = 'auto-fast' | 'sftp' | 'scp' | 'rsync' |
 export type TurboFileTransferDependency = 'rsync' | 'sshpass';
 export type TurboFileTransferAttemptProtocol = Exclude<TurboFileTransferProtocol, 'auto-fast'>;
 export type TurboFileTransferAttemptRoute = 'local' | 'direct' | 'relay';
+export type TurboFileTransferProgressState = 'queued' | 'preparing' | 'transferring' | 'fallback' | 'completed' | 'failed' | 'canceled';
 
 export interface ITurboFileRemoteCapabilities {
 	readonly ssh: boolean;
@@ -262,6 +263,8 @@ export interface ITurboFileTransferRequest {
 	readonly progressId?: string;
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+	/** Restricts one planner attempt; used by the batch coordinator to avoid nested fallback. */
+	readonly attemptProtocol?: TurboFileTransferAttemptProtocol;
 	readonly clientStartedAt?: number;
 }
 
@@ -281,6 +284,10 @@ export interface ITurboFileBatchTransferRequest {
 	readonly progressId?: string;
 	readonly expectedBytes?: number;
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
+	/** Restricts child transfers to the protocol selected by the outer batch plan. */
+	readonly attemptProtocol?: TurboFileTransferAttemptProtocol;
+	/** Immutable device-capacity snapshot shared by the queue claim and batch workers. */
+	readonly schedulerConcurrency?: number;
 	readonly clientStartedAt?: number;
 }
 
@@ -357,6 +364,8 @@ export interface ITurboFileTransferProgressEvent {
 	readonly transferredBytes: number;
 	readonly totalBytes: number;
 	readonly phase: 'prepare' | 'transfer' | 'relay-download' | 'relay-upload' | 'rsync-direct' | 'complete';
+	readonly state?: TurboFileTransferProgressState;
+	readonly protocol?: 'native' | TurboFileTransferAttemptProtocol;
 	readonly detail?: string;
 	readonly strategy?: ITurboFileTransferResult['strategy'];
 	readonly route?: 'source-push' | 'target-pull' | 'relay';

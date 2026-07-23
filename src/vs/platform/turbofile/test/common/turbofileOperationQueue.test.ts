@@ -47,6 +47,74 @@ suite('TurboFileOperationQueue', () => {
 		await Promise.all([left, right]);
 	});
 
+	test('limits concurrent operations with a shared capacity key', async () => {
+		const queue = new TurboFileOperationQueue();
+		let started = 0;
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => release = resolve);
+		const tasks = Array.from({ length: 3 }, () => queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 2 }] }, async () => {
+			started++;
+			await gate;
+		}));
+		await Promise.resolve();
+		assert.strictEqual(started, 2);
+		release();
+		await Promise.all(tasks);
+		assert.strictEqual(started, 3);
+	});
+
+	test('accounts for weighted batch capacity without multiplying inner workers', async () => {
+		const queue = new TurboFileOperationQueue();
+		const order: string[] = [];
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => release = resolve);
+		const batch = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 8, weight: 6 }] }, async () => {
+			order.push('batch');
+			await gate;
+		});
+		const firstFile = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 8 }] }, async () => { order.push('file-1'); await gate; });
+		const secondFile = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 8 }] }, async () => { order.push('file-2'); await gate; });
+		const queuedFile = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 8 }] }, async () => order.push('file-3'));
+		await Promise.resolve();
+		assert.deepStrictEqual(order, ['batch', 'file-1', 'file-2']);
+		release();
+		await Promise.all([batch, firstFile, secondFile, queuedFile]);
+		assert.deepStrictEqual(order, ['batch', 'file-1', 'file-2', 'file-3']);
+	});
+
+	test('does not let later file capacity claims overtake an earlier directory claim', async () => {
+		const queue = new TurboFileOperationQueue();
+		const order: string[] = [];
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => release = resolve);
+		const active = Array.from({ length: 5 }, (_, index) => queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 16 }] }, async () => {
+			order.push(`active-${index}`);
+			await gate;
+		}));
+		const directory = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 4 }] }, async () => order.push('directory'));
+		const laterFile = queue.runWithAccess({ limited: [{ key: 'ssh:capacity', limit: 16 }] }, async () => order.push('later-file'));
+		await Promise.resolve();
+		assert.ok(!order.includes('later-file'));
+		release();
+		await Promise.all([...active, directory, laterFile]);
+		assert.ok(order.indexOf('directory') < order.indexOf('later-file'));
+	});
+
+	test('serializes ancestor and descendant path writes but not sibling paths', async () => {
+		const queue = new TurboFileOperationQueue();
+		const order: string[] = [];
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => release = resolve);
+		const parent = queue.run(['path:ssh:user@host:22|/data/a'], async () => { order.push('parent'); await gate; });
+		const child = queue.run(['path:ssh:user@host:22|/data/a/file'], async () => order.push('child'));
+		const sibling = queue.run(['path:ssh:user@host:22|/data/ab'], async () => order.push('sibling'));
+		await Promise.resolve();
+		assert.deepStrictEqual(order, ['parent', 'sibling']);
+		release();
+		await Promise.all([parent, child, sibling]);
+		assert.deepStrictEqual(order, ['parent', 'sibling', 'child']);
+	});
+
 	test('runs shared operations on the same device concurrently', async () => {
 		const queue = new TurboFileOperationQueue();
 		let started = 0;

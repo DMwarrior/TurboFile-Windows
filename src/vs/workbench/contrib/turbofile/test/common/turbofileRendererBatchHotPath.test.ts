@@ -45,6 +45,17 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(progress.includes('task.currentTransferName = event.currentName'));
 	});
 
+	test('uses explicit terminal state instead of treating every complete phase as success', () => {
+		const editor = readEditor();
+		const progressStart = editor.indexOf('private updateTransferProgress');
+		const progress = editor.slice(progressStart, editor.indexOf('private calculateTransferSpeed', progressStart));
+
+		assert.ok(progress.includes("const isFailed = event.state === 'failed'"));
+		assert.ok(progress.includes("const isCanceled = event.state === 'canceled'"));
+		assert.ok(progress.includes("event.state ? event.state === 'completed' : event.phase === 'complete'"));
+		assert.ok(progress.includes("activeItem.status = isCompleted ? 'success' : isFailed ? 'error' : isCanceled ? 'canceled' : 'running'"));
+	});
+
 	test('starts native batch transfers with a taskbar-only refresh', () => {
 		const editor = readEditor();
 		const batchStart = editor.indexOf('private async transferItemsBatch');
@@ -98,6 +109,17 @@ suite('TurboFileRendererBatchHotPath', () => {
 			assert.ok(hotPath.includes('failureMessages.get('));
 			assert.ok(!hotPath.includes('result.failures.find('));
 		}
+	});
+
+	test('routes even a single move through the batch transaction', () => {
+		const editor = readEditor();
+		const transferStart = editor.indexOf('private async transferSelected');
+		const transfer = editor.slice(transferStart, editor.indexOf('private async transferItemsBatch', transferStart));
+		const helperStart = editor.indexOf('function shouldUseBatchTransfer');
+		const helper = editor.slice(helperStart, editor.indexOf('\n}', helperStart) + 2);
+
+		assert.ok(transfer.includes('shouldUseBatchTransfer(operation, sourceItems.length)'));
+		assert.ok(helper.includes("operation === 'move' || itemCount > 1"));
 	});
 
 	test('indexes recycle-bin restore conflicts instead of scanning every selected item', () => {

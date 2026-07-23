@@ -41,7 +41,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(block.includes('this.remoteDirectoryListingGenerations.isCurrent'));
 	});
 
-	test('shares source reads while serializing target writes without nesting the operation queue', () => {
+	test('uses path locks and adaptive device capacity without nesting the operation queue', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transferFile = methodBlock(service, 'async transferFile', 'private async transferFileCore');
 		const transferBatch = methodBlock(service, 'async transferBatch', 'private async transferBatchCore');
@@ -57,18 +57,28 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(service.includes('connection.host'));
 		assert.ok(service.includes('connection.port'));
 		assert.ok(service.includes("operation === 'move'"));
-		assert.ok(service.includes('{ read: [sourceKey], write: [targetKey] }'));
+		assert.ok(service.includes("getTurboFileTransferPathKey(source, 'path')"));
+		assert.ok(service.includes("getTurboFileTransferPathKey(target, targetIsDirectory ? 'path' : 'parent')"));
+		assert.ok(service.includes("scheduler.getDeviceCapacity(endpoint, sourceType === 'directory' ? 'directory' : 'file')"));
+		assert.ok(service.includes("read: [sourceDeviceKey, targetDeviceKey, ...(operation === 'copy' ? sourcePathKeys : [])]"));
+		assert.ok(service.includes("write: operation === 'move' ? [...sourcePathKeys, targetPathKey] : [targetPathKey]"));
+		assert.ok(service.includes('function getBatchTransferSchedulingSnapshot('));
+		assert.ok(service.includes("initialAttempt?.protocol === 'scp' || initialAttempt?.protocol === 'sftp'"));
+		assert.ok(service.includes('const workerLimit = usesConcurrentWorkers ? maximumWorkers : 1;'));
 		assert.ok(service.includes('this.fileOperationQueue.cancel(progressId)'));
 
 		assert.ok(transferFile.includes('this.fileOperationQueue.runWithAccess'));
-		assert.ok(transferFile.includes("getTransferOperationAccess(request.source, request.target, 'copy')"));
+		assert.ok(transferFile.includes("getTransferOperationAccess(request.source, request.target, 'copy', this.transferScheduler, false, request.sourceType)"));
 		assert.ok(transferFile.includes('id: request.progressId'));
 		assert.ok(transferBatch.includes('this.fileOperationQueue.runWithAccess'));
-		assert.ok(transferBatch.includes('getTransferOperationAccess(request.source, request.targetDirectory, operation)'));
+		assert.ok(transferBatch.includes('const scheduling = getBatchTransferSchedulingSnapshot(request, items, this.transferScheduler);'));
+		assert.ok(transferBatch.includes('schedulerConcurrency: scheduling.workerLimit'));
+		assert.ok(transferBatch.includes("getTransferOperationAccess(request.source, request.targetDirectory, operation, this.transferScheduler, true, items.some(item => item.sourceType === 'directory') ? 'directory' : 'file', scheduling.capacityWeight, items.map(item => item.sourcePath))"));
 		assert.ok(transferBatch.includes('id: request.progressId'));
 
 		assert.ok(concurrentBatch.includes('this.transferFileCore({'));
 		assert.ok(!concurrentBatch.includes('this.transferFile({'));
+		assert.ok(concurrentBatch.includes('request.schedulerConcurrency ?? 1'));
 		assert.ok(uploadVerification.includes('this.deletePathCore(target, true)'));
 		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive)'));
 	});
@@ -327,10 +337,11 @@ suite('TurboFileSshMainServiceStatic', () => {
 			singleDirectoryDoesNotStopAfterTarDownload: !transferFileCore.includes('Tar download unavailable for directory transfer.'),
 			singleDirectoryUsesExistingSftpUpload: transferFileCore.includes('Preparing SFTP upload.'),
 			singleDirectoryUsesExistingSftpDownload: transferFileCore.includes('Downloading over SFTP.'),
-			batchDetectsTarFallback: transferBatchCore.includes('shouldPreferTarForBatchTransfer(request)'),
+			batchDetectsTarFallback: transferBatchCore.includes("transferPlan.attempts.some(attempt => attempt.protocol === 'sftp')"),
 			batchForcesSftpFallback: transferBatchCore.includes("forceBatchTransferProtocol(request, 'sftp')"),
 			batchDoesNotUseTarOnlyFailure: !transferBatchCore.includes('Tar transfer unavailable for batch transfer.'),
-			sshBatchForcesSftpAttempt: batchAttempt.includes("attempt.protocol === 'sftp' ? forceBatchTransferProtocol(request, 'sftp')"),
+			sshBatchIsolatesEveryAttempt: batchAttempt.includes('forceBatchTransferProtocol(request, attempt.protocol)'),
+			protocolOverrideCarriesAttemptProtocol: forceProtocol.includes('attemptProtocol: preferredProtocol'),
 			protocolOverrideCoversBothSshEndpoints: forceProtocol.includes("request.source.kind === 'ssh'")
 				&& forceProtocol.includes("request.targetDirectory.kind === 'ssh'")
 		}, {
@@ -341,7 +352,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			batchDetectsTarFallback: true,
 			batchForcesSftpFallback: true,
 			batchDoesNotUseTarOnlyFailure: true,
-			sshBatchForcesSftpAttempt: true,
+			sshBatchIsolatesEveryAttempt: true,
+			protocolOverrideCarriesAttemptProtocol: true,
 			protocolOverrideCoversBothSshEndpoints: true
 		});
 	});

@@ -219,19 +219,13 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(block.includes('this.refreshLocalPanesForWindowsPaths'));
 	});
 
-	test('uses copy progress for a single cut and permanently removes the source only after success', () => {
+	test('routes a single cut through the transactional batch path', () => {
 		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferSelected');
 		const block = editor.slice(start, editor.indexOf('private async transferItem', start));
-		const transferIndex = block.indexOf('await this.transferItem(');
-		const cleanupIndex = block.indexOf('await this.deleteInternalClipboardSources(');
-		const refreshIndex = block.indexOf('await Promise.all([', cleanupIndex);
 
-		assert.ok(block.includes('if (sourceItems.length > 1)'));
-		assert.ok(!block.includes("if (operation === 'move' || sourceItems.length > 1)"));
-		assert.ok(transferIndex >= 0);
-		assert.ok(cleanupIndex > transferIndex);
-		assert.ok(refreshIndex > cleanupIndex);
+		assert.ok(block.includes('if (shouldUseBatchTransfer(operation, sourceItems.length))'));
+		assert.ok(block.includes('return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt)'));
 		assert.ok(!block.includes('moveUserItemsToTrash'));
 	});
 

@@ -135,6 +135,56 @@ suite('TurboFileBatchTransferFlow', () => {
 		assert.deepStrictEqual({ ok: actual?.ok, cleanupCalls }, { ok: true, cleanupCalls: 0 });
 	});
 
+	test('stops the plan on a terminal permission failure', async () => {
+		const calls: string[] = [];
+		await assert.rejects(runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			runAttempt: async attempt => {
+				calls.push(`attempt:${attempt.route}`);
+				throw new Error('Permission denied');
+			},
+			onAttemptError: (_error, attempt, nextAttempt) => calls.push(`error:${attempt.route}:${nextAttempt ? 'fallback' : 'terminal'}`)
+		})), /Permission denied/);
+		assert.deepStrictEqual(calls, ['attempt:direct', 'error:direct:terminal']);
+	});
+
+	test('stops the plan when an incomplete result contains a terminal failure', async () => {
+		const calls: string[] = [];
+		const actual = await runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			runAttempt: async attempt => {
+				calls.push(`attempt:${attempt.route}`);
+				return {
+					...result(false, 'tar-direct', 0),
+					message: 'Batch transfer failed.',
+					failures: [{ name: 'item', path: '/item', message: 'Permission denied' }]
+				};
+			},
+			onIncompleteResult: failed => calls.push(`incomplete:${failed.failures[0].message}`)
+		}));
+
+		assert.strictEqual(actual?.failures[0].message, 'Permission denied');
+		assert.deepStrictEqual(calls, ['attempt:direct', 'incomplete:Permission denied']);
+	});
+
+	test('continues the plan when every incomplete-result failure is retryable', async () => {
+		const calls: string[] = [];
+		const actual = await runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			runAttempt: async (attempt, index) => {
+				calls.push(`attempt:${attempt.route}`);
+				return index === 0 ? {
+					...result(false, 'tar-direct', 0),
+					failures: [{ name: 'item', path: '/item', message: 'connect ETIMEDOUT' }]
+				} : result(true, 'tar-relay', 1);
+			},
+			onIncompleteResult: () => calls.push('incomplete')
+		}));
+
+		assert.strictEqual(actual?.strategy, 'tar-relay');
+		assert.deepStrictEqual(calls, ['attempt:direct', 'incomplete', 'attempt:relay']);
+	});
+
 	test('defers typed direct batch errors until every concurrent worker settles', async () => {
 		const events: string[] = [];
 		const unavailableError = new TurboFileDirectUnavailableError([]);
@@ -170,6 +220,18 @@ suite('TurboFileBatchTransferFlow', () => {
 			'workers-settled',
 			'error-thrown'
 		]);
+	});
+
+	test('prefers a terminal direct-data cause over an earlier retryable cause', async () => {
+		const retryable = new TurboFileDirectDataError('source-push', [], new Error('connect ETIMEDOUT'));
+		const terminal = new TurboFileDirectDataError('target-pull', [], new Error('Permission denied'));
+		await assert.rejects(runTurboFileConcurrentBatchAttempt({
+			fallbackStrategy: 'scp-direct',
+			run: async controller => {
+				assert.strictEqual(controller.captureDirectError(retryable), true);
+				assert.strictEqual(controller.captureDirectError(terminal), true);
+			}
+		}), error => error === terminal);
 	});
 
 	for (const [failedStrategy, successfulStrategy] of [
