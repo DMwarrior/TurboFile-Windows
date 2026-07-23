@@ -315,6 +315,52 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!tarRelay.includes('getRemotePathContentSizeByCommand(request.source)'));
 	});
 
+	test('falls back from tar to sftp on single-directory and batch routes', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const transferFileCore = methodBlock(service, 'private async transferFileCore', 'private async transferBetweenSshDevices');
+		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
+		const batchAttempt = methodBlock(service, 'private async runSshToSshBatchTransferAttempt', 'private async runLocalNativeBatchTransfer');
+		const forceProtocol = functionBlock(service, 'forceBatchTransferProtocol');
+
+		assert.deepStrictEqual({
+			singleDirectoryDoesNotStopAfterTarUpload: !transferFileCore.includes('Tar upload unavailable for directory transfer.'),
+			singleDirectoryDoesNotStopAfterTarDownload: !transferFileCore.includes('Tar download unavailable for directory transfer.'),
+			singleDirectoryUsesExistingSftpUpload: transferFileCore.includes('Preparing SFTP upload.'),
+			singleDirectoryUsesExistingSftpDownload: transferFileCore.includes('Downloading over SFTP.'),
+			batchDetectsTarFallback: transferBatchCore.includes('shouldPreferTarForBatchTransfer(request)'),
+			batchForcesSftpFallback: transferBatchCore.includes("forceBatchTransferProtocol(request, 'sftp')"),
+			batchDoesNotUseTarOnlyFailure: !transferBatchCore.includes('Tar transfer unavailable for batch transfer.'),
+			sshBatchForcesSftpAttempt: batchAttempt.includes("attempt.protocol === 'sftp' ? forceBatchTransferProtocol(request, 'sftp')"),
+			protocolOverrideCoversBothSshEndpoints: forceProtocol.includes("request.source.kind === 'ssh'")
+				&& forceProtocol.includes("request.targetDirectory.kind === 'ssh'")
+		}, {
+			singleDirectoryDoesNotStopAfterTarUpload: true,
+			singleDirectoryDoesNotStopAfterTarDownload: true,
+			singleDirectoryUsesExistingSftpUpload: true,
+			singleDirectoryUsesExistingSftpDownload: true,
+			batchDetectsTarFallback: true,
+			batchForcesSftpFallback: true,
+			batchDoesNotUseTarOnlyFailure: true,
+			sshBatchForcesSftpAttempt: true,
+			protocolOverrideCoversBothSshEndpoints: true
+		});
+	});
+
+	test('reports same-device directory copy progress without a recursive size prescan', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const sameRemote = methodBlock(service, 'private async trySameRemoteCopy', 'private async tryDirectTarTransfer');
+		const remoteCopy = methodBlock(service, 'private async execRemoteCopyWithProgress', 'private async copyLocalFileWithProgress');
+		const posixCopy = functionBlock(service, 'buildPosixCopyCommand');
+
+		assert.ok(sameRemote.includes("const reportsNativeProgress = sourceType === 'directory' && !isWindowsCopy;"));
+		assert.ok(sameRemote.includes('buildPosixCopyCommand(request.source.path, request.target.path, reportsNativeProgress)'));
+		assert.ok(!sameRemote.includes('getRemotePathContentSizeByCommand(request.source)'));
+		assert.ok(posixCopy.includes('/proc/$tf_copy_pid/io'));
+		assert.ok(posixCopy.includes('TURBOFILE_COPY_BYTES'));
+		assert.ok(remoteCopy.includes('onStderr: handleNativeProgress'));
+		assert.ok(remoteCopy.includes('parseRemoteCopyProgressBytes'));
+	});
+
 	test('keeps recycle-bin deletion separate from permanent cleanup', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const moveToTrash = methodBlock(service, 'async movePathsToTrash', 'async listTrashItems');

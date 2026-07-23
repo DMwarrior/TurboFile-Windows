@@ -88,6 +88,36 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(setSortKey.includes('state.sortKey === key ? state.sortDescending : true'));
 	});
 
+	test('carries original dimensions beside transformed SSH thumbnail bytes', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const service = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts'), 'utf8');
+		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
+		const batchEntry = contract.slice(contract.indexOf('export interface ITurboFileImageBatchEntry'), contract.indexOf('export interface ITurboFileImageMetadataEntry'));
+		const batchCommand = service.slice(service.indexOf('function buildPosixReadImagesBatchCommand('), service.indexOf('function parseImageBatchOutput('));
+		const batchParser = service.slice(service.indexOf('function parseImageBatchOutput('), service.indexOf('function buildPosixDeleteCommand('));
+		const applyThumbnail = editor.slice(editor.indexOf('private applyBatchedImageGridThumbnail('), editor.indexOf('private async assignBatchedThumbnail('));
+
+		assert.deepStrictEqual({
+			contractWidth: batchEntry.includes('readonly originalWidth?: number;'),
+			contractHeight: batchEntry.includes('readonly originalHeight?: number;'),
+			frameWidth: batchCommand.includes('"$originalWidth"'),
+			frameHeight: batchCommand.includes('"$originalHeight"'),
+			parserWidth: batchParser.includes('originalWidth'),
+			parserHeight: batchParser.includes('originalHeight'),
+			editorWidth: applyThumbnail.includes('target.image.originalWidth = entry.originalWidth ?? target.image.originalWidth;'),
+			editorHeight: applyThumbnail.includes('target.image.originalHeight = entry.originalHeight ?? target.image.originalHeight;')
+		}, {
+			contractWidth: true,
+			contractHeight: true,
+			frameWidth: true,
+			frameHeight: true,
+			parserWidth: true,
+			parserHeight: true,
+			editorWidth: true,
+			editorHeight: true
+		});
+	});
+
 	test('updates only the active image grid when sorting', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const applySort = editor.slice(

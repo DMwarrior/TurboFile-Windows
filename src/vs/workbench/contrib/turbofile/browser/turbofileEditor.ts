@@ -11365,6 +11365,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const mime = entry.mime ?? getMimeType(target.image.item.name);
 		const bytes = decodeBase64(entry.content).buffer;
+		target.image.originalWidth = entry.originalWidth ?? target.image.originalWidth;
+		target.image.originalHeight = entry.originalHeight ?? target.image.originalHeight;
 		// If the remote already downscaled (or the original was small) the bytes are tiny — show them via
 		// a native <img> directly. If they came back large (a device with no image tool streamed the raw
 		// original, e.g. an uncompressed .bmp), downscale on the client so the card holds only a small

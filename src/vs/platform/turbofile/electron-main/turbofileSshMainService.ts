@@ -919,7 +919,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 							this.clearRemoteDirectoryListingCache(request.target);
 							return tarResult;
 						}
-						throw new Error('Tar upload unavailable for directory transfer.');
 					}
 					if (request.target.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.target.preferredProtocol);
@@ -978,7 +977,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 						if (tarResult?.ok) {
 							return tarResult;
 						}
-						throw new Error('Tar download unavailable for directory transfer.');
 					}
 					if (request.source.preferredProtocol !== 'sftp') {
 						const commandOrder = getDirectoryLocalCommandTransferProtocolOrder(request.source.preferredProtocol);
@@ -2648,13 +2646,39 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return await this.runSshToSshBatchTransferPlan(request, items, operation, expectedBytes, startedAt);
 			}
 
-			const tarBatch = await this.tryBatchTarTransfer(request, items, operation, expectedBytes, startedAt);
+			const shouldFallbackFromTar = shouldPreferTarForBatchTransfer(request);
+			let tarBatch: ITurboFileBatchTransferResult | undefined;
+			try {
+				tarBatch = await this.tryBatchTarTransfer(request, items, 'copy', expectedBytes, startedAt);
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(request.progressId)) {
+					throw new TurboFileTransferCanceledError();
+				}
+				if (!shouldFallbackFromTar) {
+					throw error;
+				}
+			}
 			this.throwIfTransferCanceled(request.progressId);
 			if (tarBatch && (tarBatch.ok || tarBatch.completed === items.length)) {
+				if (operation === 'move') {
+					const cleanupFailures = await this.deleteBatchSources(request.source, items, request.progressId);
+					if (cleanupFailures.length) {
+						return this.createBatchTransferResult(false, tarBatch.strategy, tarBatch.bytes, `Batch transfer completed, but source cleanup failed for ${cleanupFailures.length} item(s).`, items.length, cleanupFailures.length, cleanupFailures, startedAt, request.progressId);
+					}
+				}
 				return tarBatch;
 			}
-			if (shouldUseTarOnlyForBatchTransfer(request)) {
-				throw new Error('Tar transfer unavailable for batch transfer.');
+			if (shouldFallbackFromTar) {
+				const sftpRequest = forceBatchTransferProtocol(request, 'sftp');
+				this.fireTransferProgress(sftpRequest, 0, expectedBytes, 'prepare', 'Tar transfer unavailable; preparing SFTP fallback.', true, {
+					strategy: getTransferStrategy(sftpRequest.source, sftpRequest.targetDirectory),
+					completedItems: 0,
+					totalItems: items.length,
+					currentName: items[0]?.displayName ?? items[0]?.targetName
+				});
+				const fallback = await this.runConcurrentBatchTransfer(sftpRequest, items, operation, expectedBytes, startedAt, true);
+				this.clearRemoteDirectoryListingCache(request.targetDirectory);
+				return fallback;
 			}
 
 			const localRsyncBatch = await this.tryLocalBatchRsyncTransfer(request, items, operation, expectedBytes, startedAt);
@@ -2777,8 +2801,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				strategyHint: attempt.route === 'relay' ? 'relay' : 'direct'
 			}, items, 'copy', expectedBytes, startedAt, true);
 		}
+		const attemptRequest = attempt.protocol === 'sftp' ? forceBatchTransferProtocol(request, 'sftp') : request;
 		return this.runConcurrentBatchTransfer({
-			...request,
+			...attemptRequest,
 			strategyHint: attempt.route === 'relay' ? 'relay' : 'direct'
 		}, items, 'copy', expectedBytes, startedAt, false);
 	}
@@ -5435,14 +5460,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 		this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing remote copy.', true);
 
-		const command = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)
+		const isWindowsCopy = looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path);
+		const reportsNativeProgress = sourceType === 'directory' && !isWindowsCopy;
+		const command = isWindowsCopy
 			? buildWindowsCopyCommand(request.source.path, request.target.path)
-			: buildPosixCopyCommand(request.source.path, request.target.path);
+			: buildPosixCopyCommand(request.source.path, request.target.path, reportsNativeProgress);
 
 		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true);
-		await this.execRemoteCopyWithProgress(request, command, bytes, sourceType);
+		const observedBytes = await this.execRemoteCopyWithProgress(request, command, bytes, sourceType, reportsNativeProgress);
 		this.throwIfTransferCanceled(request.progressId);
-		return this.createTransferResult(true, 'remote-copy', bytes, 'Remote copy completed.', startedAt, request.progressId);
+		return this.createTransferResult(true, 'remote-copy', bytes > 0 ? bytes : observedBytes, 'Remote copy completed.', startedAt, request.progressId);
 	}
 
 	private async tryDirectTarTransfer(request: ITurboFileTransferRequest, startedAt: number, forceProtocol = false): Promise<ITurboFileTransferResult | undefined> {
@@ -7069,21 +7096,39 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		await this.withSshClient(endpoint, client => this.execRemote(client, command));
 	}
 
-	private async execRemoteCopyWithProgress(request: ITurboFileTransferRequest, command: string, bytes: number, sourceType: TurboFileFileType): Promise<void> {
+	private async execRemoteCopyWithProgress(request: ITurboFileTransferRequest, command: string, bytes: number, sourceType: TurboFileFileType, reportsNativeProgress = false): Promise<number> {
 		let completed = false;
-		const copy = this.withDirectorySshClient(request.source, client => this.execRemote(client, command))
+		let nativeProgressBuffer = '';
+		let lastCopiedBytes = 0;
+		const handleNativeProgress = (chunk: string): void => {
+			nativeProgressBuffer = `${nativeProgressBuffer}${chunk}`.slice(-4096);
+			const copiedBytes = parseRemoteCopyProgressBytes(nativeProgressBuffer);
+			if (copiedBytes <= lastCopiedBytes) {
+				return;
+			}
+			lastCopiedBytes = copiedBytes;
+			this.fireTransferProgress(request, bytes > 0 ? Math.min(copiedBytes, bytes) : copiedBytes, bytes, 'transfer', 'Remote copy in progress.');
+		};
+		const copy = this.withDirectorySshClient(request.source, client => this.execRemote(client, command, {
+			progressId: request.progressId,
+			onStderr: handleNativeProgress
+		}))
 			.finally(() => {
 				completed = true;
 			});
 
+		if (reportsNativeProgress) {
+			await copy;
+			return lastCopiedBytes;
+		}
+
 		if (bytes <= 0) {
 			await copy;
-			return;
+			return 0;
 		}
 
 		const startedAt = Date.now();
 		const estimateDirectoryProgress = sourceType === 'directory';
-		let lastCopiedBytes = 0;
 		try {
 			while (!completed) {
 				await delay(500);
@@ -7110,6 +7155,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		} finally {
 			await copy;
 		}
+		return lastCopiedBytes;
 	}
 
 	private async copyLocalFileWithProgress(sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
@@ -9917,7 +9963,7 @@ function shouldPreferTarForMultiItemTransfer(preferredProtocol: TurboFileTransfe
 	return preferredProtocol === undefined || preferredProtocol === 'auto-fast' || preferredProtocol === 'tar';
 }
 
-function shouldUseTarOnlyForBatchTransfer(request: ITurboFileBatchTransferRequest): boolean {
+function shouldPreferTarForBatchTransfer(request: ITurboFileBatchTransferRequest): boolean {
 	if (request.source.kind === 'local' && request.targetDirectory.kind === 'ssh') {
 		return shouldPreferTarForMultiItemTransfer(request.targetDirectory.preferredProtocol);
 	}
@@ -9928,6 +9974,14 @@ function shouldUseTarOnlyForBatchTransfer(request: ITurboFileBatchTransferReques
 		return shouldPreferTarForMultiItemTransfer(getSshToSshTransferProtocol(request.source));
 	}
 	return false;
+}
+
+function forceBatchTransferProtocol(request: ITurboFileBatchTransferRequest, preferredProtocol: TurboFileTransferProtocol): ITurboFileBatchTransferRequest {
+	return {
+		...request,
+		source: request.source.kind === 'ssh' ? { ...request.source, preferredProtocol } : request.source,
+		targetDirectory: request.targetDirectory.kind === 'ssh' ? { ...request.targetDirectory, preferredProtocol } : request.targetDirectory
+	};
 }
 
 function canUseNativeOpenSshScpCommand(connection: ITurboFileSshConnectionOptions | undefined): boolean {
@@ -10948,11 +11002,48 @@ function buildWindowsMoveCommand(sourcePath: string, targetPath: string): string
 	return buildPowerShellCommand(withPowerShellDefaults(`$src=${source}; $dst=${target}; $parent=[System.IO.Path]::GetDirectoryName($dst); if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; Move-Item -LiteralPath $src -Destination $dst -Force`));
 }
 
-function buildPosixCopyCommand(sourcePath: string, targetPath: string): string {
+function buildPosixCopyCommand(sourcePath: string, targetPath: string, reportProgress = false): string {
 	const source = quotePosixShellArg(sourcePath);
 	const target = quotePosixShellArg(targetPath);
 	const parent = quotePosixShellArg(getRemoteParentPath(targetPath));
+	if (reportProgress) {
+		const progressCopy = [
+			'tf_copy_pid=',
+			'tf_cleanup() { if [ -n "$tf_copy_pid" ]; then kill "$tf_copy_pid" 2>/dev/null || true; wait "$tf_copy_pid" 2>/dev/null || true; fi; }',
+			"trap 'tf_cleanup; exit 130' HUP INT TERM",
+			'tf_run_copy() {',
+			'  "$@" &',
+			'  tf_copy_pid=$!',
+			'  tf_copy_last=0',
+			'  while [ -r "/proc/$tf_copy_pid/stat" ]; do',
+			"    tf_copy_state=$(awk '{ print $3 }' \"/proc/$tf_copy_pid/stat\" 2>/dev/null || true)",
+			"    tf_copy_bytes=$(awk '$1 == \"rchar:\" { r=$2 } $1 == \"wchar:\" { w=$2 } $1 == \"read_bytes:\" { rb=$2 } $1 == \"write_bytes:\" { wb=$2 } END { m=r; if (w>m) m=w; if (rb>m) m=rb; if (wb>m) m=wb; print m+0 }' \"/proc/$tf_copy_pid/io\" 2>/dev/null || true)",
+			'    case "$tf_copy_bytes" in \'\'|*[!0-9]*) tf_copy_bytes=0 ;; esac',
+			'    if [ "$tf_copy_bytes" -gt "$tf_copy_last" ]; then tf_copy_last=$tf_copy_bytes; printf \'TURBOFILE_COPY_BYTES=%s\\n\' "$tf_copy_bytes" >&2; fi',
+			'    [ "$tf_copy_state" = Z ] && break',
+			'    sleep 0.5',
+			'  done',
+			'  wait "$tf_copy_pid"',
+			'  tf_copy_status=$?',
+			'  tf_copy_pid=',
+			'  return "$tf_copy_status"',
+			'}',
+			`tf_run_copy cp -a --reflink=auto --sparse=always ${source} ${target} || tf_run_copy cp -a ${source} ${target}`
+		].join('\n');
+		return `mkdir -p ${parent} && (${progressCopy})`;
+	}
 	return `mkdir -p ${parent} && (cp -a --reflink=auto --sparse=always ${source} ${target} 2>/dev/null || cp -a ${source} ${target})`;
+}
+
+function parseRemoteCopyProgressBytes(output: string): number {
+	let bytes = 0;
+	for (const match of output.matchAll(/(?:^|\r?\n)TURBOFILE_COPY_BYTES=(\d+)/g)) {
+		const value = Number(match[1]);
+		if (Number.isFinite(value)) {
+			bytes = Math.max(bytes, value);
+		}
+	}
+	return bytes;
 }
 
 function buildWindowsMappedBatchFromInputCommand(operation: 'copy' | 'move'): string {
@@ -11746,17 +11837,20 @@ function buildPosixReadImagesBatchCommand(paths: readonly string[], maxBytes: nu
 	lines.push(`elif command -v magick >/dev/null 2>&1; then T=magick`);
 	lines.push(`elif command -v convert >/dev/null 2>&1; then T=convert`);
 	lines.push(`else T=; fi`);
-	lines.push(`emit(){ if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$2"; cat "$1"; else printf '%s\\n-1\\n' "$1"; fi; }`);
+	lines.push(`emit(){ originalWidth=\${3:-0}; originalHeight=\${4:-0}; if [ "$2" -le ${maxBytes} ]; then printf '%s\\n%s\\n%s\\n%s\\n' "$1" "$2" "$originalWidth" "$originalHeight"; cat "$1"; else printf '%s\\n-1\\n0\\n0\\n' "$1"; fi; }`);
+	// Read dimensions only for sources that are about to be transformed. This stays inside the same
+	// SSH command and avoids the directory-wide metadata pre-scan that previously delayed the grid.
+	lines.push(`dimensions(){ originalWidth=0; originalHeight=0; case "$T" in vips) originalWidth=$(vipsheader -f width "$1" 2>/dev/null); originalHeight=$(vipsheader -f height "$1" 2>/dev/null);; magick) d=$(magick identify -ping -format '%w %h' "$1[0]" 2>/dev/null | head -n 1); set -- $d; originalWidth=$1; originalHeight=$2;; convert) d=$(identify -ping -format '%w %h' "$1[0]" 2>/dev/null | head -n 1); [ -n "$d" ] || d=$(convert -ping "$1[0]" -format '%w %h' info: 2>/dev/null | head -n 1); set -- $d; originalWidth=$1; originalHeight=$2;; esac; case "$originalWidth:$originalHeight" in *[!0-9:]*|:*|*:) originalWidth=0; originalHeight=0;; esac; [ "$originalWidth" -gt 0 ] 2>/dev/null && [ "$originalHeight" -gt 0 ] 2>/dev/null; }`);
 	// Transcode $1 to JPEG file $2. $3>0 downscales to that width; $3=0 keeps the native resolution.
 	// `[0]` takes the first page of a multi-page TIFF for ImageMagick; vips reads page 0 by default.
 	lines.push(`mkjpg(){ if [ "$3" -gt 0 ]; then case "$T" in vips) vipsthumbnail "$1" --size "$3x" -o "$2[Q=82,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1[0]" -resize "$3x" -strip -quality 82 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac; else case "$T" in vips) vipsthumbnail "$1" --size 30000x30000 -o "$2[Q=88,strip]" >/dev/null 2>&1;; magick|convert) "$T" "$1[0]" -strip -quality 88 jpg:"$2" >/dev/null 2>&1;; *) return 1;; esac; fi }`);
 	// Emit a transcoded JPEG (length-framed); returns non-zero without emitting if transcoding fails.
-	lines.push(`tojpg(){ o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"; if mkjpg "$1" "$oj" "$3" && [ -s "$oj" ]; then tz=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$tz" ] && [ "$tz" -le ${maxBytes} ]; then printf '%s\\n%s\\n' "$1" "$tz"; cat "$oj"; rm -f "$o" "$oj" 2>/dev/null; return 0; fi; fi; rm -f "$o" "$oj" 2>/dev/null; return 1; }`);
+	lines.push(`tojpg(){ o=$(mktemp 2>/dev/null) || o=/tmp/tfthumb.$$; oj="$o.jpg"; if dimensions "$1" && mkjpg "$1" "$oj" "$3" && [ -s "$oj" ]; then tz=$(wc -c < "$oj" 2>/dev/null | tr -d ' \\t\\n'); if [ -n "$tz" ] && [ "$tz" -le ${maxBytes} ]; then printf '%s\\n%s\\n%s\\n%s\\n' "$1" "$tz" "$originalWidth" "$originalHeight"; cat "$oj"; rm -f "$o" "$oj" 2>/dev/null; return 0; fi; fi; rm -f "$o" "$oj" 2>/dev/null; return 1; }`);
 	lines.push(`for f in ${list}; do`);
 	lines.push(`[ -f "$f" ] || continue`);
 	lines.push(`sz=$(wc -c < "$f" 2>/dev/null | tr -d ' \\t\\n'); [ -n "$sz" ] || continue`);
 	// TIFF can never stream raw (browsers can't decode it): always transcode, or report -1 if no tool.
-	lines.push(`case $(printf '%s' "$f" | tr 'A-Z' 'a-z') in *.tif|*.tiff) if [ -n "$T" ] && tojpg "$f" "$sz" ${tiffWidth}; then :; else printf '%s\\n-1\\n' "$f"; fi; continue;; esac`);
+	lines.push(`case $(printf '%s' "$f" | tr 'A-Z' 'a-z') in *.tif|*.tiff) if [ -n "$T" ] && tojpg "$f" "$sz" ${tiffWidth}; then :; else printf '%s\\n-1\\n0\\n0\\n' "$f"; fi; continue;; esac`);
 	if (forceRaw) {
 		lines.push(`emit "$f" "$sz"`);
 	} else {
@@ -11787,6 +11881,18 @@ function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
 		if (!path) {
 			break;
 		}
+		const originalWidthEnd = buffer.indexOf(0x0a, position);
+		if (originalWidthEnd < 0) {
+			break;
+		}
+		const originalWidth = parseInt(buffer.toString('utf8', position, originalWidthEnd), 10);
+		position = originalWidthEnd + 1;
+		const originalHeightEnd = buffer.indexOf(0x0a, position);
+		if (originalHeightEnd < 0) {
+			break;
+		}
+		const originalHeight = parseInt(buffer.toString('utf8', position, originalHeightEnd), 10);
+		position = originalHeightEnd + 1;
 		if (!Number.isFinite(size) || size < 0) {
 			entries.push({ path, ok: false, oversized: true });
 			continue;
@@ -11801,7 +11907,13 @@ function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
 		// JPEG rather than by the source extension.
 		const lowerPath = path.toLowerCase();
 		const mime = lowerPath.endsWith('.tif') || lowerPath.endsWith('.tiff') ? 'image/jpeg' : getMimeType(path);
-		entries.push({ path, ok: true, content: bytes.toString('base64'), mime });
+		entries.push({
+			path,
+			ok: true,
+			content: bytes.toString('base64'),
+			mime,
+			...(Number.isFinite(originalWidth) && originalWidth > 0 && Number.isFinite(originalHeight) && originalHeight > 0 ? { originalWidth, originalHeight } : {})
+		});
 	}
 	return entries;
 }

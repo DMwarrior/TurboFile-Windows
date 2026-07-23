@@ -139,6 +139,9 @@ export interface ITurboFileImageBatchEntry {
 	/** Base64-encoded raw file bytes when `ok`. */
 	readonly content?: string;
 	readonly mime?: string;
+	/** Original source dimensions when the returned bytes were transformed into a thumbnail. */
+	readonly originalWidth?: number;
+	readonly originalHeight?: number;
 	/** True when the file exceeded the batch size limit; the caller should load it individually. */
 	readonly oversized?: boolean;
 	readonly message?: string;

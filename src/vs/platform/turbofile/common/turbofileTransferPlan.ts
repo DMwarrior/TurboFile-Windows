@@ -58,7 +58,10 @@ function createLocalSshAttempts(protocol: TurboFileTransferProtocol, shape: Tran
 			return [attempt('rsync', 'local', `${reasonPrefix}: explicit rsync.`)];
 		case 'tar':
 			return shape === 'multi-or-directory'
-				? [attempt('tar', 'local', `${reasonPrefix}: explicit tar.`)]
+				? [
+					attempt('tar', 'local', `${reasonPrefix}: explicit tar.`),
+					attempt('sftp', 'local', `${reasonPrefix}: explicit tar falls back to SFTP.`)
+				]
 				: [attempt('scp', 'local', `${reasonPrefix}: tar does not apply to a single file; use frozen SCP fast path.`)];
 		case 'auto-fast':
 		default:
@@ -67,7 +70,8 @@ function createLocalSshAttempts(protocol: TurboFileTransferProtocol, shape: Tran
 					attempt('scp', 'local', `${reasonPrefix}: auto-fast single file uses the frozen SCP fast path.`)
 				]
 				: [
-					attempt('tar', 'local', `${reasonPrefix}: auto-fast multi item or directory uses tar.`)
+					attempt('tar', 'local', `${reasonPrefix}: auto-fast multi item or directory uses tar.`),
+					attempt('sftp', 'local', `${reasonPrefix}: tar failure falls back to SFTP.`)
 				];
 	}
 }
@@ -85,17 +89,26 @@ function createSshSshAttempts(source: ITurboFileTransferEndpoint, target: ITurbo
 	}
 	return [
 		attempt('tar', 'direct', 'SSH to SSH auto-fast multi item or directory starts with direct tar.'),
-		attempt('tar', 'relay', 'SSH to SSH auto-fast falls back to tar relay.')
+		attempt('tar', 'relay', 'SSH to SSH auto-fast falls back to tar relay.'),
+		attempt('sftp', 'direct', 'SSH to SSH tar failure falls back to direct SFTP.'),
+		attempt('sftp', 'relay', 'SSH to SSH direct SFTP falls back to SFTP relay.')
 	];
 }
 
 function createExplicitSshSshAttempts(protocol: TurboFileTransferAttemptProtocol, source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): ITurboFileTransferAttempt[] {
 	void source;
 	void target;
-	return [
+	const attempts = [
 		attempt(protocol, 'direct', `SSH to SSH explicit ${protocol} starts with optimistic direct.`),
 		attempt(protocol, 'relay', `SSH to SSH explicit ${protocol} falls back to same-protocol relay.`)
 	];
+	if (protocol === 'tar') {
+		attempts.push(
+			attempt('sftp', 'direct', 'SSH to SSH explicit tar failure falls back to direct SFTP.'),
+			attempt('sftp', 'relay', 'SSH to SSH explicit tar failure falls back to SFTP relay.')
+		);
+	}
+	return attempts;
 }
 
 function negotiateSshSshProtocol(sourceProtocol: TurboFileTransferProtocol | undefined, targetProtocol: TurboFileTransferProtocol | undefined): TurboFileTransferProtocol {
