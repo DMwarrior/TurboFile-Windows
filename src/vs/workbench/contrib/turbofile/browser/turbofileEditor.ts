@@ -7814,7 +7814,10 @@ export class TurboFileEditor extends EditorPane {
 			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate),
 			this.menuAction('turbofile.extract', '解压', Codicon.unarchive, () => this.extractSelected(side), canExtract),
 			this.menuAction('turbofile.compress', '压缩', Codicon.archive, () => this.compressSelected(side), canOperate),
-			this.menuAction('turbofile.delete', this.paneStates[side].trashMode.browseItem ? '永久删除' : '删除', Codicon.trash, () => this.deleteSelected(side), canOperate)
+			this.menuAction('turbofile.delete', this.paneStates[side].trashMode.browseItem ? '永久删除' : '删除', Codicon.trash, () => this.deleteSelected(side), canOperate),
+			...(!this.paneStates[side].trashMode.active
+				? [this.menuAction('turbofile.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelected(side); }, canOperate)]
+				: [])
 		];
 	}
 
@@ -10033,6 +10036,59 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	private async permanentlyDeleteSelected(side: 'left' | 'right'): Promise<boolean> {
+		if (this.paneStates[side].trashMode.active) {
+			return false;
+		}
+
+		const items = this.getSelectedTransferItems(side);
+		const device = this.getPaneDevice(side);
+		if (!items.length || !device) {
+			this.statusMessage = localize('turbofile.selectItemsToDeletePermanently', "请先选择要永久删除的文件或目录。");
+			this.render();
+			return false;
+		}
+
+		if (!await this.showDialogConfirm(
+			localize('turbofile.permanentDeleteTitle', "永久删除"),
+			localize('turbofile.permanentDeleteMessage', "永久删除选中的 {0} 个项目吗？此操作无法撤销，且不会进入回收站。", items.length),
+			undefined,
+			true,
+			localize('turbofile.deletePermanently', "永久删除")
+		)) {
+			return false;
+		}
+
+		const task = this.beginTask('delete', localize('turbofile.permanentDeleteTask', "永久删除 {0} 项", items.length), device.name);
+		this.removePaneItems(side, items);
+		try {
+			this.updateTask(task, localize('turbofile.permanentDeletingItems', "正在永久删除 {0} 项…", items.length), 40);
+			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
+			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
+			const result = await this.sshService.deletePaths(endpoints, true, true);
+			this.updateTask(task, localize('turbofile.refreshingDirectoryAfterPermanentDelete', "正在刷新目录：{0}", device.name), 90);
+			await this.refreshPane(side, { force: true });
+			if (!result.ok) {
+				this.finishTask(task, 'error', this.formatPermanentDeleteError(result.message), { error: result.message, durationMs: Date.now() - task.startedAt });
+				return false;
+			}
+			this.finishTask(task, 'success', localize('turbofile.permanentDeleteSucceeded', "已永久删除：{0} 项", items.length), { durationMs: Date.now() - task.startedAt });
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.finishTask(task, 'error', this.formatPermanentDeleteError(message), { error: message, durationMs: Date.now() - task.startedAt });
+			await this.refreshPane(side, { force: true });
+			return false;
+		}
+	}
+
+	private formatPermanentDeleteError(message: string): string {
+		if (/(^|\s)sudo(?::|\s)/i.test(message)) {
+			return localize('turbofile.permanentDeleteSudoFailed', "永久删除失败：该设备未配置免密 sudo，或当前账号没有 sudo 权限。详细信息：{0}", message);
+		}
+		return localize('turbofile.permanentDeleteFailed', "永久删除失败：{0}", message);
+	}
+
 	private removePaneItems(side: 'left' | 'right', items: TurboFileFileItem[]): void {
 		if (this.removePaneItemsFromState(side, items)) {
 			this.render();
@@ -10402,6 +10458,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private selectImageGridItemWithContextMenu(index: number, event: MouseEvent): void {
 		event.preventDefault();
+		event.stopPropagation();
 		const state = this.imageGridState;
 		if (!state || index < 0 || index >= state.images.length) {
 			return;
@@ -10411,9 +10468,21 @@ export class TurboFileEditor extends EditorPane {
 			state.selectionAnchorIndex = index;
 			this.updateImageGridSelection(state);
 			this.updateImageGridSelectionStatus(state);
-			return;
+		} else {
+			this.selectImageGridItem(index, event);
 		}
-		this.selectImageGridItem(index, event);
+
+		const anchor = new StandardMouseEvent(getWindow(event), event);
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => anchor,
+			getActions: () => this.paneStates[state.side].trashMode.active
+				? [this.menuAction('turbofile.imageGrid.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.deleteSelectedImageGridItems(state); })]
+				: [
+					this.menuAction('turbofile.imageGrid.delete', localize('turbofile.delete', "删除"), Codicon.trash, () => { void this.deleteSelectedImageGridItems(state); }),
+					this.menuAction('turbofile.imageGrid.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelectedImageGridItems(state); })
+				],
+			skipTelemetry: true
+		});
 	}
 
 	private setSingleImageGridSelection(state: TurboFileImageGridState, index: number): void {
@@ -10839,6 +10908,29 @@ export class TurboFileEditor extends EditorPane {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `\u5220\u9664\u5931\u8d25\uff1a${message}`, { error: message }, false);
 			await this.refreshPane(state.side, { force: true });
+		}
+	}
+
+	private async permanentlyDeleteSelectedImageGridItems(state: TurboFileImageGridState | undefined = this.imageGridState): Promise<void> {
+		if (!state) {
+			return;
+		}
+		const targets = this.getImageGridDeleteTargets(state).filter(({ image }) => !!image.item.path);
+		if (!targets.length) {
+			this.statusMessage = localize('turbofile.selectImagesToDeletePermanently', "请先选择要永久删除的图片。");
+			this.updateImageGridSelection(state);
+			return;
+		}
+
+		const paneState = this.paneStates[state.side];
+		paneState.selectedPaths.clear();
+		for (const { image } of targets) {
+			paneState.selectedPaths.add(image.item.path!);
+		}
+		paneState.selectedPath = targets[0].image.item.path;
+		paneState.selectionAnchorPath = paneState.selectedPath;
+		if (await this.permanentlyDeleteSelected(state.side) && this.imageGridState === state) {
+			this.closeImageGridPage(state);
 		}
 	}
 

@@ -164,6 +164,33 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.sshService.movePathsToTrash({'));
 	});
 
+	test('adds an explicit permanent delete context action without changing ordinary deletion', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const contextActions = editor.slice(editor.indexOf('private getFileContextActions('), editor.indexOf('private getPaneContextActions('));
+		const ordinaryDelete = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async permanentlyDeleteSelected('));
+		const permanentDelete = editor.slice(editor.indexOf('private async permanentlyDeleteSelected('), editor.indexOf('private removePaneItems('));
+
+		assert.ok(contextActions.includes("'turbofile.deletePermanently'"));
+		assert.ok(contextActions.includes('this.permanentlyDeleteSelected(side)'));
+		assert.ok(permanentDelete.includes('deletePaths(endpoints, true, true)'));
+		assert.ok(permanentDelete.includes('refreshPane(side, { force: true })'));
+		assert.ok(ordinaryDelete.includes('moveUserItemsToTrash'));
+		assert.ok(!ordinaryDelete.includes('deletePaths('));
+	});
+
+	test('shows ordinary and permanent deletion in the image grid context menu', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const contextMenu = editor.slice(editor.indexOf('private selectImageGridItemWithContextMenu('), editor.indexOf('private setSingleImageGridSelection('));
+		const permanentGridDelete = editor.slice(editor.indexOf('private async permanentlyDeleteSelectedImageGridItems('), editor.indexOf('private async deleteImageGridPreview('));
+
+		assert.ok(contextMenu.includes('this.contextMenuService.showContextMenu({'));
+		assert.ok(contextMenu.includes("'turbofile.imageGrid.delete'"));
+		assert.ok(contextMenu.includes("'turbofile.imageGrid.deletePermanently'"));
+		assert.ok(contextMenu.includes('this.deleteSelectedImageGridItems(state)'));
+		assert.ok(contextMenu.includes('this.permanentlyDeleteSelectedImageGridItems(state)'));
+		assert.ok(permanentGridDelete.includes('this.permanentlyDeleteSelected(state.side)'));
+	});
+
 	test('places the per-pane recycle-bin button immediately after explicit delete', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const renderPane = editor.slice(editor.indexOf('private renderPane('), editor.indexOf('private renderDeviceSelect('));
