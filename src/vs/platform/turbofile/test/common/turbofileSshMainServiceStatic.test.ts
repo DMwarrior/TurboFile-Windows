@@ -80,7 +80,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!concurrentBatch.includes('this.transferFile({'));
 		assert.ok(concurrentBatch.includes('request.schedulerConcurrency ?? 1'));
 		assert.ok(uploadVerification.includes('this.deletePathCore(target, true)'));
-		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive)'));
+		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive, useSudo)'));
 	});
 
 	test('queues recycle-bin, delete, and same-device move writes on their device keys', () => {
