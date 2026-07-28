@@ -280,4 +280,22 @@ suite('TurboFileMutationStabilityStatic', () => {
 			assert.ok(mutation.includes('getFileOperationDeviceKeys(endpoint)'));
 		}
 	});
+
+	test('uses direct sudo without fallback for explicit POSIX permanent deletion', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
+		const deletePath = block(service, 'private async deletePathCore', 'async deletePaths');
+		const deletePaths = block(service, 'async deletePaths', 'private async deleteRemotePathNative');
+		const deleteManyBuilder = block(service, 'function buildPosixDeleteManyFromInputCommand', 'function buildPosixMoveManyIntoDirectoryFromInputCommand');
+		const deleteOneBuilder = block(service, 'function buildPosixDeleteCommand', 'function getMimeType');
+
+		assert.ok(contract.includes('deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, useSudo?: boolean)'));
+		assert.ok(deletePaths.includes('useSudo = false'));
+		assert.ok(deletePaths.includes('this.deletePathsCore(endpoints, recursive, useSudo)'));
+		assert.ok(deletePaths.includes('this.deletePathCore(targets[0], recursive, useSudo)'));
+		assert.ok(deletePath.includes('if (useSudo && !looksLikeWindowsPath(endpoint.path))'));
+		assert.ok(deletePath.includes('this.deleteRemotePathNative(endpoint, recursive, true)'));
+		assert.ok(deleteManyBuilder.includes("const removeCommand = useSudo ? 'sudo -n -- rm' : 'rm';"));
+		assert.ok(deleteOneBuilder.includes("const removeCommand = useSudo ? 'sudo -n -- rm' : 'rm';"));
+	});
 });

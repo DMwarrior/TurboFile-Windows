@@ -53,7 +53,7 @@ export interface ITurboFileSshService {
 	 * Deletes many paths in as few round trips as possible (POSIX remote: a single `xargs -0 rm`).
 	 * All endpoints must target the same device/connection.
 	 */
-	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean): Promise<ITurboFileFileOperationResult>;
+	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, useSudo?: boolean): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
 	/**
 	 * Moves many paths into a single target directory in as few round trips as possible (POSIX remote:

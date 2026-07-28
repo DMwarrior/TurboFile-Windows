@@ -4621,10 +4621,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		);
 	}
 
-	private async deletePathCore(endpoint: ITurboFileTransferEndpoint, recursive = true): Promise<ITurboFileFileOperationResult> {
+	private async deletePathCore(endpoint: ITurboFileTransferEndpoint, recursive = true, useSudo = false): Promise<ITurboFileFileOperationResult> {
 		try {
 			if (endpoint.kind === 'local') {
 				await fsp.rm(endpoint.path, { recursive, force: true });
+			} else if (useSudo && !looksLikeWindowsPath(endpoint.path)) {
+				await this.deleteRemotePathNative(endpoint, recursive, true);
 			} else {
 				try {
 					await this.deleteRemotePathNative(endpoint, recursive);
@@ -4649,20 +4651,20 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	async deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive = true): Promise<ITurboFileFileOperationResult> {
+	async deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive = true, useSudo = false): Promise<ITurboFileFileOperationResult> {
 		return this.fileOperationQueue.run(
 			getFileOperationDeviceKeys(...endpoints),
-			() => this.deletePathsCore(endpoints, recursive)
+			() => this.deletePathsCore(endpoints, recursive, useSudo)
 		);
 	}
 
-	private async deletePathsCore(endpoints: readonly ITurboFileTransferEndpoint[], recursive = true): Promise<ITurboFileFileOperationResult> {
+	private async deletePathsCore(endpoints: readonly ITurboFileTransferEndpoint[], recursive = true, useSudo = false): Promise<ITurboFileFileOperationResult> {
 		const targets = endpoints.filter(endpoint => !!endpoint.path);
 		if (!targets.length) {
 			return { ok: true, message: 'Nothing to delete.' };
 		}
 		if (targets.length === 1) {
-			return this.deletePathCore(targets[0], recursive);
+			return this.deletePathCore(targets[0], recursive, useSudo);
 		}
 
 		try {
@@ -4688,7 +4690,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				// xargs batches the actual rm invocations server-side so this scales to any selection
 				// size without ever hitting the shell's argument-length limit.
 				const input = createTarNullListBuffer(targets.map(endpoint => endpoint.path));
-				await this.withSshClient(first, client => this.execRemoteWithInput(client, buildPosixDeleteManyFromInputCommand(recursive), input, {
+				await this.withSshClient(first, client => this.execRemoteWithInput(client, buildPosixDeleteManyFromInputCommand(recursive, useSudo), input, {
 					inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS,
 					inactivityMessage: 'Remote POSIX batch delete produced no progress.'
 				}));
@@ -4700,11 +4702,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async deleteRemotePathNative(endpoint: ITurboFileTransferEndpoint, recursive: boolean): Promise<void> {
+	private async deleteRemotePathNative(endpoint: ITurboFileTransferEndpoint, recursive: boolean, useSudo = false): Promise<void> {
 		this.assertSafeDeletePath(endpoint.path);
 		const command = looksLikeWindowsPath(endpoint.path)
 			? buildWindowsDeleteCommand(endpoint.path, recursive)
-			: buildPosixDeleteCommand(endpoint.path, recursive);
+			: buildPosixDeleteCommand(endpoint.path, recursive, useSudo);
 		await this.withSshClient(endpoint, client => this.execRemote(client, command));
 	}
 
@@ -11769,9 +11771,10 @@ function buildWindowsDeleteManyFromInputCommand(recursive: boolean): string {
 	return buildPowerShellCommand(script);
 }
 
-function buildPosixDeleteManyFromInputCommand(recursive: boolean): string {
+function buildPosixDeleteManyFromInputCommand(recursive: boolean, useSudo = false): string {
 	const removeFlag = recursive ? '-rf' : '-f';
-	const script = `${buildPosixHeartbeatFunction()}; status=0; run_with_heartbeat rm ${removeFlag} -- "$@" || status=$?; [ "$status" -eq 0 ] && printf "." >&2; exit "$status"`;
+	const removeCommand = useSudo ? 'sudo -n -- rm' : 'rm';
+	const script = `${buildPosixHeartbeatFunction()}; status=0; run_with_heartbeat ${removeCommand} ${removeFlag} -- "$@" || status=$?; [ "$status" -eq 0 ] && printf "." >&2; exit "$status"`;
 	return `LC_ALL=C xargs -0 -r -n 128 bash -c ${quotePosixShellArg(script)} _`;
 }
 
@@ -12040,10 +12043,11 @@ function parseImageBatchOutput(buffer: Buffer): ITurboFileImageBatchEntry[] {
 	return entries;
 }
 
-function buildPosixDeleteCommand(path: string, recursive: boolean): string {
+function buildPosixDeleteCommand(path: string, recursive: boolean, useSudo = false): string {
 	const quotedPath = quotePosixShellArg(path);
-	const removeCommand = recursive ? `rm -rf -- ${quotedPath}` : `rm -f -- ${quotedPath}`;
-	return `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then ${removeCommand}; fi`;
+	const removeCommand = useSudo ? 'sudo -n -- rm' : 'rm';
+	const command = recursive ? `${removeCommand} -rf -- ${quotedPath}` : `${removeCommand} -f -- ${quotedPath}`;
+	return `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then ${command}; fi`;
 }
 
 function getMimeType(path: string): string {
