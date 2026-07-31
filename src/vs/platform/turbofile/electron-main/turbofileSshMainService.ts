@@ -35,7 +35,7 @@ import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { classifyTurboFileTransferFailure, getTurboFileTransferProgressState, getTurboFileTransferProtocolName, ITurboFileTransferFailure, shouldContinueTurboFileTransferPlan } from '../common/turbofileTransferFailure.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { getTurboFileTransferBatchPathKeys, getTurboFileTransferDeviceKey, getTurboFileTransferPathKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
-import { createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
+import { createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
@@ -3966,6 +3966,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			});
 			results.push(...localResults);
+		}
+		const fallbackSources = getTurboFileTrashFallbackSources(validSources, results);
+		if (fallbackSources.length) {
+			const workerLimit = fallbackSources.some(source => source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
+			const fallbackResults = await mapLimit(fallbackSources, workerLimit, async source => {
+				const trashResult = results.find(result => result.path === source.endpoint.path);
+				const trashMessage = trashResult?.message ?? 'Recycle-bin move returned no result.';
+				const deleteResult = await this.deletePathCore(source.endpoint, true);
+				return deleteResult.ok
+					? { path: source.endpoint.path, ok: true, message: 'Recycle-bin move failed; permanently deleted instead.' } satisfies ITurboFileTrashItemResult
+					: { path: source.endpoint.path, ok: false, message: `${trashMessage} Permanent delete fallback failed: ${deleteResult.message}` } satisfies ITurboFileTrashItemResult;
+			});
+			for (const fallbackResult of fallbackResults) {
+				const resultIndex = results.findIndex(result => result.path === fallbackResult.path);
+				if (resultIndex >= 0) {
+					results[resultIndex] = fallbackResult;
+				} else {
+					results.push(fallbackResult);
+				}
+			}
 		}
 		return this.createTrashOperationResult(results, 'Moved to recycle bin.');
 	}

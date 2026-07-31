@@ -107,6 +107,16 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(!movePaths.includes('Promise.all(targets.map'));
 	});
 
+	test('falls back failed recycle-bin items to bounded permanent deletion', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const moveToTrash = block(service, 'private async movePathsToTrashCore', 'async listTrashItems');
+
+		assert.ok(moveToTrash.includes('getTurboFileTrashFallbackSources'));
+		assert.ok(moveToTrash.includes('mapLimit('));
+		assert.ok(moveToTrash.includes('this.deletePathCore(source.endpoint, true)'));
+		assert.ok(!moveToTrash.includes('this.deletePath(source.endpoint, true)'));
+	});
+
 	test('streams large Windows SSH deletion lists through stdin', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const deletePaths = block(service, 'async deletePaths', 'private async deleteRemotePathNative');

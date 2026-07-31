@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { generateUuid } from '../../../base/common/uuid.js';
-import { ITurboFileTrashDevice, ITurboFileTrashItem, TurboFileFileType } from './turbofile.js';
+import { ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashSource, TurboFileFileType } from './turbofile.js';
 
 interface ITurboFileTrashMetadataCandidate {
 	readonly id?: unknown;
@@ -46,6 +46,11 @@ export function createTurboFileKeepBothName(name: string, ordinal: number): stri
 
 export function sortTurboFileTrashItems(items: readonly ITurboFileTrashItem[]): ITurboFileTrashItem[] {
 	return [...items].sort((left, right) => right.deletedAt - left.deletedAt || left.originalName.localeCompare(right.originalName));
+}
+
+export function getTurboFileTrashFallbackSources(sources: readonly ITurboFileTrashSource[], results: readonly ITurboFileTrashItemResult[]): ITurboFileTrashSource[] {
+	const successfulPaths = new Set(results.filter(result => result.ok).map(result => result.path));
+	return sources.filter(source => !successfulPaths.has(source.endpoint.path));
 }
 
 export function isTurboFileProtectedTrashSource(path: string, windowsPath: boolean): boolean {

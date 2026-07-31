@@ -5,8 +5,8 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { ITurboFileTrashItem } from '../../common/turbofile.js';
-import { createTurboFileKeepBothName, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
+import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
+import { createTurboFileKeepBothName, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
 
@@ -79,5 +79,21 @@ suite('TurboFileTrash', function () {
 			true,
 			true
 		]);
+	});
+
+	test('selects only recycle-bin failures for permanent deletion fallback', () => {
+		const sources: ITurboFileTrashSource[] = [
+			{ endpoint: { kind: 'ssh', path: '/data/success' }, type: 'file' },
+			{ endpoint: { kind: 'ssh', path: '/data/failure' }, type: 'file' },
+			{ endpoint: { kind: 'ssh', path: '/data/missing' }, type: 'directory' }
+		];
+
+		assert.deepStrictEqual(
+			getTurboFileTrashFallbackSources(sources, [
+				{ path: '/data/success', ok: true, message: 'Moved.' },
+				{ path: '/data/failure', ok: false, message: 'bash: not found' }
+			]).map(source => source.endpoint.path),
+			['/data/failure', '/data/missing']
+		);
 	});
 });
