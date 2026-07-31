@@ -231,14 +231,26 @@ suite('TurboFileTrash', function () {
 		assert.deepStrictEqual(result, { ok: true, message: 'Paths deleted.' });
 	});
 
-	test('identifies filesystem roots before batch delete fallback', () => {
+	test('identifies normalized filesystem roots before delete fallback', () => {
 		assert.deepStrictEqual([
 			isTurboFileSafeDeletePath('/'),
+			isTurboFileSafeDeletePath('/tmp/..'),
+			isTurboFileSafeDeletePath('/.'),
 			isTurboFileSafeDeletePath('\\'),
 			isTurboFileSafeDeletePath('C:\\'),
+			isTurboFileSafeDeletePath('C:\\folder\\..'),
+			isTurboFileSafeDeletePath('\\\\server\\share\\'),
+			isTurboFileSafeDeletePath('\\\\server\\share\\folder\\..'),
+			isTurboFileSafeDeletePath('//server/share/'),
+			isTurboFileSafeDeletePath('//server/share/folder/..'),
+			isTurboFileSafeDeletePath('\\\\?\\UNC\\server\\share\\'),
+			isTurboFileSafeDeletePath('relative/item'),
 			isTurboFileSafeDeletePath('/data/item'),
-			isTurboFileSafeDeletePath('C:\\data\\item')
-		], [false, false, false, true, true]);
+			isTurboFileSafeDeletePath('C:\\data\\item'),
+			isTurboFileSafeDeletePath('\\\\server\\share\\folder'),
+			isTurboFileSafeDeletePath('//server/share/folder'),
+			isTurboFileSafeDeletePath('\\\\?\\UNC\\server\\share\\folder')
+		], [false, false, false, false, false, false, false, false, false, false, false, false, true, true, true, true, true]);
 	});
 
 	test('switches a failed POSIX batch delete to per-path deletion', async () => {
@@ -290,21 +302,30 @@ suite('TurboFileTrash', function () {
 		});
 	});
 
-	test('rejects a POSIX batch root before any delete callback runs', async () => {
+	test('rejects POSIX root aliases before any batch delete callback runs', async () => {
 		const calls = { batch: 0, delete: 0, cache: 0 };
-		const result = await runTurboFilePosixBatchDelete(
-			[{ kind: 'ssh', path: '/' }, { kind: 'ssh', path: '/data/item' }],
-			2,
-			async () => { calls.batch++; },
-			async () => {
-				calls.delete++;
-				return { ok: true, message: 'Path deleted.' };
-			},
-			() => { calls.cache++; }
-		);
+		const results = [];
+		for (const path of ['/', '/tmp/..', '/.', '//server/share/', '//server/share/folder/..']) {
+			results.push(await runTurboFilePosixBatchDelete(
+				[{ kind: 'ssh', path }, { kind: 'ssh', path: '/data/item' }],
+				2,
+				async () => { calls.batch++; },
+				async () => {
+					calls.delete++;
+					return { ok: true, message: 'Path deleted.' };
+				},
+				() => { calls.cache++; }
+			));
+		}
 
-		assert.deepStrictEqual({ result, calls }, {
-			result: { ok: false, message: 'Refusing to delete a filesystem root.' },
+		assert.deepStrictEqual({ results, calls }, {
+			results: [
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' }
+			],
 			calls: { batch: 0, delete: 0, cache: 0 }
 		});
 	});
@@ -328,17 +349,26 @@ suite('TurboFileTrash', function () {
 		});
 	});
 
-	test('rejects a remote root without native SFTP or cache callbacks', async () => {
+	test('rejects drive and UNC root aliases without native SFTP or cache callbacks', async () => {
 		const calls = { native: 0, sftp: 0, cache: 0 };
-		const result = await runTurboFileSingleRemoteDelete(
-			{ kind: 'ssh', path: '/' },
-			async () => { calls.native++; },
-			async () => { calls.sftp++; },
-			() => { calls.cache++; }
-		);
+		const results = [];
+		for (const path of ['C:\\', 'C:\\folder\\..', '\\\\server\\share\\', '\\\\server\\share\\folder\\..', '\\\\?\\UNC\\server\\share\\']) {
+			results.push(await runTurboFileSingleRemoteDelete(
+				{ kind: 'ssh', path },
+				async () => { calls.native++; },
+				async () => { calls.sftp++; },
+				() => { calls.cache++; }
+			));
+		}
 
-		assert.deepStrictEqual({ result, calls }, {
-			result: { ok: false, message: 'Refusing to delete a filesystem root.' },
+		assert.deepStrictEqual({ results, calls }, {
+			results: [
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' },
+				{ ok: false, message: 'Refusing to delete a filesystem root.' }
+			],
 			calls: { native: 0, sftp: 0, cache: 0 }
 		});
 	});

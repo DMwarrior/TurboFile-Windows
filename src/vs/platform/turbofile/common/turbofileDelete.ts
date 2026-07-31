@@ -4,13 +4,27 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Limiter } from '../../../base/common/async.js';
+import { posix, win32 } from '../../../base/common/path.js';
 import { localize } from '../../../nls.js';
 import { ITurboFileFileOperationResult, ITurboFileTransferEndpoint } from './turbofile.js';
 
 export function isTurboFileSafeDeletePath(path: string): boolean {
 	const trimmed = path.trim();
-	const normalized = trimmed.replace(/[\\/]+$/, '');
-	return !!trimmed && trimmed !== '/' && trimmed !== '\\' && normalized !== '' && !/^[A-Za-z]:$/.test(normalized);
+	if (!trimmed) {
+		return false;
+	}
+	const extendedUncPrefix = /^[\\/]{2}\?[\\/]UNC[\\/]/i;
+	const normalizedInput = extendedUncPrefix.test(trimmed) ? `\\\\${trimmed.replace(extendedUncPrefix, '')}` : trimmed;
+	const windowsPath = /^[A-Za-z]:[\\/]/.test(normalizedInput) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(normalizedInput);
+	const pathApi = windowsPath ? win32 : posix;
+	if (!pathApi.isAbsolute(normalizedInput)) {
+		return false;
+	}
+	const normalized = pathApi.normalize(normalizedInput);
+	const root = pathApi.parse(normalized).root;
+	return windowsPath
+		? normalized.toLowerCase() !== root.toLowerCase()
+		: normalized !== root;
 }
 
 export async function runTurboFileBatchDeleteFallback(
