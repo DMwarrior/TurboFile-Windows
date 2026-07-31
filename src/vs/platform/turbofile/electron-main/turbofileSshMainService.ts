@@ -21,7 +21,7 @@ import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js'
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../common/turbofileBatchTransferFlow.js';
 import { createLocalBatchTarPlans, createRemoteBatchTarSourcePlan, createTarNullListBuffer, isTurboFileBatchCommandSafe, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
-import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback } from '../common/turbofileDelete.js';
+import { isTurboFileSafeDeletePath, runTurboFilePosixBatchDelete, runTurboFileSingleRemoteDelete } from '../common/turbofileDelete.js';
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
 import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetadataBatch.js';
@@ -4641,26 +4641,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async deletePathCore(endpoint: ITurboFileTransferEndpoint, recursive = true): Promise<ITurboFileFileOperationResult> {
-		try {
-			if (endpoint.kind === 'local') {
-				await fsp.rm(endpoint.path, { recursive, force: true });
-			} else {
-				try {
-					await this.deleteRemotePathNative(endpoint, recursive);
-				} catch (error) {
-					if (error instanceof Error && error.message === 'Refusing to delete a filesystem root.') {
-						throw error;
+		if (endpoint.kind !== 'local') {
+			return await runTurboFileSingleRemoteDelete(
+				endpoint,
+				() => this.deleteRemotePathNative(endpoint, recursive),
+				() => this.withSftp(endpoint, async sftp => {
+					const stats = await this.remoteStat(sftp, endpoint.path);
+					if (stats.isDirectory()) {
+						await this.deleteRemoteDirectory(sftp, endpoint.path);
+					} else {
+						await this.unlinkRemote(sftp, endpoint.path);
 					}
-					await this.withSftp(endpoint, async sftp => {
-						const stats = await this.remoteStat(sftp, endpoint.path);
-						if (stats.isDirectory()) {
-							await this.deleteRemoteDirectory(sftp, endpoint.path);
-						} else {
-							await this.unlinkRemote(sftp, endpoint.path);
-						}
-					});
-				}
-			}
+				}),
+				() => this.clearRemoteDirectoryListingCache(endpoint)
+			);
+		}
+		try {
+			await fsp.rm(endpoint.path, { recursive, force: true });
 			this.clearRemoteDirectoryListingCache(endpoint);
 			return { ok: true, message: 'Path deleted.' };
 		} catch (error) {
@@ -4695,11 +4692,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return { ok: true, message: 'Paths deleted.' };
 			}
 
-			for (const endpoint of targets) {
-				this.assertSafeDeletePath(endpoint.path);
-			}
-
 			if (looksLikeWindowsPath(first.path)) {
+				for (const endpoint of targets) {
+					this.assertSafeDeletePath(endpoint.path);
+				}
 				const input = Buffer.from(JSON.stringify(targets.map(endpoint => endpoint.path)), 'utf8');
 				await this.withSshClient(first, client => this.execRemoteWithInput(client, buildWindowsDeleteManyFromInputCommand(recursive), input));
 			} else {
@@ -4707,15 +4703,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				// xargs batches the actual rm invocations server-side so this scales to any selection
 				// size without ever hitting the shell's argument-length limit.
 				const input = createTarNullListBuffer(targets.map(endpoint => endpoint.path));
-				try {
-					await this.withSshClient(first, client => this.execRemoteWithInput(client, buildPosixDeleteManyFromInputCommand(recursive), input, {
+				const workerLimit = recursive ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
+				return await runTurboFilePosixBatchDelete(
+					targets,
+					workerLimit,
+					() => this.withSshClient(first, client => this.execRemoteWithInput(client, buildPosixDeleteManyFromInputCommand(recursive), input, {
 						inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS,
 						inactivityMessage: 'Remote POSIX batch delete produced no progress.'
-					}));
-				} catch {
-					const workerLimit = recursive ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
-					return await runTurboFileBatchDeleteFallback(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive));
-				}
+					})),
+					endpoint => this.deletePathCore(endpoint, recursive),
+					endpoint => this.clearRemoteDirectoryListingCache(endpoint)
+				);
 			}
 			this.clearRemoteDirectoryListingCache(first);
 			return { ok: true, message: 'Paths deleted.' };

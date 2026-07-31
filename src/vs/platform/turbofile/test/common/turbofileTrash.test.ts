@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
-import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback } from '../../common/turbofileDelete.js';
+import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback, runTurboFilePosixBatchDelete, runTurboFileSingleRemoteDelete } from '../../common/turbofileDelete.js';
 import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
@@ -239,5 +239,122 @@ suite('TurboFileTrash', function () {
 			isTurboFileSafeDeletePath('/data/item'),
 			isTurboFileSafeDeletePath('C:\\data\\item')
 		], [false, false, false, true, true]);
+	});
+
+	test('switches a failed POSIX batch delete to per-path deletion', async () => {
+		const endpoints = [
+			{ kind: 'ssh' as const, path: '/data/one' },
+			{ kind: 'ssh' as const, path: '/data/two' }
+		];
+		const events: string[] = [];
+		const result = await runTurboFilePosixBatchDelete(
+			endpoints,
+			2,
+			async () => {
+				events.push('batch');
+				throw new Error('bash: not found');
+			},
+			async endpoint => {
+				events.push(`delete:${endpoint.path}`);
+				return { ok: true, message: 'Path deleted.' };
+			},
+			endpoint => events.push(`cache:${endpoint.path}`)
+		);
+
+		assert.deepStrictEqual({ result, events }, {
+			result: { ok: true, message: 'Paths deleted.' },
+			events: ['batch', 'delete:/data/one', 'delete:/data/two']
+		});
+	});
+
+	test('clears every path after a successful POSIX batch delete', async () => {
+		const endpoints = [
+			{ kind: 'ssh' as const, path: '/data/one' },
+			{ kind: 'ssh' as const, path: '/data/two' }
+		];
+		const events: string[] = [];
+		const result = await runTurboFilePosixBatchDelete(
+			endpoints,
+			2,
+			async () => { events.push('batch'); },
+			async endpoint => {
+				events.push(`delete:${endpoint.path}`);
+				return { ok: true, message: 'Path deleted.' };
+			},
+			endpoint => events.push(`cache:${endpoint.path}`)
+		);
+
+		assert.deepStrictEqual({ result, events }, {
+			result: { ok: true, message: 'Paths deleted.' },
+			events: ['batch', 'cache:/data/one', 'cache:/data/two']
+		});
+	});
+
+	test('rejects a POSIX batch root before any delete callback runs', async () => {
+		const calls = { batch: 0, delete: 0, cache: 0 };
+		const result = await runTurboFilePosixBatchDelete(
+			[{ kind: 'ssh', path: '/' }, { kind: 'ssh', path: '/data/item' }],
+			2,
+			async () => { calls.batch++; },
+			async () => {
+				calls.delete++;
+				return { ok: true, message: 'Path deleted.' };
+			},
+			() => { calls.cache++; }
+		);
+
+		assert.deepStrictEqual({ result, calls }, {
+			result: { ok: false, message: 'Refusing to delete a filesystem root.' },
+			calls: { batch: 0, delete: 0, cache: 0 }
+		});
+	});
+
+	test('switches a failed native remote delete to SFTP and clears its cache', async () => {
+		const endpoint = { kind: 'ssh' as const, path: '/data/item' };
+		const events: string[] = [];
+		const result = await runTurboFileSingleRemoteDelete(
+			endpoint,
+			async () => {
+				events.push('native');
+				throw new Error('rm unavailable');
+			},
+			async () => { events.push('sftp'); },
+			() => { events.push('cache'); }
+		);
+
+		assert.deepStrictEqual({ result, events }, {
+			result: { ok: true, message: 'Path deleted.' },
+			events: ['native', 'sftp', 'cache']
+		});
+	});
+
+	test('rejects a remote root without native SFTP or cache callbacks', async () => {
+		const calls = { native: 0, sftp: 0, cache: 0 };
+		const result = await runTurboFileSingleRemoteDelete(
+			{ kind: 'ssh', path: '/' },
+			async () => { calls.native++; },
+			async () => { calls.sftp++; },
+			() => { calls.cache++; }
+		);
+
+		assert.deepStrictEqual({ result, calls }, {
+			result: { ok: false, message: 'Refusing to delete a filesystem root.' },
+			calls: { native: 0, sftp: 0, cache: 0 }
+		});
+	});
+
+	test('does not report success when native and SFTP remote deletion both fail', async () => {
+		let cacheCalls = 0;
+		const result = await runTurboFileSingleRemoteDelete(
+			{ kind: 'ssh', path: '/data/item' },
+			async () => { throw new Error('rm unavailable'); },
+			async () => { throw new Error('permission denied'); },
+			() => { cacheCalls++; }
+		);
+
+		assert.deepStrictEqual({ result, cacheCalls }, {
+			result: { ok: false, message: 'Native delete failed: rm unavailable; SFTP delete failed: permission denied' },
+			cacheCalls: 0
+		});
 	});
 });

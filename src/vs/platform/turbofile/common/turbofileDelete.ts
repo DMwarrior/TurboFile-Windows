@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Limiter } from '../../../base/common/async.js';
+import { localize } from '../../../nls.js';
 import { ITurboFileFileOperationResult, ITurboFileTransferEndpoint } from './turbofile.js';
 
 export function isTurboFileSafeDeletePath(path: string): boolean {
@@ -37,4 +38,49 @@ export async function runTurboFileBatchDeleteFallback(
 	} finally {
 		limiter.dispose();
 	}
+}
+
+export async function runTurboFilePosixBatchDelete(
+	endpoints: readonly ITurboFileTransferEndpoint[],
+	workerLimit: number,
+	batchDelete: () => Promise<unknown>,
+	deletePath: (endpoint: ITurboFileTransferEndpoint) => Promise<ITurboFileFileOperationResult>,
+	clearCache: (endpoint: ITurboFileTransferEndpoint) => void
+): Promise<ITurboFileFileOperationResult> {
+	if (endpoints.some(endpoint => !isTurboFileSafeDeletePath(endpoint.path))) {
+		return { ok: false, message: 'Refusing to delete a filesystem root.' };
+	}
+	try {
+		await batchDelete();
+	} catch {
+		return await runTurboFileBatchDeleteFallback(endpoints, workerLimit, deletePath);
+	}
+	for (const endpoint of endpoints) {
+		clearCache(endpoint);
+	}
+	return { ok: true, message: 'Paths deleted.' };
+}
+
+export async function runTurboFileSingleRemoteDelete(
+	endpoint: ITurboFileTransferEndpoint,
+	nativeDelete: () => Promise<void>,
+	sftpDelete: () => Promise<void>,
+	clearCache: () => void
+): Promise<ITurboFileFileOperationResult> {
+	if (!isTurboFileSafeDeletePath(endpoint.path)) {
+		return { ok: false, message: 'Refusing to delete a filesystem root.' };
+	}
+	try {
+		await nativeDelete();
+	} catch (nativeError) {
+		try {
+			await sftpDelete();
+		} catch (sftpError) {
+			const nativeMessage = nativeError instanceof Error ? nativeError.message : String(nativeError);
+			const sftpMessage = sftpError instanceof Error ? sftpError.message : String(sftpError);
+			return { ok: false, message: localize('turbofileSingleRemoteDeleteFailed', 'Native delete failed: {0}; SFTP delete failed: {1}', nativeMessage, sftpMessage) };
+		}
+	}
+	clearCache();
+	return { ok: true, message: 'Path deleted.' };
 }

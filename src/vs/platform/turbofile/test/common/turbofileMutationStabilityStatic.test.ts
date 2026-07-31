@@ -315,19 +315,18 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(!deleteManyBuilder.includes('sudo -n'));
 		assert.ok(!deleteOneBuilder.includes('useSudo'));
 		assert.ok(!deleteOneBuilder.includes('sudo -n'));
-		assert.ok(deletePath.includes('await this.deleteRemotePathNative(endpoint, recursive)'));
-		assert.ok(deletePath.includes('await this.withSftp(endpoint'));
+		assert.ok(deletePath.includes('return await runTurboFileSingleRemoteDelete('));
+		assert.ok(deletePath.includes('() => this.deleteRemotePathNative(endpoint, recursive)'));
+		assert.ok(deletePath.includes('() => this.withSftp(endpoint'));
+		assert.ok(deletePath.includes('() => this.clearRemoteDirectoryListingCache(endpoint)'));
 	});
 
 	test('falls back failed POSIX batch deletion to per-path deletion', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const deletePathsCore = block(service, 'private async deletePathsCore', 'private async deleteRemotePathNative');
-		const rootValidation = deletePathsCore.indexOf('this.assertSafeDeletePath(endpoint.path)');
-		const batchFallback = deletePathsCore.indexOf('runTurboFileBatchDeleteFallback(');
-
 		assert.ok(deletePathsCore.includes('buildPosixDeleteManyFromInputCommand(recursive)'));
-		assert.ok(deletePathsCore.includes('await runTurboFileBatchDeleteFallback(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive))'));
-		assert.ok(rootValidation >= 0);
-		assert.ok(batchFallback > rootValidation);
+		assert.ok(deletePathsCore.includes('return await runTurboFilePosixBatchDelete('));
+		assert.ok(deletePathsCore.includes('endpoint => this.deletePathCore(endpoint, recursive)'));
+		assert.ok(deletePathsCore.includes('endpoint => this.clearRemoteDirectoryListingCache(endpoint)'));
 	});
 });
