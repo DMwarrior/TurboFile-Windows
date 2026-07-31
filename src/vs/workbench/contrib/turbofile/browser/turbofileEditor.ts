@@ -10065,7 +10065,7 @@ export class TurboFileEditor extends EditorPane {
 			this.updateTask(task, localize('turbofile.permanentDeletingItems', "正在永久删除 {0} 项…", items.length), 40);
 			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
 			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
-			const result = await this.sshService.deletePaths(endpoints, true, true);
+			const result = await this.sshService.deletePaths(endpoints, true);
 			this.updateTask(task, localize('turbofile.refreshingDirectoryAfterPermanentDelete', "正在刷新目录：{0}", device.name), 90);
 			await this.refreshPane(side, { force: true });
 			if (!result.ok) {
@@ -10083,9 +10083,6 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private formatPermanentDeleteError(message: string): string {
-		if (/(^|\s)sudo(?::|\s)/i.test(message)) {
-			return localize('turbofile.permanentDeleteSudoFailed', "永久删除失败：该设备未配置免密 sudo，或当前账号没有 sudo 权限。详细信息：{0}", message);
-		}
 		return localize('turbofile.permanentDeleteFailed', "永久删除失败：{0}", message);
 	}
 

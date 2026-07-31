@@ -172,7 +172,9 @@ suite('TurboFileImageGridPane', () => {
 
 		assert.ok(contextActions.includes("'turbofile.deletePermanently'"));
 		assert.ok(contextActions.includes('this.permanentlyDeleteSelected(side)'));
-		assert.ok(permanentDelete.includes('deletePaths(endpoints, true, true)'));
+		assert.ok(permanentDelete.includes('deletePaths(endpoints, true)'));
+		assert.ok(!permanentDelete.includes('deletePaths(endpoints, true, true)'));
+		assert.ok(!permanentDelete.includes('permanentDeleteSudoFailed'));
 		assert.ok(permanentDelete.includes('refreshPane(side, { force: true })'));
 		assert.ok(ordinaryDelete.includes('moveUserItemsToTrash'));
 		assert.ok(!ordinaryDelete.includes('deletePaths('));
