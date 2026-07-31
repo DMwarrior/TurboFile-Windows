@@ -36,7 +36,7 @@ import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { classifyTurboFileTransferFailure, getTurboFileTransferProgressState, getTurboFileTransferProtocolName, ITurboFileTransferFailure, shouldContinueTurboFileTransferPlan } from '../common/turbofileTransferFailure.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { getTurboFileTransferBatchPathKeys, getTurboFileTransferDeviceKey, getTurboFileTransferPathKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
-import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
@@ -3969,23 +3969,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			});
 		}
-		const fallbackEntries = getTurboFileTrashFallbackEntries(validSources, trashResults);
-		if (fallbackEntries.length) {
-			const workerLimit = fallbackEntries.some(entry => entry.source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
-			const fallbackResults = await mapLimit(fallbackEntries, workerLimit, async entry => {
-				const deleteResult = await this.deletePathCore(entry.source.endpoint, true);
-				return {
-					sourceIndex: entry.sourceIndex,
-					result: createTurboFileTrashFallbackResult(entry.source, entry.trashResult, deleteResult)
-				};
-			});
-			for (const fallbackResult of fallbackResults) {
-				trashResults[fallbackResult.sourceIndex] = fallbackResult.result;
+		const fallback = await runTurboFileTrashFallback(
+			validSources,
+			trashResults,
+			endpoint => this.deletePathCore(endpoint, true),
+			(entries, task) => {
+				const workerLimit = entries.some(entry => entry.source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
+				return mapLimit(entries, workerLimit, task);
 			}
-		}
+		);
+		trashResults = fallback.results;
 		return this.createTrashOperationResult(
 			combineTurboFileTrashOperationResults(validationResults, trashResults),
-			fallbackEntries.length
+			fallback.usedFallback
 				? localize('turbofileTrashFallbackOperationSucceeded', 'Deleted. Some items could not be moved to the recycle bin and were permanently deleted.')
 				: 'Moved to recycle bin.'
 		);

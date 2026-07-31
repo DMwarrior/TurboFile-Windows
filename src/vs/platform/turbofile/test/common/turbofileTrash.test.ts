@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
-import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
 
@@ -134,5 +134,49 @@ suite('TurboFileTrash', function () {
 			{ path: '/data/item', ok: false, message: 'Recycle-bin move returned no result. Permanent delete fallback failed: rm failed' },
 			{ path: '/data/item', ok: false, message: 'bash: not found Permanent delete fallback failed: rm failed' }
 		]);
+	});
+
+	test('executes permanent-delete fallback only for failed and missing valid sources', async () => {
+		const sources: ITurboFileTrashSource[] = [
+			{ endpoint: { kind: 'ssh', path: '/data/success' }, type: 'file' },
+			{ endpoint: { kind: 'ssh', path: '/data/failure' }, type: 'file' },
+			{ endpoint: { kind: 'ssh', path: '/data/missing' }, type: 'directory' }
+		];
+		const deletedPaths: string[] = [];
+		const executedIndexes: number[] = [];
+
+		const result = await runTurboFileTrashFallback(
+			sources,
+			[
+				{ path: '/data/success', ok: true, message: 'Moved.' },
+				{ path: '/data/failure', ok: false, message: 'bash: not found' }
+			],
+			async endpoint => {
+				deletedPaths.push(endpoint.path);
+				return endpoint.path === '/data/failure'
+					? { ok: true, message: 'Path deleted.' }
+					: { ok: false, message: 'rm failed' };
+			},
+			async (entries, task) => {
+				executedIndexes.push(...entries.map(entry => entry.sourceIndex));
+				return Promise.all(entries.map(task));
+			}
+		);
+
+		assert.deepStrictEqual({
+			deletedPaths,
+			executedIndexes,
+			usedFallback: result.usedFallback,
+			results: result.results
+		}, {
+			deletedPaths: ['/data/failure', '/data/missing'],
+			executedIndexes: [1, 2],
+			usedFallback: true,
+			results: [
+				{ path: '/data/success', ok: true, message: 'Moved.' },
+				{ path: '/data/failure', ok: true, message: 'The item could not be moved to the recycle bin and was permanently deleted instead.' },
+				{ path: '/data/missing', ok: false, message: 'Recycle-bin move returned no result. Permanent delete fallback failed: rm failed' }
+			]
+		});
 	});
 });

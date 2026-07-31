@@ -5,7 +5,7 @@
 
 import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
-import { ITurboFileFileOperationResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashSource, TurboFileFileType } from './turbofile.js';
+import { ITurboFileFileOperationResult, ITurboFileTransferEndpoint, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashSource, TurboFileFileType } from './turbofile.js';
 
 interface ITurboFileTrashMetadataCandidate {
 	readonly id?: unknown;
@@ -27,6 +27,16 @@ export interface ITurboFileTrashFallbackEntry {
 	readonly sourceIndex: number;
 	readonly trashResult: ITurboFileTrashItemResult | undefined;
 }
+
+export interface ITurboFileTrashFallbackReplacement {
+	readonly sourceIndex: number;
+	readonly result: ITurboFileTrashItemResult;
+}
+
+export type TurboFileTrashFallbackExecutor = (
+	entries: readonly ITurboFileTrashFallbackEntry[],
+	task: (entry: ITurboFileTrashFallbackEntry) => Promise<ITurboFileTrashFallbackReplacement>
+) => Promise<readonly ITurboFileTrashFallbackReplacement[]>;
 
 export function getTurboFileTrashDeviceIdentity(device: ITurboFileTrashDevice): string {
 	if (device.kind === 'local') {
@@ -88,6 +98,27 @@ export function createTurboFileTrashFallbackResult(source: ITurboFileTrashSource
 
 export function combineTurboFileTrashOperationResults(validationResults: readonly ITurboFileTrashItemResult[], trashResults: readonly ITurboFileTrashItemResult[]): ITurboFileTrashItemResult[] {
 	return [...validationResults, ...trashResults];
+}
+
+export async function runTurboFileTrashFallback(
+	sources: readonly ITurboFileTrashSource[],
+	trashResults: readonly ITurboFileTrashItemResult[],
+	deletePath: (endpoint: ITurboFileTransferEndpoint) => Promise<ITurboFileFileOperationResult>,
+	execute: TurboFileTrashFallbackExecutor
+): Promise<{ readonly results: ITurboFileTrashItemResult[]; readonly usedFallback: boolean }> {
+	const fallbackEntries = getTurboFileTrashFallbackEntries(sources, trashResults);
+	if (!fallbackEntries.length) {
+		return { results: [...trashResults], usedFallback: false };
+	}
+	const replacements = await execute(fallbackEntries, async entry => ({
+		sourceIndex: entry.sourceIndex,
+		result: createTurboFileTrashFallbackResult(entry.source, entry.trashResult, await deletePath(entry.source.endpoint))
+	}));
+	const results = [...trashResults];
+	for (const replacement of replacements) {
+		results[replacement.sourceIndex] = replacement.result;
+	}
+	return { results, usedFallback: true };
 }
 
 export function isTurboFileProtectedTrashSource(path: string, windowsPath: boolean): boolean {

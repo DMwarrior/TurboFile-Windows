@@ -114,10 +114,9 @@ suite('TurboFileMutationStabilityStatic', () => {
 
 		assert.ok(moveToTrash.includes('const validationResults'));
 		assert.ok(moveToTrash.includes('let trashResults'));
-		assert.ok(moveToTrash.includes('getTurboFileTrashFallbackEntries(validSources, trashResults)'));
+		assert.ok(moveToTrash.includes('runTurboFileTrashFallback('));
 		assert.ok(moveToTrash.includes('mapLimit('));
-		assert.ok(moveToTrash.includes('this.deletePathCore(entry.source.endpoint, true)'));
-		assert.ok(moveToTrash.includes('createTurboFileTrashFallbackResult'));
+		assert.ok(moveToTrash.includes('this.deletePathCore(endpoint, true)'));
 		assert.ok(moveToTrash.includes("localize('turbofileTrashFallbackOperationSucceeded'"));
 		assert.ok(!moveToTrash.includes('results.find('));
 		assert.ok(!moveToTrash.includes('results.findIndex('));
