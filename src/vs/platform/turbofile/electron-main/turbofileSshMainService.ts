@@ -21,6 +21,7 @@ import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js'
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../common/turbofileBatchTransferFlow.js';
 import { createLocalBatchTarPlans, createRemoteBatchTarSourcePlan, createTarNullListBuffer, isTurboFileBatchCommandSafe, requiresLocalTarSafeRootAlias } from '../common/turbofileBatchTarPlan.js';
+import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback } from '../common/turbofileDelete.js';
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
 import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetadataBatch.js';
@@ -4713,13 +4714,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}));
 				} catch {
 					const workerLimit = recursive ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
-					const results = await mapLimit(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive));
-					const failures = results
-						.map((result, index) => ({ endpoint: targets[index], result }))
-						.filter(({ result }) => !result.ok);
-					if (failures.length) {
-						return { ok: false, message: failures.map(({ endpoint, result }) => `${endpoint.path}: ${result.message}`).join('; ') };
-					}
+					return await runTurboFileBatchDeleteFallback(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive));
 				}
 			}
 			this.clearRemoteDirectoryListingCache(first);
@@ -4738,9 +4733,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private assertSafeDeletePath(path: string): void {
-		const trimmed = path.trim();
-		const normalized = trimmed.replace(/[\\/]+$/, '');
-		if (!trimmed || trimmed === '/' || trimmed === '\\' || normalized === '' || /^[A-Za-z]:$/.test(normalized)) {
+		if (!isTurboFileSafeDeletePath(path)) {
 			throw new Error('Refusing to delete a filesystem root.');
 		}
 	}

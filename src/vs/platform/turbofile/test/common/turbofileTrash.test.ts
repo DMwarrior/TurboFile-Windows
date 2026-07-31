@@ -6,6 +6,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
+import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback } from '../../common/turbofileDelete.js';
 import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
@@ -178,5 +179,65 @@ suite('TurboFileTrash', function () {
 				{ path: '/data/missing', ok: false, message: 'Recycle-bin move returned no result. Permanent delete fallback failed: rm failed' }
 			]
 		});
+	});
+
+	test('bounds batch delete fallback and aggregates per-path failures', async () => {
+		const endpoints = ['/data/one', '/data/two', '/data/three'].map(path => ({ kind: 'ssh' as const, path }));
+		const calls: string[] = [];
+		const releases: Array<() => void> = [];
+		let active = 0;
+		let maximumActive = 0;
+		const resultPromise = runTurboFileBatchDeleteFallback(endpoints, 2, endpoint => new Promise(resolve => {
+			calls.push(endpoint.path);
+			active++;
+			maximumActive = Math.max(maximumActive, active);
+			releases.push(() => {
+				active--;
+				resolve(endpoint.path === '/data/two'
+					? { ok: false, message: 'permission denied' }
+					: { ok: true, message: 'Path deleted.' });
+			});
+		}));
+
+		assert.deepStrictEqual({ calls: [...calls], maximumActive }, { calls: ['/data/one', '/data/two'], maximumActive: 2 });
+		releases[0]();
+		releases[1]();
+		await Promise.resolve();
+		await Promise.resolve();
+		assert.deepStrictEqual(calls, ['/data/one', '/data/two', '/data/three']);
+		releases[2]();
+
+		assert.deepStrictEqual({
+			result: await resultPromise,
+			calls,
+			maximumActive
+		}, {
+			result: { ok: false, message: '/data/two: permission denied' },
+			calls: ['/data/one', '/data/two', '/data/three'],
+			maximumActive: 2
+		});
+	});
+
+	test('reports successful batch delete fallback when every path is deleted', async () => {
+		const result = await runTurboFileBatchDeleteFallback(
+			[
+				{ kind: 'ssh', path: '/data/one' },
+				{ kind: 'ssh', path: '/data/two' }
+			],
+			2,
+			async () => ({ ok: true, message: 'Path deleted.' })
+		);
+
+		assert.deepStrictEqual(result, { ok: true, message: 'Paths deleted.' });
+	});
+
+	test('identifies filesystem roots before batch delete fallback', () => {
+		assert.deepStrictEqual([
+			isTurboFileSafeDeletePath('/'),
+			isTurboFileSafeDeletePath('\\'),
+			isTurboFileSafeDeletePath('C:\\'),
+			isTurboFileSafeDeletePath('/data/item'),
+			isTurboFileSafeDeletePath('C:\\data\\item')
+		], [false, false, false, true, true]);
 	});
 });

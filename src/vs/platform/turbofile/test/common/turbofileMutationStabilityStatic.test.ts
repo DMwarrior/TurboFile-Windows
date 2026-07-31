@@ -322,9 +322,12 @@ suite('TurboFileMutationStabilityStatic', () => {
 	test('falls back failed POSIX batch deletion to per-path deletion', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const deletePathsCore = block(service, 'private async deletePathsCore', 'private async deleteRemotePathNative');
+		const rootValidation = deletePathsCore.indexOf('this.assertSafeDeletePath(endpoint.path)');
+		const batchFallback = deletePathsCore.indexOf('runTurboFileBatchDeleteFallback(');
 
 		assert.ok(deletePathsCore.includes('buildPosixDeleteManyFromInputCommand(recursive)'));
-		assert.ok(deletePathsCore.includes('await mapLimit(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive))'));
-		assert.ok(deletePathsCore.includes('filter(({ result }) => !result.ok)'));
+		assert.ok(deletePathsCore.includes('await runTurboFileBatchDeleteFallback(targets, workerLimit, endpoint => this.deletePathCore(endpoint, recursive))'));
+		assert.ok(rootValidation >= 0);
+		assert.ok(batchFallback > rootValidation);
 	});
 });
