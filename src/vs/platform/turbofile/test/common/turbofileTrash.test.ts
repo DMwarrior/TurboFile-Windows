@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
-import { createTurboFileKeepBothName, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
 
@@ -95,5 +95,44 @@ suite('TurboFileTrash', function () {
 			]).map(source => source.endpoint.path),
 			['/data/failure', '/data/missing']
 		);
+	});
+
+	test('matches duplicate recycle-bin paths to sources by occurrence', () => {
+		const sources: ITurboFileTrashSource[] = [
+			{ endpoint: { kind: 'ssh', path: '/data/duplicate' }, type: 'file' },
+			{ endpoint: { kind: 'ssh', path: '/data/duplicate' }, type: 'directory' }
+		];
+
+		assert.deepStrictEqual(
+			getTurboFileTrashFallbackEntries(sources, [
+				{ path: '/data/duplicate', ok: true, message: 'Moved.' },
+				{ path: '/data/duplicate', ok: false, message: 'bash: not found' }
+			]).map(entry => ({ type: entry.source.type, sourceIndex: entry.sourceIndex, message: entry.trashResult?.message })),
+			[{ type: 'directory', sourceIndex: 1, message: 'bash: not found' }]
+		);
+	});
+
+	test('preserves invalid and valid results that share the same path', () => {
+		assert.deepStrictEqual(combineTurboFileTrashOperationResults(
+			[{ path: '/data/same', ok: false, message: 'Source belongs to another device.' }],
+			[{ path: '/data/same', ok: true, message: 'Path deleted.' }]
+		), [
+			{ path: '/data/same', ok: false, message: 'Source belongs to another device.' },
+			{ path: '/data/same', ok: true, message: 'Path deleted.' }
+		]);
+	});
+
+	test('creates localized results for successful and failed permanent-delete fallbacks', () => {
+		const source: ITurboFileTrashSource = { endpoint: { kind: 'ssh', path: '/data/item' }, type: 'file' };
+
+		assert.deepStrictEqual([
+			createTurboFileTrashFallbackResult(source, { path: '/data/item', ok: false, message: 'bash: not found' }, { ok: true, message: 'Path deleted.' }),
+			createTurboFileTrashFallbackResult(source, undefined, { ok: false, message: 'rm failed' }),
+			createTurboFileTrashFallbackResult(source, { path: '/data/item', ok: false, message: 'bash: not found' }, { ok: false, message: 'rm failed' })
+		], [
+			{ path: '/data/item', ok: true, message: 'The item could not be moved to the recycle bin and was permanently deleted instead.' },
+			{ path: '/data/item', ok: false, message: 'Recycle-bin move returned no result. Permanent delete fallback failed: rm failed' },
+			{ path: '/data/item', ok: false, message: 'bash: not found Permanent delete fallback failed: rm failed' }
+		]);
 	});
 });

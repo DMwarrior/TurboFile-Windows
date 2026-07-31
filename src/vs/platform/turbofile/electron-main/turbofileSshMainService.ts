@@ -15,6 +15,7 @@ import { connect as connectTcp, Socket } from 'node:net';
 import { deflateSync } from 'node:zlib';
 import { app, BrowserWindow, clipboard, nativeImage, protocol } from 'electron';
 import { Emitter, Event } from '../../../base/common/event.js';
+import { localize } from '../../../nls.js';
 import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
@@ -35,7 +36,7 @@ import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { classifyTurboFileTransferFailure, getTurboFileTransferProgressState, getTurboFileTransferProtocolName, ITurboFileTransferFailure, shouldContinueTurboFileTransferPlan } from '../common/turbofileTransferFailure.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { getTurboFileTransferBatchPathKeys, getTurboFileTransferDeviceKey, getTurboFileTransferPathKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
-import { createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
@@ -418,6 +419,7 @@ interface ITurboFileImageResourceDescriptor {
 }
 
 interface IPreparedRemoteTrashItem {
+	readonly sourceIndex: number;
 	readonly source: ITurboFileTrashSource;
 	readonly item: ITurboFileTrashItem;
 	readonly pendingPath: string;
@@ -3934,7 +3936,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async movePathsToTrashCore(request: ITurboFileMoveToTrashRequest): Promise<ITurboFileTrashOperationResult> {
 		const deviceIdentity = getTurboFileTrashDeviceIdentity(this.withLocalTrashIdentity(request.device));
-		const results: ITurboFileTrashItemResult[] = [];
+		const validationResults: ITurboFileTrashItemResult[] = [];
 		const validSources: ITurboFileTrashSource[] = [];
 		for (const source of request.sources) {
 			try {
@@ -3949,14 +3951,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				validSources.push(source);
 			} catch (error) {
-				results.push({ path: source.endpoint.path, ok: false, message: error instanceof Error ? error.message : String(error) });
+				validationResults.push({ path: source.endpoint.path, ok: false, message: error instanceof Error ? error.message : String(error) });
 			}
 		}
+		let trashResults: ITurboFileTrashItemResult[];
 		if (request.device.kind === 'ssh' && validSources.length) {
-			results.push(...await this.moveRemotePathsToTrash(validSources, deviceIdentity));
+			trashResults = await this.moveRemotePathsToTrash(validSources, deviceIdentity);
 		} else {
 			const workerLimit = validSources.some(source => source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
-			const localResults = await mapLimit(validSources, workerLimit, async source => {
+			trashResults = await mapLimit(validSources, workerLimit, async source => {
 				try {
 					const item = await this.moveLocalPathToTrash(source, deviceIdentity);
 					this.clearRemoteDirectoryListingCache(source.endpoint);
@@ -3965,29 +3968,27 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					return { path: source.endpoint.path, ok: false, message: error instanceof Error ? error.message : String(error) } satisfies ITurboFileTrashItemResult;
 				}
 			});
-			results.push(...localResults);
 		}
-		const fallbackSources = getTurboFileTrashFallbackSources(validSources, results);
-		if (fallbackSources.length) {
-			const workerLimit = fallbackSources.some(source => source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
-			const fallbackResults = await mapLimit(fallbackSources, workerLimit, async source => {
-				const trashResult = results.find(result => result.path === source.endpoint.path);
-				const trashMessage = trashResult?.message ?? 'Recycle-bin move returned no result.';
-				const deleteResult = await this.deletePathCore(source.endpoint, true);
-				return deleteResult.ok
-					? { path: source.endpoint.path, ok: true, message: 'Recycle-bin move failed; permanently deleted instead.' } satisfies ITurboFileTrashItemResult
-					: { path: source.endpoint.path, ok: false, message: `${trashMessage} Permanent delete fallback failed: ${deleteResult.message}` } satisfies ITurboFileTrashItemResult;
+		const fallbackEntries = getTurboFileTrashFallbackEntries(validSources, trashResults);
+		if (fallbackEntries.length) {
+			const workerLimit = fallbackEntries.some(entry => entry.source.type === 'directory') ? BATCH_TRANSFER_DIRECTORY_WORKERS : BATCH_TRANSFER_WORKERS;
+			const fallbackResults = await mapLimit(fallbackEntries, workerLimit, async entry => {
+				const deleteResult = await this.deletePathCore(entry.source.endpoint, true);
+				return {
+					sourceIndex: entry.sourceIndex,
+					result: createTurboFileTrashFallbackResult(entry.source, entry.trashResult, deleteResult)
+				};
 			});
 			for (const fallbackResult of fallbackResults) {
-				const resultIndex = results.findIndex(result => result.path === fallbackResult.path);
-				if (resultIndex >= 0) {
-					results[resultIndex] = fallbackResult;
-				} else {
-					results.push(fallbackResult);
-				}
+				trashResults[fallbackResult.sourceIndex] = fallbackResult.result;
 			}
 		}
-		return this.createTrashOperationResult(results, 'Moved to recycle bin.');
+		return this.createTrashOperationResult(
+			combineTurboFileTrashOperationResults(validationResults, trashResults),
+			fallbackEntries.length
+				? localize('turbofileTrashFallbackOperationSucceeded', 'Deleted. Some items could not be moved to the recycle bin and were permanently deleted.')
+				: 'Moved to recycle bin.'
+		);
 	}
 
 	async listTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashListing> {
@@ -4258,7 +4259,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async moveRemotePathsToTrash(sources: readonly ITurboFileTrashSource[], deviceIdentity: string): Promise<ITurboFileTrashItemResult[]> {
 		const first = sources[0];
-		const results: ITurboFileTrashItemResult[] = [];
+		const results: Array<ITurboFileTrashItemResult | undefined> = new Array(sources.length);
 		const preparedItems: IPreparedRemoteTrashItem[] = [];
 		const rootsByParent = new Map<string, { readonly trashRoot: string; readonly volumeId: string }>();
 		const windowsPath = looksLikeWindowsPath(first.endpoint.path);
@@ -4271,7 +4272,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 		}
-		for (const source of sources) {
+		for (const [sourceIndex, source] of sources.entries()) {
 			try {
 				const parentKey = source.type === 'directory' ? source.endpoint.path : getRemoteParentPath(source.endpoint.path);
 				let root = rootsByParent.get(parentKey);
@@ -4295,17 +4296,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					deviceIdentity
 				};
 				preparedItems.push({
+					sourceIndex,
 					source,
 					item,
 					pendingPath: joinRemotePath(infoDirectory, `${id}.pending.json`),
 					metadataPath: joinRemotePath(infoDirectory, `${id}.json`)
 				});
 			} catch (error) {
-				results.push({ path: source.endpoint.path, ok: false, message: error instanceof Error ? error.message : String(error) });
+				results[sourceIndex] = { path: source.endpoint.path, ok: false, message: error instanceof Error ? error.message : String(error) };
 			}
 		}
 		if (!preparedItems.length) {
-			return results;
+			return results.filter((result): result is ITurboFileTrashItemResult => result !== undefined);
 		}
 
 		let moveResults: readonly IRemoteTrashMoveResult[];
@@ -4335,14 +4337,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		for (const prepared of preparedItems) {
 			const moveResult = moveResultById.get(prepared.item.id) ?? { id: prepared.item.id, ok: false, message: 'Remote move returned no result.' };
 			if (!moveResult.ok) {
-				results.push({ id: prepared.item.id, path: prepared.source.endpoint.path, ok: false, message: moveResult.message ?? 'Remote move failed.' });
+				results[prepared.sourceIndex] = { id: prepared.item.id, path: prepared.source.endpoint.path, ok: false, message: moveResult.message ?? 'Remote move failed.' };
 				continue;
 			}
 			this.rememberTrashRoot(deviceIdentity, prepared.item.trashRoot);
 			this.clearRemoteDirectoryListingCache(prepared.source.endpoint);
-			results.push({ id: prepared.item.id, path: prepared.source.endpoint.path, ok: true, message: 'Moved to recycle bin.' });
+			results[prepared.sourceIndex] = { id: prepared.item.id, path: prepared.source.endpoint.path, ok: true, message: 'Moved to recycle bin.' };
 		}
-		return results;
+		return results.filter((result): result is ITurboFileTrashItemResult => result !== undefined);
 	}
 
 	private async listRemoteTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashItem[]> {

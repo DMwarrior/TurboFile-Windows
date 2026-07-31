@@ -110,11 +110,20 @@ suite('TurboFileMutationStabilityStatic', () => {
 	test('falls back failed recycle-bin items to bounded permanent deletion', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const moveToTrash = block(service, 'private async movePathsToTrashCore', 'async listTrashItems');
+		const moveRemoteToTrash = block(service, 'private async moveRemotePathsToTrash', 'private async listRemoteTrashItems');
 
-		assert.ok(moveToTrash.includes('getTurboFileTrashFallbackSources'));
+		assert.ok(moveToTrash.includes('const validationResults'));
+		assert.ok(moveToTrash.includes('let trashResults'));
+		assert.ok(moveToTrash.includes('getTurboFileTrashFallbackEntries(validSources, trashResults)'));
 		assert.ok(moveToTrash.includes('mapLimit('));
-		assert.ok(moveToTrash.includes('this.deletePathCore(source.endpoint, true)'));
+		assert.ok(moveToTrash.includes('this.deletePathCore(entry.source.endpoint, true)'));
+		assert.ok(moveToTrash.includes('createTurboFileTrashFallbackResult'));
+		assert.ok(moveToTrash.includes("localize('turbofileTrashFallbackOperationSucceeded'"));
+		assert.ok(!moveToTrash.includes('results.find('));
+		assert.ok(!moveToTrash.includes('results.findIndex('));
 		assert.ok(!moveToTrash.includes('this.deletePath(source.endpoint, true)'));
+		assert.ok(moveRemoteToTrash.includes('for (const [sourceIndex, source] of sources.entries())'));
+		assert.ok(moveRemoteToTrash.includes('results[sourceIndex] ='));
 	});
 
 	test('streams large Windows SSH deletion lists through stdin', () => {

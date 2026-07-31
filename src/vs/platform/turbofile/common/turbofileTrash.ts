@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { generateUuid } from '../../../base/common/uuid.js';
-import { ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashSource, TurboFileFileType } from './turbofile.js';
+import { localize } from '../../../nls.js';
+import { ITurboFileFileOperationResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashSource, TurboFileFileType } from './turbofile.js';
 
 interface ITurboFileTrashMetadataCandidate {
 	readonly id?: unknown;
@@ -20,6 +21,12 @@ interface ITurboFileTrashMetadataCandidate {
 }
 
 const turboFileFileTypes = new Set<TurboFileFileType>(['file', 'directory', 'symlink', 'unknown']);
+
+export interface ITurboFileTrashFallbackEntry {
+	readonly source: ITurboFileTrashSource;
+	readonly sourceIndex: number;
+	readonly trashResult: ITurboFileTrashItemResult | undefined;
+}
 
 export function getTurboFileTrashDeviceIdentity(device: ITurboFileTrashDevice): string {
 	if (device.kind === 'local') {
@@ -49,8 +56,38 @@ export function sortTurboFileTrashItems(items: readonly ITurboFileTrashItem[]): 
 }
 
 export function getTurboFileTrashFallbackSources(sources: readonly ITurboFileTrashSource[], results: readonly ITurboFileTrashItemResult[]): ITurboFileTrashSource[] {
-	const successfulPaths = new Set(results.filter(result => result.ok).map(result => result.path));
-	return sources.filter(source => !successfulPaths.has(source.endpoint.path));
+	return getTurboFileTrashFallbackEntries(sources, results).map(entry => entry.source);
+}
+
+export function getTurboFileTrashFallbackEntries(sources: readonly ITurboFileTrashSource[], results: readonly ITurboFileTrashItemResult[]): ITurboFileTrashFallbackEntry[] {
+	const entries: ITurboFileTrashFallbackEntry[] = [];
+	for (const [sourceIndex, source] of sources.entries()) {
+		const trashResult = results[sourceIndex];
+		if (trashResult?.ok !== true) {
+			entries.push({ source, sourceIndex, trashResult });
+		}
+	}
+	return entries;
+}
+
+export function createTurboFileTrashFallbackResult(source: ITurboFileTrashSource, trashResult: ITurboFileTrashItemResult | undefined, deleteResult: ITurboFileFileOperationResult): ITurboFileTrashItemResult {
+	if (deleteResult.ok) {
+		return {
+			path: source.endpoint.path,
+			ok: true,
+			message: localize('turbofileTrashFallbackDeleteSucceeded', 'The item could not be moved to the recycle bin and was permanently deleted instead.')
+		};
+	}
+	const trashMessage = trashResult?.message ?? localize('turbofileTrashFallbackMissingResult', 'Recycle-bin move returned no result.');
+	return {
+		path: source.endpoint.path,
+		ok: false,
+		message: localize('turbofileTrashFallbackDeleteFailed', '{0} Permanent delete fallback failed: {1}', trashMessage, deleteResult.message)
+	};
+}
+
+export function combineTurboFileTrashOperationResults(validationResults: readonly ITurboFileTrashItemResult[], trashResults: readonly ITurboFileTrashItemResult[]): ITurboFileTrashItemResult[] {
+	return [...validationResults, ...trashResults];
 }
 
 export function isTurboFileProtectedTrashSource(path: string, windowsPath: boolean): boolean {
