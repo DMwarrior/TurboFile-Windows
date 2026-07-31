@@ -12,7 +12,7 @@ function block(source: string, startName: string, endName: string): string {
 	assert.ok(start >= 0, `missing ${startName}`);
 	const end = source.indexOf(endName, start);
 	assert.ok(end > start, `missing ${endName}`);
-	return source.slice(start, end);
+	return source.slice(start, end).replace(/\r\n/g, '\n');
 }
 
 suite('TurboFileMutationStabilityStatic', () => {
@@ -303,7 +303,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const contract = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
 		const deletePath = block(service, 'private async deletePathCore', 'async deletePaths');
-		const deletePaths = block(service, 'async deletePaths', 'resolveRemoteAgent');
+		const deletePaths = block(service, 'async deletePaths', 'private async deletePathsCore');
 		const deleteManyBuilder = block(service, 'function buildPosixDeleteManyFromInputCommand', 'function buildPosixMoveManyIntoDirectoryFromInputCommand');
 		const deleteOneBuilder = block(service, 'function buildPosixDeleteCommand', 'function getMimeType');
 
