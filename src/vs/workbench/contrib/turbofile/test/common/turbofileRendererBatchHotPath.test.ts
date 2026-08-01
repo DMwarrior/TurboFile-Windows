@@ -131,4 +131,25 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(restore.includes('itemsById.get(item.id)'));
 		assert.ok(!restore.includes('items.find(candidate => candidate.id === item.id)'));
 	});
+
+	test('parallelizes SSH endpoint and secret preparation before transfers', () => {
+		const editor = readEditor();
+		const batchStart = editor.indexOf('private async transferItemsBatch');
+		const batch = editor.slice(batchStart, editor.indexOf('private async refreshTransferPanes', batchStart));
+		const itemStart = editor.indexOf('private async transferItem(');
+		const item = editor.slice(itemStart, editor.indexOf('private async transferItemsBatch', itemStart));
+		const optionsStart = editor.indexOf('private async getSshConnectionOptions');
+		const options = editor.slice(optionsStart, editor.indexOf('private async getSshConnectionOptionsFromDraft', optionsStart));
+
+		for (const transfer of [batch, item]) {
+			assert.ok(transfer.includes('const [sourceEndpoint, target'));
+			assert.ok(transfer.includes('await Promise.all(['));
+			assert.ok(transfer.includes('this.toTransferEndpoint(sourceDevice'));
+			assert.ok(transfer.includes('this.toTransferEndpoint(targetDevice'));
+		}
+		assert.ok(options.includes('const [password, privateKey, passphrase] = await Promise.all(['));
+		assert.ok(options.includes('this.deviceStore?.getPassword(device.id)'));
+		assert.ok(options.includes('this.deviceStore?.getPrivateKey(device.id)'));
+		assert.ok(options.includes('this.deviceStore?.getPassphrase(device.id)'));
+	});
 });

@@ -9741,8 +9741,10 @@ export class TurboFileEditor extends EditorPane {
 			? this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(options.task!, event))
 			: undefined;
 		try {
-			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, sourceItem.path);
-			const targetEndpoint = await this.toTransferEndpoint(targetDevice, targetPath);
+			const [sourceEndpoint, targetEndpoint] = await Promise.all([
+				this.toTransferEndpoint(sourceDevice, sourceItem.path),
+				this.toTransferEndpoint(targetDevice, targetPath)
+			]);
 			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItem);
 			const activeItem = options.task?.activeTransferItemIndex !== undefined ? options.task.transferItems?.[options.task.activeTransferItemIndex] : undefined;
 			const expectedBytes = sourceItem.directory
@@ -9815,8 +9817,10 @@ export class TurboFileEditor extends EditorPane {
 
 		const progressDisposable = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
 		try {
-			const sourceEndpoint = await this.toTransferEndpoint(sourceDevice, items[0].path!);
-			const targetDirectoryEndpoint = await this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path);
+			const [sourceEndpoint, targetDirectoryEndpoint] = await Promise.all([
+				this.toTransferEndpoint(sourceDevice, items[0].path!),
+				this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path)
+			]);
 			const expectedBytes = task.trackTotalBytes ? Math.max(0, task.totalBytes ?? 0) : 0;
 			const plannedStrategy = this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, items);
 			const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
@@ -13808,14 +13812,19 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async getSshConnectionOptions(device: TurboFileDevice): Promise<ITurboFileSshConnectionOptions> {
+		const [password, privateKey, passphrase] = await Promise.all([
+			this.deviceStore?.getPassword(device.id),
+			this.deviceStore?.getPrivateKey(device.id),
+			this.deviceStore?.getPassphrase(device.id)
+		]);
 		return {
 			host: device.host,
 			port: device.port,
 			username: device.username,
-			password: await this.deviceStore?.getPassword(device.id),
-			privateKey: await this.deviceStore?.getPrivateKey(device.id),
+			password,
+			privateKey,
 			privateKeyPath: device.privateKeyPath,
-			passphrase: await this.deviceStore?.getPassphrase(device.id)
+			passphrase
 		};
 	}
 

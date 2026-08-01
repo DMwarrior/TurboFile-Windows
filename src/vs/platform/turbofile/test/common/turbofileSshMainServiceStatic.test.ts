@@ -9,14 +9,14 @@ import * as path from 'path';
 
 function methodBlock(source: string, name: string, nextName: string): string {
 	const start = source.indexOf(name);
-	return source.slice(start, source.indexOf(nextName, start));
+	return source.slice(start, source.indexOf(nextName, start)).replace(/\r\n/g, '\n');
 }
 
 function functionBlock(source: string, name: string): string {
 	const start = source.indexOf(`function ${name}`);
 	assert.ok(start >= 0, `missing function ${name}`);
 	const end = source.indexOf('\nfunction ', start + 1);
-	return source.slice(start, end === -1 ? source.length : end);
+	return source.slice(start, end === -1 ? source.length : end).replace(/\r\n/g, '\n');
 }
 
 function numericProductConstant(source: string, name: string): number {
@@ -790,6 +790,165 @@ suite('TurboFileSshMainServiceStatic', () => {
 			directScpPostchecksValidation: true,
 			sizeHelpersPropagateCancellation: true,
 			cleanupIsShortAndUncancelable: true
+		});
+	});
+
+	test('bounds auto-fast single-file and directory route selection before any direct data attempt', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const transfer = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
+
+		assert.deepStrictEqual({
+			singleFileOnly: transfer.includes("sourceType === 'file'"),
+			directoryTarIncluded: transfer.includes("sourceType === 'directory'") && transfer.includes("firstAttempt?.protocol === 'tar'"),
+			autoOnly: transfer.includes("request.strategyHint !== 'direct'") && transfer.includes("request.strategyHint !== 'relay'"),
+			scpOnly: transfer.includes("firstAttempt?.protocol === 'scp'") && transfer.includes("firstAttempt.route === 'direct'"),
+			boundedDecision: transfer.includes('await this.resolveFastDirectScpRoute(effectiveRequest.source, effectiveRequest.target, fastDirectProtocol)'),
+			relaySkipsEveryDirectAttempt: transfer.includes("effectiveRequest = { ...effectiveRequest, strategyHint: 'relay' }") && transfer.includes('strategyHint: effectiveRequest.strategyHint'),
+			verifiedPlanKeepsOnlySelectedDirectProtocol: transfer.includes("attempts: plan.attempts.filter(attempt => attempt.route === 'relay' || (attempt.route === 'direct' && attempt.protocol === fastDirectProtocol))"),
+			passesVerifiedRoute: transfer.includes("attempt.route === 'direct' ? preverifiedDirectRoute : undefined"),
+			failedVerifiedRouteIsForgotten: transfer.includes("if (attempt.route === 'direct' && preverifiedDirectRoute && fastDirectProtocol) {")
+				&& transfer.includes('this.forgetDirectScpProbeRoute(effectiveRequest.source, effectiveRequest.target, fastDirectProtocol, preverifiedDirectRoute);')
+		}, {
+			singleFileOnly: true,
+			directoryTarIncluded: true,
+			autoOnly: true,
+			scpOnly: true,
+			boundedDecision: true,
+			relaySkipsEveryDirectAttempt: true,
+			verifiedPlanKeepsOnlySelectedDirectProtocol: true,
+			passesVerifiedRoute: true,
+			failedVerifiedRouteIsForgotten: true
+		});
+	});
+
+	test('bounds auto-fast SSH batch route selection before any direct data attempt', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
+		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
+		const batchAttempt = methodBlock(service, 'private async runSshToSshBatchTransferAttempt', 'private async runLocalNativeBatchTransfer');
+		const batchTar = methodBlock(service, 'private async tryBatchTarTransfer', 'private createRemoteBatchTarPlan');
+		const directTar = methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute');
+		const batchRelayTar = methodBlock(service, 'private async tryRelayBatchTarTransfer', 'private async runConcurrentBatchTransfer');
+		const singleRelayTar = methodBlock(service, 'private async tryTarRelayTransfer', 'private async tryStreamRelayTransfer');
+
+		assert.deepStrictEqual({
+			autoTarOnly: transferBatchCore.includes("request.strategyHint !== 'direct'")
+				&& transferBatchCore.includes("request.strategyHint !== 'relay'")
+				&& transferBatchCore.includes("initialAttempt?.protocol === 'tar'")
+				&& transferBatchCore.includes("initialAttempt.route === 'direct'"),
+			boundedDecision: transferBatchCore.includes("await this.resolveFastDirectScpRoute(request.source, request.targetDirectory, 'tar')"),
+			relaySkipsEveryDirectAttempt: transferBatchCore.includes("effectiveRequest = { ...request, strategyHint: 'relay' }")
+				&& transferBatchCore.includes('this.runSshToSshBatchTransferPlan(effectiveRequest,'),
+			verifiedPlanKeepsOnlySelectedDirectProtocol: batchPlan.includes("attempts: plan.attempts.filter(attempt => attempt.route === 'relay' || (attempt.route === 'direct' && attempt.protocol === directProtocol))"),
+			passesVerifiedRoute: batchPlan.includes("attempt.route === 'direct' ? preverifiedDirectRoute : undefined")
+				&& batchAttempt.includes('preverifiedDirectRoute?: TurboFileDirectSshRoute')
+				&& batchAttempt.includes("}, items, 'copy', expectedBytes, startedAt, true, preverifiedDirectRoute);"),
+			directTarSkipsLegacyVerification: batchTar.includes('? await this.tryDirectBatchTarTransferRoute(request, items, plan, bytes, startedAt, preverifiedDirectRoute)')
+				&& batchTar.includes(': await this.tryDirectBatchTarTransfer(request, items, plan, bytes, startedAt);'),
+			singleDirectoryTarSkipsLegacyVerification: directTar.includes('preverifiedDirectRoute?: TurboFileDirectSshRoute')
+				&& directTar.includes('? this.tryDirectTarTransferRoute(request, startedAt, bytes, preverifiedDirectRoute)'),
+			failedVerifiedRouteIsForgotten: batchPlan.includes("if (attempt.route === 'direct' && preverifiedDirectRoute) {")
+				&& batchPlan.includes("this.forgetDirectScpProbeRoute(request.source, request.targetDirectory, 'tar', preverifiedDirectRoute);"),
+			parallelRelayConnections: batchRelayTar.includes('await Promise.all([')
+				&& batchRelayTar.includes('this.connect(sourceConfigResult.config, request.progressId).then(')
+				&& batchRelayTar.includes('this.connect(targetConfigResult.config, request.progressId).then(')
+				&& batchRelayTar.includes('acceptRelayClients = false;')
+				&& singleRelayTar.includes('await Promise.all([')
+				&& singleRelayTar.includes('this.connect(sourceConfigResult.config, request.progressId).then(')
+				&& singleRelayTar.includes('this.connect(targetConfigResult.config, request.progressId).then(')
+				&& singleRelayTar.includes('acceptRelayClients = false;')
+		}, {
+			autoTarOnly: true,
+			boundedDecision: true,
+			relaySkipsEveryDirectAttempt: true,
+			verifiedPlanKeepsOnlySelectedDirectProtocol: true,
+			passesVerifiedRoute: true,
+			directTarSkipsLegacyVerification: true,
+			singleDirectoryTarSkipsLegacyVerification: true,
+			failedVerifiedRouteIsForgotten: true,
+			parallelRelayConnections: true
+		});
+	});
+
+	test('uses protocol-matched isolated route probes with positive-only credential-aware caching', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const resolver = methodBlock(service, 'private async resolveFastDirectScpRoute', 'private async runDirectScpProbePair');
+		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
+		const prepareProbe = methodBlock(service, 'private async createEmptyRemoteProbeFile', 'private async probeDirectScpRoute');
+		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
+		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
+		const cleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
+		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
+		const failedCredentialCleanup = methodBlock(service, 'private scheduleRemoteScpCredentialCleanupRetry', 'private async tryDirectSftpTransfer');
+		const cachedRoute = methodBlock(service, 'private getCachedDirectScpProbeRoute', 'private rememberDirectScpProbeRoute');
+		const command = functionBlock(service, 'buildDirectScpProbeCommand');
+		const tarCommand = functionBlock(service, 'buildDirectTarProbeCommand');
+		const connectionKey = functionBlock(service, 'getDirectScpProbeConnectionKey');
+		const pairKey = functionBlock(service, 'getDirectScpProbePairKey');
+		const routeKey = functionBlock(service, 'getDirectScpProbeRouteKey');
+
+		assert.deepStrictEqual({
+			foregroundWaitIs800ms: resolver.includes('return waitForTurboFileDirectRouteProbe('),
+			backgroundHasIndependentLimit: pairProbe.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && pairProbe.includes('coordinateTurboFileDirectRouteProbe'),
+			reusesBothPaneSessions: pairProbe.includes('this.getReusableDirectorySftpSession(connection)')
+				&& pairProbe.includes('getReusableProbeSession(source.connection)')
+				&& pairProbe.includes('getReusableProbeSession(target.connection)'),
+			restoresLateSessionIdleTimers: pairProbe.includes('this.touchDirectorySftpSession(session.key, session.generation);'),
+			isolatedTemporaryPaths: pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-source') && pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-push') && pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-pull'),
+			latePreparationIsUnlinked: prepareProbe.includes("await this.execRemote(client, `umask 077; : > ${quotePosixShellArg(path)}`")
+				&& prepareProbe.includes("this.execRemote(client, `rm -f ${quotePosixShellArg(path)}`"),
+			realScpCommand: command.includes('buildDirectScpCommand(') && command.includes('buildSshpassPrefix(remote.password)') && !command.includes('buildDirectScpSshCommand('),
+			matchedTarCommand: routeProbe.includes("protocol === 'scp'")
+				&& routeProbe.includes('buildDirectTarProbeCommand(remoteConnection, credential.identityPath, marker)')
+				&& tarCommand.includes('buildDirectScpSshCommand(')
+				&& tarCommand.includes('buildDirectTarProgressPrerequisiteCommand()')
+				&& tarCommand.includes('command -v bash')
+				&& tarCommand.includes('command -v tar'),
+			noBusinessPaths: !command.includes('request.source.path') && !command.includes('request.target.path'),
+			privateKeyParity: routeProbe.includes('prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)') && routeProbe.includes('credential.identityPath'),
+			boundedCredentialSetup: routeProbe.includes('const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && service.includes('await this.execRemote(client, setupCommand, { progressId, token, timeoutMs });'),
+			cancelableExec: routeProbe.includes('execRemoteBytes(executorSession.client, command, { timeoutMs: remainingMs, token })'),
+			credentialCleanupRetries: credentialCleanup.includes('cleanup();')
+				&& credentialCleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
+			failedCredentialSetupCleanupRetries: prepareCredential.includes('this.scheduleRemoteScpCredentialCleanupRetry(client, cleanupCommand);')
+				&& prepareCredential.includes('await this.execRemote(client, cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);')
+				&& failedCredentialCleanup.includes('setTimeout(() => {')
+				&& failedCredentialCleanup.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS'),
+			exactCleanup: cleanup.includes('quotePosixShellArg(sourceProbePath)')
+				&& cleanup.includes('quotePosixShellArg(sourcePushTargetPath)')
+				&& cleanup.includes('quotePosixShellArg(targetPullTargetPath)')
+				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)')
+				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
+			credentialAwareKey: connectionKey.includes("createHash('sha256')") && connectionKey.includes('connection.password') && connectionKey.includes('connection.privateKey') && connectionKey.includes('connection.passphrase'),
+			directionalSingleFlight: pairKey.includes('source)}=>${getDirectScpProbeConnectionKey(target)}:${protocol}') && !pairKey.includes('.sort()'),
+			protocolSpecificOperationCache: routeKey.includes(':${protocol}:${route}') && routeKey.includes('DirectRouteProbeProtocol'),
+			cacheRequiresLiveProbeSessions: cachedRoute.includes('!entry.sourceSession.closed')
+				&& cachedRoute.includes('!entry.targetSession.closed')
+				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.sourceSession.key, entry.sourceSession.generation)')
+				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.targetSession.key, entry.targetSession.generation)'),
+			positiveOnly: service.includes('directScpProbeAvailableAt.set(') && !service.includes('directScpProbeUnavailable')
+				&& !service.includes('prewarmSshToSshDirectRoute')
+		}, {
+			foregroundWaitIs800ms: true,
+			backgroundHasIndependentLimit: true,
+			reusesBothPaneSessions: true,
+			restoresLateSessionIdleTimers: true,
+			isolatedTemporaryPaths: true,
+			latePreparationIsUnlinked: true,
+			realScpCommand: true,
+			matchedTarCommand: true,
+			noBusinessPaths: true,
+			privateKeyParity: true,
+			boundedCredentialSetup: true,
+			cancelableExec: true,
+			credentialCleanupRetries: true,
+			failedCredentialSetupCleanupRetries: true,
+			exactCleanup: true,
+			credentialAwareKey: true,
+			directionalSingleFlight: true,
+			protocolSpecificOperationCache: true,
+			cacheRequiresLiveProbeSessions: true,
+			positiveOnly: true
 		});
 	});
 
