@@ -110,9 +110,9 @@ const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
 const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
-const DIRECT_SSH_CONNECT_TIMEOUT_MS = 5 * 1000;
 const DIRECT_SSH_READY_MARKER = '__TURBOFILE_DIRECT_READY__';
 const DIRECT_SCP_PROBE_AVAILABLE_TTL_MS = 30 * 1000;
+const DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS = 30 * 1000;
 const DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS = 5 * 1000;
 const DIRECT_SCP_PROBE_CLEANUP_DELAY_MS = 1000;
 const DIRECT_TRANSFER_STALL_TIMEOUT_MS = 10 * 1000;
@@ -261,15 +261,26 @@ interface IRemoteDirectorySftpSession {
 	closed: boolean;
 }
 
+interface IRemoteDirectorySftpSessionLease {
+	readonly session: IRemoteDirectorySftpSession;
+	release(): void;
+}
+
 interface IDirectScpProbeCacheEntry {
 	readonly availableAt: number;
 	readonly sourceSession: IRemoteDirectorySftpSession;
 	readonly targetSession: IRemoteDirectorySftpSession;
 }
 
+interface IDirectScpProbeUnavailableCacheEntry {
+	readonly unavailableAt: number;
+	readonly sourceSession: IRemoteDirectorySftpSession;
+	readonly targetSession: IRemoteDirectorySftpSession;
+}
+
 type IDirectScpProbeOutcome =
 	| { readonly kind: 'direct'; readonly route: TurboFileDirectSshRoute; readonly sourceSession: IRemoteDirectorySftpSession; readonly targetSession: IRemoteDirectorySftpSession }
-	| { readonly kind: 'relay' };
+	| { readonly kind: 'relay'; readonly sourceSession?: IRemoteDirectorySftpSession; readonly targetSession?: IRemoteDirectorySftpSession };
 
 type DirectRouteProbeProtocol = 'scp' | 'tar';
 
@@ -545,12 +556,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly directorySftpSessions = new Map<string, Promise<IRemoteDirectorySftpSession>>();
 	private readonly directorySftpSessionGenerations = new TurboFileKeyedGeneration();
 	private readonly directorySftpIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly directorySftpSessionLeaseCounts = new Map<string, { generation: number; count: number }>();
 	private readonly remoteDirectoryListingCache = new Map<string, { expiresAt: number; listing: ITurboFileDirectoryListing }>();
 	private readonly remoteDirectoryListingGenerations = new TurboFileKeyedGeneration();
 	private readonly remoteImageToolCache = new Map<string, { checkedAt: number; tool: 'magick' | 'convert' | undefined }>();
 	private readonly remoteImageToolPending = new Map<string, Promise<'magick' | 'convert' | undefined>>();
 	private readonly directSshRouteCache = new Map<string, TurboFileDirectSshRoute>();
 	private readonly directScpProbeAvailableAt = new Map<string, IDirectScpProbeCacheEntry>();
+	private readonly directScpProbeUnavailableAt = new Map<string, IDirectScpProbeUnavailableCacheEntry>();
 	private readonly directScpProbePending = new Map<string, Promise<void>>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private readonly trashRootsByDeviceIdentity = new Map<string, Set<string>>();
@@ -912,6 +925,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	async normalizeLocalWindowsPaths(paths: readonly string[]): Promise<string[]> {
 		return normalizeWindowsTransferPaths(paths, resolveLocalWindowsRealPath);
+	}
+
+	async prepareTransferPair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): Promise<void> {
+		if (source.kind !== 'ssh' || target.kind !== 'ssh' || !source.connection || !target.connection || isSameSshConnection(source.connection, target.connection)) {
+			return;
+		}
+
+		await Promise.all([
+			this.ensureWarmDirectorySftpSession(source.connection),
+			this.ensureWarmDirectorySftpSession(target.connection)
+		]);
+
+		const protocols: DirectRouteProbeProtocol[] = ['scp'];
+		if (source.supportsTar !== false && target.supportsTar !== false) {
+			protocols.push('tar');
+		}
+		await Promise.all(protocols.map(protocol => this.getOrStartDirectScpProbePair(source, target, protocol)));
 	}
 
 	async transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult> {
@@ -3241,12 +3271,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
 			throw new Error('Batch direct rsync route is missing SSH connection details.');
 		}
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let lastActivityAt = Date.now();
 		const markActivity = (): void => {
 			lastActivityAt = Date.now();
@@ -3314,8 +3340,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			throw error;
 		} finally {
-			unregisterCancel();
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -3682,12 +3707,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (!executorEndpoint.connection || !remoteEndpoint.connection || !request.targetDirectory.connection) {
 			throw new Error('Direct batch tar route is missing SSH connection details.');
 		}
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-
-		const client = await this.connectDirectSsh(executorConfigResult.config);
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let credential: IRemoteScpCredential | undefined;
 		let lastActivityAt = Date.now();
 		try {
@@ -3729,7 +3750,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -3737,42 +3758,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.kind !== 'ssh' || request.targetDirectory.kind !== 'ssh' || !request.source.connection || !request.targetDirectory.connection) {
 			return undefined;
 		}
-		const [sourceConfigResult, targetConfigResult] = await Promise.all([
-			this.createConnectConfig(request.source.connection),
-			this.createConnectConfig(request.targetDirectory.connection)
-		]);
-		if (!sourceConfigResult.ok || !targetConfigResult.ok) {
-			return undefined;
-		}
-
-		let sourceClient: ISSHClient | undefined;
-		let targetClient: ISSHClient | undefined;
-		let acceptRelayClients = true;
+		const [sourceLease, targetLease] = await this.acquireTransferSessionPair(request.source, request.targetDirectory, request.progressId);
+		const sourceClient = sourceLease.session.client;
+		const targetClient = targetLease.session.client;
+		let sourceExecStream: ISSHExecStream | undefined;
+		let targetExecStream: ISSHExecStream | undefined;
 		let transferredBytes = 0;
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
-			sourceClient?.end();
-			targetClient?.end();
+			sourceExecStream?.destroy?.();
+			targetExecStream?.destroy?.();
 		});
 		try {
-			await Promise.all([
-				this.connect(sourceConfigResult.config, request.progressId).then(client => {
-					if (!acceptRelayClients) {
-						client.end();
-						throw new Error('Batch relay connection was abandoned.');
-					}
-					sourceClient = client;
-				}),
-				this.connect(targetConfigResult.config, request.progressId).then(client => {
-					if (!acceptRelayClients) {
-						client.end();
-						throw new Error('Batch relay connection was abandoned.');
-					}
-					targetClient = client;
-				})
-			]);
-			if (!sourceClient || !targetClient) {
-				throw new Error('Batch relay connections were not established.');
-			}
 			this.throwIfTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, expectedBytes, 'prepare', 'Preparing batch tar relay.', true, { strategy: 'tar-relay', route: 'relay', completedItems: 0, totalItems: items.length });
 			const sourcePlan = createRemoteBatchTarSourcePlan(plan.parentPath, plan.names);
@@ -3794,9 +3790,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				transferredBytes += Math.max(0, delta);
 				this.fireTransferProgress(request, expectedBytes > 0 ? Math.min(transferredBytes, expectedBytes) : transferredBytes, expectedBytes, 'relay-upload', 'Batch tar relay in progress.', false, { strategy: 'tar-relay', route: 'relay', completedItems: 0, totalItems: items.length });
 			};
+			const [sourceStream, targetStream] = await Promise.all([
+				this.openRemoteCommandStream(sourceClient, sourcePlan.command, 'batch tar relay create').then(result => {
+					sourceExecStream = result.stream;
+					return result;
+				}),
+				this.openRemoteCommandStream(targetClient, targetCommand, 'batch tar relay extract', true).then(result => {
+					targetExecStream = result.stream;
+					return result;
+				})
+			]);
 			this.markTransferDataStarted(request.progressId);
-			const sourceStream = await this.openRemoteCommandStream(sourceClient, sourcePlan.command, 'batch tar relay create');
-			const targetStream = await this.openRemoteCommandStream(targetClient, targetCommand, 'batch tar relay extract', true);
 			const archivePipeline = pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
 			const inputWrite = sourcePlan.input
 				? writeInputToWritableStream(sourceStream.stream, sourcePlan.input, 'batch tar relay path list')
@@ -3807,10 +3811,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.fireTransferProgress(request, bytes, expectedBytes, 'complete', 'Batch tar relay completed.', true, { strategy: 'tar-relay', route: 'relay', completedItems: items.length, totalItems: items.length });
 			return this.createBatchTransferResult(true, 'tar-relay', bytes, 'Batch tar relay completed.', items.length, 0, [], startedAt, request.progressId);
 		} finally {
-			acceptRelayClients = false;
 			unregisterCancel();
-			sourceClient?.end();
-			targetClient?.end();
+			sourceExecStream?.destroy?.();
+			targetExecStream?.destroy?.();
+			sourceLease.release();
+			targetLease.release();
 		}
 	}
 
@@ -5787,12 +5792,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Direct tar route is missing SSH connection details.');
 		}
 
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-
-		const client = await this.connectDirectSsh(executorConfigResult.config);
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let credential: IRemoteScpCredential | undefined;
 		let lastActivityAt = Date.now();
 		const markActivity = (): void => {
@@ -5840,7 +5841,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -5872,13 +5873,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (!executorEndpoint.connection || !remoteEndpoint.connection) {
 			throw new Error('Direct rsync route is missing SSH connection details.');
 		}
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-
-		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let lastActivityAt = Date.now();
 		const markActivity = (): void => {
 			lastActivityAt = Date.now();
@@ -5892,7 +5888,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const sshTransport = buildOptimizedRsyncSshCommand(remote.port || 22, !!remote.password, sshBinary);
 			const sshpassPrefix = buildSshpassPrefix(remote.password);
 
-			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 			const sourceIsDirectory = sourceType === 'directory';
 			let bytes = 0;
 
@@ -5928,8 +5924,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			throw error;
 		} finally {
-			unregisterCancel();
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -5942,28 +5937,47 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (cachedRoute) {
 			return { kind: 'direct', route: cachedRoute };
 		}
-
-		const pendingKey = getDirectScpProbePairKey(source.connection, target.connection, protocol);
-		let pending = this.directScpProbePending.get(pendingKey);
-		if (!pending) {
-			let started!: Promise<void>;
-			started = this.runDirectScpProbePair(source, target, protocol).then(outcome => {
-				if (outcome.kind === 'direct') {
-					this.rememberDirectScpProbeRoute(source.connection!, target.connection!, protocol, outcome.route, outcome.sourceSession, outcome.targetSession);
-				}
-			}).catch(() => undefined).finally(() => {
-				if (this.directScpProbePending.get(pendingKey) === started) {
-					this.directScpProbePending.delete(pendingKey);
-				}
-			});
-			pending = started;
-			this.directScpProbePending.set(pendingKey, pending);
+		if (this.getCachedDirectScpProbeUnavailable(source.connection, target.connection, protocol)) {
+			return { kind: 'relay' };
 		}
+
+		const pending = this.getOrStartDirectScpProbePair(source, target, protocol);
 
 		return waitForTurboFileDirectRouteProbe(
 			pending,
 			() => this.getCachedDirectScpProbeRoute(source.connection!, target.connection!, protocol)
 		);
+	}
+
+	private getOrStartDirectScpProbePair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, protocol: DirectRouteProbeProtocol): Promise<void> {
+		if (!source.connection || !target.connection) {
+			return Promise.resolve();
+		}
+		if (this.getCachedDirectScpProbeRoute(source.connection, target.connection, protocol)
+			|| this.getCachedDirectScpProbeUnavailable(source.connection, target.connection, protocol)) {
+			return Promise.resolve();
+		}
+
+		const pendingKey = getDirectScpProbePairKey(source.connection, target.connection, protocol);
+		const existing = this.directScpProbePending.get(pendingKey);
+		if (existing) {
+			return existing;
+		}
+
+		let started!: Promise<void>;
+		started = this.runDirectScpProbePair(source, target, protocol).then(outcome => {
+			if (outcome.kind === 'direct') {
+				this.rememberDirectScpProbeRoute(source.connection!, target.connection!, protocol, outcome.route, outcome.sourceSession, outcome.targetSession);
+			} else if (outcome.sourceSession && outcome.targetSession) {
+				this.rememberDirectScpProbeUnavailable(source.connection!, target.connection!, protocol, outcome.sourceSession, outcome.targetSession);
+			}
+		}).catch(() => undefined).finally(() => {
+			if (this.directScpProbePending.get(pendingKey) === started) {
+				this.directScpProbePending.delete(pendingKey);
+			}
+		});
+		this.directScpProbePending.set(pendingKey, started);
+		return started;
 	}
 
 	private async runDirectScpProbePair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, protocol: DirectRouteProbeProtocol): Promise<IDirectScpProbeOutcome> {
@@ -5999,11 +6013,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			const prepareBudget = Math.max(1, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS - (performance.now() - startedAt));
 			if (protocol === 'scp' && !await this.createEmptyRemoteProbeFile(sourceSession.client, sourceProbePath, prepareBudget)) {
-				return { kind: 'relay' };
+				return { kind: 'relay', sourceSession, targetSession };
 			}
 			const remainingMs = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS - (performance.now() - startedAt));
 			if (remainingMs <= 0) {
-				return { kind: 'relay' };
+				return { kind: 'relay', sourceSession, targetSession };
 			}
 
 			const decision = await coordinateTurboFileDirectRouteProbe({
@@ -6024,9 +6038,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			});
 			return decision.kind === 'direct'
 				? { ...decision, sourceSession, targetSession }
-				: decision;
+				: { ...decision, sourceSession, targetSession };
 		} catch {
-			return { kind: 'relay' };
+			return { kind: 'relay', sourceSession, targetSession };
 		} finally {
 			this.scheduleDirectScpProbeCleanup(sourceSession, targetSession, sourceProbePath, sourcePushTargetPath, targetPullTargetPath);
 		}
@@ -6149,6 +6163,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return undefined;
 	}
 
+	private getCachedDirectScpProbeUnavailable(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions, protocol: DirectRouteProbeProtocol): boolean {
+		const key = getDirectScpProbePairKey(source, target, protocol);
+		const entry = this.directScpProbeUnavailableAt.get(key);
+		if (!entry) {
+			return false;
+		}
+		const sessionsAreCurrent = !entry.sourceSession.closed
+			&& !entry.targetSession.closed
+			&& this.directorySftpSessionGenerations.isCurrent(entry.sourceSession.key, entry.sourceSession.generation)
+			&& this.directorySftpSessionGenerations.isCurrent(entry.targetSession.key, entry.targetSession.generation);
+		if (sessionsAreCurrent && Date.now() - entry.unavailableAt <= DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS) {
+			return true;
+		}
+		this.directScpProbeUnavailableAt.delete(key);
+		return false;
+	}
+
 	private rememberDirectScpProbeRoute(
 		source: ITurboFileSshConnectionOptions,
 		target: ITurboFileSshConnectionOptions,
@@ -6157,8 +6188,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		sourceSession: IRemoteDirectorySftpSession,
 		targetSession: IRemoteDirectorySftpSession
 	): void {
-		this.directScpProbeAvailableAt.set(getDirectScpProbeRouteKey(source, target, protocol, route), { availableAt: Date.now(), sourceSession, targetSession });
+		const now = Date.now();
+		const reverseRoute = invertDirectSshRoute(route);
+		this.directScpProbeUnavailableAt.delete(getDirectScpProbePairKey(source, target, protocol));
+		this.directScpProbeUnavailableAt.delete(getDirectScpProbePairKey(target, source, protocol));
+		this.directScpProbeAvailableAt.set(getDirectScpProbeRouteKey(source, target, protocol, route), { availableAt: now, sourceSession, targetSession });
+		this.directScpProbeAvailableAt.set(getDirectScpProbeRouteKey(target, source, protocol, reverseRoute), { availableAt: now, sourceSession: targetSession, targetSession: sourceSession });
 		this.directSshRouteCache.set(getDirectSshRouteCacheKey(source, target), route);
+		this.directSshRouteCache.set(getDirectSshRouteCacheKey(target, source), reverseRoute);
+	}
+
+	private rememberDirectScpProbeUnavailable(
+		source: ITurboFileSshConnectionOptions,
+		target: ITurboFileSshConnectionOptions,
+		protocol: DirectRouteProbeProtocol,
+		sourceSession: IRemoteDirectorySftpSession,
+		targetSession: IRemoteDirectorySftpSession
+	): void {
+		const unavailableAt = Date.now();
+		this.directScpProbeUnavailableAt.set(getDirectScpProbePairKey(source, target, protocol), { unavailableAt, sourceSession, targetSession });
+		this.directScpProbeUnavailableAt.set(getDirectScpProbePairKey(target, source, protocol), { unavailableAt, sourceSession: targetSession, targetSession: sourceSession });
 	}
 
 	private forgetDirectScpProbeRoute(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, protocol: DirectRouteProbeProtocol, route: TurboFileDirectSshRoute): void {
@@ -6241,14 +6290,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return 'indeterminate';
 		}
 
-		let executorConfig: ConnectConfig;
+		let executorLease: IRemoteDirectorySftpSessionLease;
 		try {
-			const configResult = await this.createConnectConfig(executorEndpoint.connection);
-			if (!configResult.ok) {
-				this.throwIfTransferCanceled(progressId);
-				return 'indeterminate';
-			}
-			executorConfig = configResult.config;
+			executorLease = await this.acquireTransferSession(executorEndpoint, progressId);
 		} catch (error) {
 			if (error instanceof TurboFileTransferCanceledError) {
 				throw error;
@@ -6256,17 +6300,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.throwIfTransferCanceled(progressId);
 			return 'indeterminate';
 		}
-
-		let client: ISSHClient;
-		try {
-			client = await this.connectDirectSsh(executorConfig, progressId);
-		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError) {
-				throw error;
-			}
-			this.throwIfTransferCanceled(progressId);
-			return 'indeterminate';
-		}
+		const client = executorLease.session.client;
 
 		let credential: IRemoteScpCredential | undefined;
 		try {
@@ -6302,7 +6336,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -6380,12 +6414,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Direct SCP route is missing SSH connection details.');
 		}
 
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-
-		const client = await this.connectDirectSsh(executorConfigResult.config);
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let credential: IRemoteScpCredential | undefined;
 		let stopGrowthTiming: () => void = () => undefined;
 		let transferredBytes = 0;
@@ -6443,7 +6473,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -6521,23 +6551,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw new Error('Direct SFTP route is missing SSH connection details.');
 		}
 
-		const executorConfigResult = await this.createConnectConfig(executorEndpoint.connection);
-		if (!executorConfigResult.ok) {
-			throw new Error(executorConfigResult.message);
-		}
-
 		const remote = remoteEndpoint.connection;
 		const remoteUserHost = `${remote.username}@${remote.host}`;
 		const sshpassPrefix = buildSshpassPrefix(remote.password);
 		const sftpCommand = `${sshpassPrefix}${buildOptimizedSftpCommand(remote.port || 22, !!remote.password)} ${quotePosixShellArg(remoteUserHost)}`;
 		const sshTransport = buildCompatibleSshCommand(remote.port || 22, !!remote.password);
-		const client = await this.connectDirectSsh(executorConfigResult.config);
-		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => client.end());
+		const executorLease = await this.acquireTransferSession(executorEndpoint, request.progressId);
+		const client = executorLease.session.client;
 		let stopGrowthTiming: () => void = () => undefined;
 		let transferredBytes = 0;
 		try {
 			this.throwIfTransferCanceled(request.progressId);
-			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
+			const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path))).catch(() => 'unknown' as TurboFileFileType);
 			if (sourceType !== 'file' && sourceType !== 'directory') {
 				throw new Error(`Unsupported direct SFTP source type: ${sourceType}.`);
 			}
@@ -6562,7 +6587,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const transferCommand = `printf %s ${quotePosixShellArg(batch)} | ${sftpCommand}`;
 
 			this.throwIfTransferCanceled(request.progressId);
-			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS });
+			await this.execRemote(client, mkdirCommand, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId: request.progressId });
 			this.throwIfTransferCanceled(request.progressId);
 			stopGrowthTiming = sourceType === 'directory'
 				? this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, currentBytes => {
@@ -6574,7 +6599,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					this.fireTransferProgress(request, currentBytes, bytes, 'transfer', 'Direct SFTP transfer in progress.', false, { strategy: 'sftp-direct', route });
 				});
 			this.markTransferDataStarted(request.progressId);
-			await this.execRemote(client, transferCommand);
+			await this.execRemote(client, transferCommand, { progressId: request.progressId });
 			this.throwIfTransferCanceled(request.progressId);
 			if (sourceType === 'file' && bytes > 0) {
 				const targetSize = await this.getRemotePathSizeByCommand(request.target).catch(() => bytes);
@@ -6593,8 +6618,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			throw error;
 		} finally {
 			stopGrowthTiming();
-			unregisterCancel();
-			client.end();
+			executorLease.release();
 		}
 	}
 
@@ -6738,51 +6762,34 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		const bytes = Math.max(0, request.expectedBytes ?? 0);
 
-		const [sourceConfigResult, targetConfigResult] = await Promise.all([
-			this.createConnectConfig(request.source.connection),
-			this.createConnectConfig(request.target.connection)
-		]);
-		if (!sourceConfigResult.ok || !targetConfigResult.ok) {
-			return undefined;
-		}
-
-		let sourceClient: ISSHClient | undefined;
-		let targetClient: ISSHClient | undefined;
-		let acceptRelayClients = true;
+		const [sourceLease, targetLease] = await this.acquireTransferSessionPair(request.source, request.target, request.progressId);
+		const sourceClient = sourceLease.session.client;
+		const targetClient = targetLease.session.client;
+		let sourceExecStream: ISSHExecStream | undefined;
+		let targetExecStream: ISSHExecStream | undefined;
 		let transferredBytes = 0;
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
-			sourceClient?.end();
-			targetClient?.end();
+			sourceExecStream?.destroy?.();
+			targetExecStream?.destroy?.();
 		});
 		try {
-			await Promise.all([
-				this.connect(sourceConfigResult.config, request.progressId).then(client => {
-					if (!acceptRelayClients) {
-						client.end();
-						throw new Error('Tar relay connection was abandoned.');
-					}
-					sourceClient = client;
-				}),
-				this.connect(targetConfigResult.config, request.progressId).then(client => {
-					if (!acceptRelayClients) {
-						client.end();
-						throw new Error('Tar relay connection was abandoned.');
-					}
-					targetClient = client;
-				})
-			]);
-			if (!sourceClient || !targetClient) {
-				throw new Error('Tar relay connections were not established.');
-			}
 			this.throwIfTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing tar relay.', true, { strategy: 'tar-relay', route: 'relay' });
 			const onArchiveDelta = (delta: number): void => {
 				transferredBytes += Math.max(0, delta);
 				this.fireTransferProgress(request, bytes > 0 ? Math.min(transferredBytes, bytes) : transferredBytes, bytes, 'relay-upload', 'Tar relay transfer in progress.', false, { strategy: 'tar-relay', route: 'relay' });
 			};
+			const [sourceStream, targetStream] = await Promise.all([
+				this.openRemoteCommandStream(sourceClient, buildTarCreateFromDirectoryCommand(request.source.path), 'tar relay create').then(result => {
+					sourceExecStream = result.stream;
+					return result;
+				}),
+				this.openRemoteCommandStream(targetClient, buildTarExtractToExactDirectoryCommand(request.target.path), 'tar relay extract', true).then(result => {
+					targetExecStream = result.stream;
+					return result;
+				})
+			]);
 			this.markTransferDataStarted(request.progressId);
-			const sourceStream = await this.openRemoteCommandStream(sourceClient, buildTarCreateFromDirectoryCommand(request.source.path), 'tar relay create');
-			const targetStream = await this.openRemoteCommandStream(targetClient, buildTarExtractToExactDirectoryCommand(request.target.path), 'tar relay extract', true);
 			await pipeline(sourceStream.stream as unknown as NodeJS.ReadableStream, createProgressPassThrough(onArchiveDelta), targetStream.stream as unknown as NodeJS.WritableStream);
 			await sourceStream.close;
 			await targetStream.close;
@@ -6803,10 +6810,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			throw new Error(`Tar relay failed: ${formatTransferError(error)}`);
 		} finally {
-			acceptRelayClients = false;
 			unregisterCancel();
-			sourceClient?.end();
-			targetClient?.end();
+			sourceExecStream?.destroy?.();
+			targetExecStream?.destroy?.();
+			sourceLease.release();
+			targetLease.release();
 		}
 	}
 
@@ -6818,21 +6826,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return undefined;
 		}
 
-		const sourceConfigResult = await this.createConnectConfig(request.source.connection);
-		const targetConfigResult = await this.createConnectConfig(request.target.connection);
-		if (!sourceConfigResult.ok || !targetConfigResult.ok) {
-			return undefined;
-		}
-
-		let sourceClient: ISSHClient | undefined;
-		let targetClient: ISSHClient | undefined;
-		let sourceSftp: ISFTPWrapper | undefined;
-		let targetSftp: ISFTPWrapper | undefined;
+		let sourceLease: IRemoteDirectorySftpSessionLease | undefined;
+		let targetLease: IRemoteDirectorySftpSessionLease | undefined;
 		try {
-			sourceClient = await this.connect(sourceConfigResult.config);
-			targetClient = await this.connect(targetConfigResult.config);
-			sourceSftp = await this.openSftp(sourceClient);
-			targetSftp = await this.openSftp(targetClient);
+			[sourceLease, targetLease] = await this.acquireTransferSessionPair(request.source, request.target, request.progressId);
+			const sourceSftp = sourceLease.session.sftp;
+			const targetSftp = targetLease.session.sftp;
 			this.throwIfTransferCanceled(request.progressId);
 
 			const sourceType = request.sourceType ?? getFileTypeFromStats(await this.remoteStat(sourceSftp, request.source.path));
@@ -6840,26 +6839,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return undefined;
 			}
 
-			const sourceStat = await this.remoteStat(sourceSftp, request.source.path);
-			const bytes = sourceStat.size;
+			const bytes = Math.max(0, request.expectedBytes ?? 0) || (await this.remoteStat(sourceSftp, request.source.path)).size;
 			const totalBytes = bytes * 2;
 			this.fireTransferProgress(request, 0, totalBytes, 'prepare', 'Preparing SFTP parallel relay.', true, { strategy: 'sftp-relay' });
 			await this.ensureRemoteDirectory(targetSftp, getRemoteParentPath(request.target.path));
-			const unregisterCancel = this.registerTransferCancelHandler(request.progressId, () => {
-				sourceSftp?.end();
-				targetSftp?.end();
-				sourceClient?.end();
-				targetClient?.end();
-			});
 			let streamedBytes = 0;
-			try {
-				await this.relayRemoteFileInParallel(sourceSftp, targetSftp, request.source.path, request.target.path, bytes, delta => {
-					streamedBytes += delta;
-					this.fireTransferProgress(request, Math.min(streamedBytes * 2, totalBytes), totalBytes, 'relay-upload', 'Parallel SFTP relay in progress.', false, { strategy: 'sftp-relay' });
-				}, request.progressId);
-			} finally {
-				unregisterCancel();
-			}
+			await this.relayRemoteFileInParallel(sourceSftp, targetSftp, request.source.path, request.target.path, bytes, delta => {
+				streamedBytes += delta;
+				this.fireTransferProgress(request, Math.min(streamedBytes * 2, totalBytes), totalBytes, 'relay-upload', 'Parallel SFTP relay in progress.', false, { strategy: 'sftp-relay' });
+			}, request.progressId);
 			this.throwIfTransferCanceled(request.progressId);
 			const targetStat = await this.remoteStat(targetSftp, request.target.path).catch(() => undefined);
 			if (!targetStat || targetStat.size !== bytes) {
@@ -6873,10 +6861,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			return undefined;
 		} finally {
-			sourceSftp?.end();
-			targetSftp?.end();
-			sourceClient?.end();
-			targetClient?.end();
+			sourceLease?.release();
+			targetLease?.release();
 		}
 	}
 
@@ -7116,13 +7102,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
-	private connectDirectSsh(config: ConnectConfig, progressId?: string): Promise<ISSHClient> {
-		const readyTimeout = typeof config.readyTimeout === 'number'
-			? Math.min(config.readyTimeout, DIRECT_SSH_CONNECT_TIMEOUT_MS)
-			: DIRECT_SSH_CONNECT_TIMEOUT_MS;
-		return this.connect({ ...config, readyTimeout }, progressId);
-	}
-
 	private async getDirectorySftpSession(options: ITurboFileSshConnectionOptions, config: ConnectConfig): Promise<IRemoteDirectorySftpSession> {
 		const key = this.getDirectorySftpSessionKey(options);
 		while (true) {
@@ -7202,6 +7181,73 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
+	private async ensureWarmDirectorySftpSession(options: ITurboFileSshConnectionOptions): Promise<IRemoteDirectorySftpSession> {
+		const reusable = await this.getReusableDirectorySftpSession(options);
+		if (reusable) {
+			this.touchDirectorySftpSession(reusable.key, reusable.generation);
+			return reusable;
+		}
+		const configResult = await this.createConnectConfig(options);
+		if (!configResult.ok) {
+			throw new Error(configResult.message);
+		}
+		return this.getDirectorySftpSession(options, configResult.config);
+	}
+
+	private async acquireTransferSession(endpoint: ITurboFileTransferEndpoint, progressId?: string): Promise<IRemoteDirectorySftpSessionLease> {
+		if (!endpoint.connection) {
+			throw new Error('SSH endpoint is missing connection options.');
+		}
+		this.throwIfTransferCanceled(progressId);
+		const session = await this.ensureWarmDirectorySftpSession(endpoint.connection);
+		this.throwIfTransferCanceled(progressId);
+		this.clearDirectorySftpIdleTimer(session.key);
+		const currentLease = this.directorySftpSessionLeaseCounts.get(session.key);
+		if (currentLease?.generation === session.generation) {
+			currentLease.count++;
+		} else {
+			this.directorySftpSessionLeaseCounts.set(session.key, { generation: session.generation, count: 1 });
+		}
+
+		let released = false;
+		return {
+			session,
+			release: () => {
+				if (released) {
+					return;
+				}
+				released = true;
+				const lease = this.directorySftpSessionLeaseCounts.get(session.key);
+				if (!lease || lease.generation !== session.generation) {
+					return;
+				}
+				lease.count--;
+				if (lease.count > 0) {
+					return;
+				}
+				this.directorySftpSessionLeaseCounts.delete(session.key);
+				if (!session.closed) {
+					this.touchDirectorySftpSession(session.key, session.generation);
+				}
+			}
+		};
+	}
+
+	private async acquireTransferSessionPair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, progressId?: string): Promise<readonly [IRemoteDirectorySftpSessionLease, IRemoteDirectorySftpSessionLease]> {
+		let sourceLease: IRemoteDirectorySftpSessionLease | undefined;
+		let targetLease: IRemoteDirectorySftpSessionLease | undefined;
+		try {
+			return await Promise.all([
+				this.acquireTransferSession(source, progressId).then(lease => sourceLease = lease),
+				this.acquireTransferSession(target, progressId).then(lease => targetLease = lease)
+			]);
+		} catch (error) {
+			sourceLease?.release();
+			targetLease?.release();
+			throw error;
+		}
+	}
+
 	private async createDirectorySftpSession(key: string, generation: number, config: ConnectConfig): Promise<IRemoteDirectorySftpSession> {
 		const client = await this.connect(config);
 		let sftp: ISFTPWrapper | undefined;
@@ -7221,6 +7267,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (this.directorySftpSessionGenerations.clearIfCurrent(key, generation)) {
 				this.directorySftpSessions.delete(key);
 				this.clearDirectorySftpIdleTimer(key);
+				this.directorySftpSessionLeaseCounts.delete(key);
 			}
 		};
 		client.on('close', markClosed);
@@ -7238,6 +7285,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private disposeDirectorySftpSession(key: string, generation: number): void {
+		const lease = this.directorySftpSessionLeaseCounts.get(key);
+		if (lease?.generation === generation && lease.count > 0) {
+			this.clearDirectorySftpIdleTimer(key);
+			return;
+		}
 		if (!this.directorySftpSessionGenerations.clearIfCurrent(key, generation)) {
 			return;
 		}
@@ -10929,6 +10981,10 @@ function quoteLocalShellArg(value: string): string {
 
 function getDirectSshRouteCacheKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions): string {
 	return `${getSshConnectionRouteKey(source)}=>${getSshConnectionRouteKey(target)}`;
+}
+
+function invertDirectSshRoute(route: TurboFileDirectSshRoute): TurboFileDirectSshRoute {
+	return route === 'source-push' ? 'target-pull' : 'source-push';
 }
 
 function getDirectScpProbePairKey(source: ITurboFileSshConnectionOptions, target: ITurboFileSshConnectionOptions, protocol: DirectRouteProbeProtocol): string {

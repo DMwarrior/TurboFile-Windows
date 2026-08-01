@@ -10,7 +10,7 @@ import { TurboFileDirectSshRoute, TurboFileDirectVerification } from './turbofil
 import { withTurboFileTimeout } from './turbofileTimeout.js';
 
 export const TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS = 800;
-export const TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS = 700;
+export const TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS = 100;
 
 export type TurboFileDirectRouteProbeDecision =
 	| { readonly kind: 'direct'; readonly route: TurboFileDirectSshRoute }

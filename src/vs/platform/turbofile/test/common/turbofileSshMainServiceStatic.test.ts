@@ -693,25 +693,25 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
-	test('cancels verification connection setup and cleans credentials in order', () => {
+	test('reuses the warm verification session and cleans credentials before releasing it', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const connect = methodBlock(service, 'private async connect(config: ConnectConfig', 'private connectDirectSsh');
+		const connect = methodBlock(service, 'private async connect(config: ConnectConfig', 'private async getDirectorySftpSession');
 		const verification = methodBlock(service, 'private async verifyDirectSshRoute', 'private async resolveRemoteRsyncSshBinary');
 
 		assert.deepStrictEqual({
-			usesCancelableConnect: verification.includes('this.connectDirectSsh(executorConfig, progressId)'),
+			usesLeasedSession: verification.includes('this.acquireTransferSession(executorEndpoint, progressId)') && verification.includes('const client = executorLease.session.client;'),
 			registersBeforeConnect: connect.indexOf('this.registerTransferCancelHandler(progressId') >= 0 && connect.indexOf('this.registerTransferCancelHandler(progressId') < connect.indexOf('client.connect('),
 			cancelEndsClient: connect.includes('client.end();'),
 			cancelRejectsTyped: connect.includes('reject(new TurboFileTransferCanceledError())'),
 			keepsConnectedClientAlive: !verification.includes('this.registerTransferCancelHandler(progressId, () => client.end())'),
-			cleanupBeforeEnd: verification.indexOf('credential?.cleanupCommand') < verification.lastIndexOf('client.end();')
+			cleanupBeforeRelease: verification.indexOf('credential?.cleanupCommand') < verification.lastIndexOf('executorLease.release();')
 		}, {
-			usesCancelableConnect: true,
+			usesLeasedSession: true,
 			registersBeforeConnect: true,
 			cancelEndsClient: true,
 			cancelRejectsTyped: true,
 			keepsConnectedClientAlive: true,
-			cleanupBeforeEnd: true
+			cleanupBeforeRelease: true
 		});
 	});
 
@@ -733,7 +733,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			legacyFallback: credential.includes('strictPrivateKeyRead = false') && credential.includes('this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined)'),
 			legacyCallersNonStrict: [batchTar, directTar, directScp].every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId)')),
 			checksCancelBeforeSetup: credential.indexOf('this.throwIfTransferCanceled(progressId);') > credential.indexOf('const privateKey =') && credential.indexOf('this.throwIfTransferCanceled(progressId);') < credential.indexOf('const identityPath ='),
-			keepsClientsAliveForCleanup: [batchTar, directTar, directScp].every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('client.end();')),
+			keepsClientsAliveForCleanup: [batchTar, directTar, directScp].every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('executorLease.release();')),
 			cancelableDataExec: batchTar.includes('progressId: request.progressId') && directTar.includes('progressId: request.progressId') && (directScp.match(/progressId: request\.progressId/g)?.length ?? 0) >= 2,
 			execPrechecksCancellation: [exec, execBytes].every(block => {
 				const precheck = block.indexOf('this.throwIfTransferCanceled(options.progressId);');
@@ -849,14 +849,14 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& directTar.includes('? this.tryDirectTarTransferRoute(request, startedAt, bytes, preverifiedDirectRoute)'),
 			failedVerifiedRouteIsForgotten: batchPlan.includes("if (attempt.route === 'direct' && preverifiedDirectRoute) {")
 				&& batchPlan.includes("this.forgetDirectScpProbeRoute(request.source, request.targetDirectory, 'tar', preverifiedDirectRoute);"),
-			parallelRelayConnections: batchRelayTar.includes('await Promise.all([')
-				&& batchRelayTar.includes('this.connect(sourceConfigResult.config, request.progressId).then(')
-				&& batchRelayTar.includes('this.connect(targetConfigResult.config, request.progressId).then(')
-				&& batchRelayTar.includes('acceptRelayClients = false;')
+			warmParallelRelayStreams: batchRelayTar.includes('await this.acquireTransferSessionPair(request.source, request.targetDirectory, request.progressId)')
+				&& batchRelayTar.includes('const [sourceStream, targetStream] = await Promise.all([')
+				&& batchRelayTar.includes('sourceLease.release();')
+				&& batchRelayTar.includes('targetLease.release();')
 				&& singleRelayTar.includes('await Promise.all([')
-				&& singleRelayTar.includes('this.connect(sourceConfigResult.config, request.progressId).then(')
-				&& singleRelayTar.includes('this.connect(targetConfigResult.config, request.progressId).then(')
-				&& singleRelayTar.includes('acceptRelayClients = false;')
+				&& singleRelayTar.includes('this.acquireTransferSessionPair(request.source, request.target, request.progressId)')
+				&& !batchRelayTar.includes('sourceClient?.end()')
+				&& !singleRelayTar.includes('sourceClient?.end()')
 		}, {
 			autoTarOnly: true,
 			boundedDecision: true,
@@ -866,11 +866,11 @@ suite('TurboFileSshMainServiceStatic', () => {
 			directTarSkipsLegacyVerification: true,
 			singleDirectoryTarSkipsLegacyVerification: true,
 			failedVerifiedRouteIsForgotten: true,
-			parallelRelayConnections: true
+			warmParallelRelayStreams: true
 		});
 	});
 
-	test('uses protocol-matched isolated route probes with positive-only credential-aware caching', () => {
+	test('uses protocol-matched isolated route probes with session-bound bidirectional caching', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const resolver = methodBlock(service, 'private async resolveFastDirectScpRoute', 'private async runDirectScpProbePair');
 		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
@@ -926,8 +926,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& cachedRoute.includes('!entry.targetSession.closed')
 				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.sourceSession.key, entry.sourceSession.generation)')
 				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.targetSession.key, entry.targetSession.generation)'),
-			positiveOnly: service.includes('directScpProbeAvailableAt.set(') && !service.includes('directScpProbeUnavailable')
-				&& !service.includes('prewarmSshToSshDirectRoute')
+			positiveAndNegativeCache: service.includes('directScpProbeAvailableAt.set(')
+				&& service.includes('directScpProbeUnavailableAt.set(')
+				&& service.includes('DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS')
+				&& service.includes('invertDirectSshRoute(route)')
 		}, {
 			foregroundWaitIs800ms: true,
 			backgroundHasIndependentLimit: true,
@@ -948,7 +950,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			directionalSingleFlight: true,
 			protocolSpecificOperationCache: true,
 			cacheRequiresLiveProbeSessions: true,
-			positiveOnly: true
+			positiveAndNegativeCache: true
 		});
 	});
 

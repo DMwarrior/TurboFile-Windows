@@ -238,7 +238,7 @@ suite('TurboFileDirectRouteProbe', () => {
 		}
 	});
 
-	test('selects relay within 800ms without cancelling a late positive background probe', async () => {
+	test('selects relay within 100ms without cancelling a late positive background probe', async () => {
 		const clock = sinon.useFakeTimers();
 		const pending = new DeferredPromise<void>();
 		let availableRoute: TurboFileDirectSshRoute | undefined;
@@ -248,7 +248,7 @@ suite('TurboFileDirectRouteProbe', () => {
 				() => availableRoute
 			);
 
-			assert.ok(TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS <= 700);
+			assert.ok(TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS <= 100);
 			assert.ok(TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS < TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS);
 			await clock.tickAsync(TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS);
 			assert.deepStrictEqual(await firstDecision, { kind: 'relay' });

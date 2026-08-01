@@ -39,7 +39,7 @@ suite('TurboFileTransferPlan', function () {
 		]);
 	});
 
-	test('uses sftp before relay for ssh to ssh single file auto-fast', () => {
+	test('uses the warm SFTP relay before the cold SCP relay for ssh to ssh single file auto-fast', () => {
 		const plan = resolveTransferPlan({
 			source: ssh(),
 			target: ssh(),
@@ -50,8 +50,8 @@ suite('TurboFileTransferPlan', function () {
 		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
 			{ protocol: 'scp', route: 'direct' },
 			{ protocol: 'sftp', route: 'direct' },
-			{ protocol: 'scp', route: 'relay' },
-			{ protocol: 'sftp', route: 'relay' }
+			{ protocol: 'sftp', route: 'relay' },
+			{ protocol: 'scp', route: 'relay' }
 		]);
 	});
 

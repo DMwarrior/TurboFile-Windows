@@ -38,6 +38,7 @@ export interface ITurboFileSshService {
 	 * string if it cannot be determined.
 	 */
 	getLocalDesktopPath(): Promise<string>;
+	prepareTransferPair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): Promise<void>;
 	transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult>;
 	transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult>;
 	cancelTransfer(progressId: string): Promise<ITurboFileFileOperationResult>;

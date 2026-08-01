@@ -823,6 +823,7 @@ export class TurboFileEditor extends EditorPane {
 	private isEditorVisible = false;
 	private aboutDialogElement: HTMLElement | undefined;
 	private remoteDocumentLabelFormatterRegistered = false;
+	private preparedTransferPairKey: string | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -921,8 +922,8 @@ export class TurboFileEditor extends EditorPane {
 		this.ensureTitlebarChrome();
 		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: true });
 		this.render();
-		void this.refreshPane('left');
-		void this.refreshPane('right');
+		this.prewarmCurrentTransferPair();
+		void Promise.all([this.refreshPane('left'), this.refreshPane('right')]).finally(() => this.prewarmCurrentTransferPair());
 		void this.prefetchDefaultDeviceDirectories();
 	}
 
@@ -972,8 +973,8 @@ export class TurboFileEditor extends EditorPane {
 			? `已清理内置 SSH 设备 ${result.removed} 台。`
 			: `已加载默认 SSH 设备：新增 ${result.added} 台，更新 ${result.updated} 台。`;
 		this.render();
-		void this.refreshPane('left');
-		void this.refreshPane('right');
+		this.prewarmCurrentTransferPair();
+		void Promise.all([this.refreshPane('left'), this.refreshPane('right')]).finally(() => this.prewarmCurrentTransferPair());
 		void this.prefetchDefaultDeviceDirectories();
 	}
 
@@ -3182,7 +3183,8 @@ export class TurboFileEditor extends EditorPane {
 			this.clearPaneSelection(targetSide);
 			this.statusMessage = `已在${this.getSideLabel(targetSide)}打开设备：${device.name}`;
 			this.render();
-			void this.refreshPane(targetSide);
+			this.prewarmCurrentTransferPair();
+			void this.refreshPane(targetSide).finally(() => this.prewarmCurrentTransferPair());
 			return;
 		}
 
@@ -13791,6 +13793,32 @@ export class TurboFileEditor extends EditorPane {
 		return undefined;
 	}
 
+	private prewarmCurrentTransferPair(): void {
+		const sourceDevice = this.getPaneDevice('left');
+		const targetDevice = this.getPaneDevice('right');
+		if (!sourceDevice || !targetDevice || sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID || targetDevice.id === LOCAL_WINDOWS_DEVICE_ID || sourceDevice.id === targetDevice.id) {
+			this.preparedTransferPairKey = undefined;
+			return;
+		}
+
+		const pairKey = [
+			sourceDevice.id, sourceDevice.host, sourceDevice.port, sourceDevice.username,
+			targetDevice.id, targetDevice.host, targetDevice.port, targetDevice.username
+		].join('\0');
+		if (this.preparedTransferPairKey === pairKey) {
+			return;
+		}
+		this.preparedTransferPairKey = pairKey;
+		void Promise.all([
+			this.toTransferEndpoint(sourceDevice, this.paneStates.left.path),
+			this.toTransferEndpoint(targetDevice, this.paneStates.right.path)
+		]).then(([source, target]) => this.sshService.prepareTransferPair(source, target)).catch(() => {
+			if (this.preparedTransferPairKey === pairKey) {
+				this.preparedTransferPairKey = undefined;
+			}
+		});
+	}
+
 	private async toTransferEndpoint(device: TurboFileDevice, path: string, connection?: ITurboFileSshConnectionOptions): Promise<ITurboFileTransferEndpoint> {
 		if (device.id === LOCAL_WINDOWS_DEVICE_ID) {
 			return {
@@ -14397,7 +14425,8 @@ export class TurboFileEditor extends EditorPane {
 			state.error = undefined;
 			this.clearPaneSelection(side);
 			this.render();
-			void this.refreshPane(side, { path: state.path || this.getDefaultPaneDevicePath(device), force: true, silent: true });
+			this.prewarmCurrentTransferPair();
+			void this.refreshPane(side, { path: state.path || this.getDefaultPaneDevicePath(device), force: true, silent: true }).finally(() => this.prewarmCurrentTransferPair());
 			return;
 		}
 		this.rememberPaneDeviceSnapshot(side);
@@ -14420,12 +14449,14 @@ export class TurboFileEditor extends EditorPane {
 		this.clearPaneSelection(side);
 		this.statusMessage = `已在${this.getSideLabel(side)}打开设备：${device.name}`;
 		this.render();
+		this.prewarmCurrentTransferPair();
 		if (readyCached) {
 			this.applyPaneDirectoryEntry(side, device, readyCached);
 			this.render();
+			this.prewarmCurrentTransferPair();
 			return;
 		}
-		void this.refreshPane(side, { path: targetPath, silent: true });
+		void this.refreshPane(side, { path: targetPath, silent: true }).finally(() => this.prewarmCurrentTransferPair());
 	}
 
 	/**

@@ -152,4 +152,17 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(options.includes('this.deviceStore?.getPrivateKey(device.id)'));
 		assert.ok(options.includes('this.deviceStore?.getPassphrase(device.id)'));
 	});
+
+	test('prewarms both remote panes before the user starts a transfer', () => {
+		const editor = readEditor();
+		const prewarmStart = editor.indexOf('private prewarmCurrentTransferPair');
+		const prewarm = editor.slice(prewarmStart, editor.indexOf('private async toTransferEndpoint', prewarmStart));
+
+		assert.ok(prewarm.includes('this.preparedTransferPairKey === pairKey'));
+		assert.ok(prewarm.includes('void Promise.all(['));
+		assert.ok(prewarm.includes('this.toTransferEndpoint(sourceDevice'));
+		assert.ok(prewarm.includes('this.toTransferEndpoint(targetDevice'));
+		assert.ok(prewarm.includes('this.sshService.prepareTransferPair(source, target)'));
+		assert.ok(editor.includes("Promise.all([this.refreshPane('left'), this.refreshPane('right')]).finally(() => this.prewarmCurrentTransferPair())"));
+	});
 });

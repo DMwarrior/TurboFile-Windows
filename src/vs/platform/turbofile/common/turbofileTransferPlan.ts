@@ -98,8 +98,8 @@ function createSshSshAttempts(source: ITurboFileTransferEndpoint, target: ITurbo
 		return [
 			attempt('scp', 'direct', 'SSH to SSH auto-fast single file starts with direct SCP.'),
 			attempt('sftp', 'direct', 'SSH to SSH direct SCP failure falls back to direct SFTP.'),
-			attempt('scp', 'relay', 'SSH to SSH direct transports unavailable; use SCP relay.'),
-			attempt('sftp', 'relay', 'SSH to SSH SCP relay failure falls back to SFTP relay.')
+			attempt('sftp', 'relay', 'SSH to SSH direct transports unavailable; reuse warm SFTP relay sessions.'),
+			attempt('scp', 'relay', 'SSH to SSH warm SFTP relay failure falls back to SCP relay.')
 		];
 	}
 	return [
