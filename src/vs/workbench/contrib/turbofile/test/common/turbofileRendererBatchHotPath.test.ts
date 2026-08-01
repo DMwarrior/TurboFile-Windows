@@ -67,6 +67,32 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(dragOut.includes('this.updateTask(task, `正在拖出到 Windows 0/${items.length}`, 8, false);'));
 	});
 
+	test('keeps every transfer launch on the taskbar-only hot path', () => {
+		const editor = readEditor();
+		const transferTaskStarts = editor.split(/\r?\n/).filter(line => line.includes("beginTask('transfer'"));
+
+		assert.ok(transferTaskStarts.length > 0);
+		for (const transferTaskStart of transferTaskStarts) {
+			assert.ok(transferTaskStart.trimEnd().endsWith(', false);'), `transfer task performed a full editor render: ${transferTaskStart.trim()}`);
+		}
+
+		const sizeStart = editor.indexOf('private async ensureTransferItemSize');
+		const sizePreparation = editor.slice(sizeStart, editor.indexOf('private setExternalDropTargetSide', sizeStart));
+		const itemStart = editor.indexOf('private async transferItem(');
+		const itemTransfer = editor.slice(itemStart, editor.indexOf('private async transferItemsBatch', itemStart));
+		assert.ok(sizePreparation.includes('Math.max(10, task.progress), false);'));
+		assert.ok(itemTransfer.includes('Math.max(35, options.task.progress), false);'));
+	});
+
+	test('defers native drops by one timer tick without animation-frame waits', () => {
+		const editor = readEditor();
+		const deferStart = editor.indexOf('private deferAfterDrag');
+		const defer = editor.slice(deferStart, editor.indexOf('private clearInternalDropTargetHighlight', deferStart));
+
+		assert.ok(defer.includes('ownerWindow.setTimeout(action, 0);'));
+		assert.ok(!defer.includes('requestAnimationFrame'));
+	});
+
 	test('groups external Windows paths by parent and bounds directory listing concurrency', () => {
 		const editor = readEditor();
 		const transferStart = editor.indexOf('private async transferExternalPaths');
@@ -155,14 +181,57 @@ suite('TurboFileRendererBatchHotPath', () => {
 
 	test('prewarms both remote panes before the user starts a transfer', () => {
 		const editor = readEditor();
+		const keyStart = editor.indexOf('private getPreparedTransferPairDeviceKey');
+		const keyBuilder = editor.slice(keyStart, editor.indexOf('private invalidatePreparedTransferPair', keyStart));
+		const invalidateStart = editor.indexOf('private invalidatePreparedTransferPair');
+		const invalidate = editor.slice(invalidateStart, editor.indexOf('private prewarmCurrentTransferPair', invalidateStart));
 		const prewarmStart = editor.indexOf('private prewarmCurrentTransferPair');
 		const prewarm = editor.slice(prewarmStart, editor.indexOf('private async toTransferEndpoint', prewarmStart));
+		const deleteStart = editor.indexOf('private async deleteDeviceFromPage');
+		const deleteDevice = editor.slice(deleteStart, editor.indexOf('async testDeviceConnection', deleteStart));
+		const submitStart = editor.indexOf("form.addEventListener('submit', async event =>");
+		const saveDevice = editor.slice(submitStart, editor.indexOf('private bindDeviceFormEventIsolation', submitStart));
 
-		assert.ok(prewarm.includes('this.preparedTransferPairKey === pairKey'));
+		assert.ok(prewarm.includes('this.preparingTransferPairKey === pairKey'));
+		assert.ok(prewarm.includes('!forceRefresh && this.preparedTransferPairKey === pairKey'));
+		assert.ok(prewarm.includes('this.preparingTransferPairKey !== undefined && this.preparingTransferPairKey !== pairKey'));
+		assert.ok(prewarm.includes('if (canceledDifferentPreparation && this.isEditorVisible)'));
+		const pairGuardIndex = prewarm.indexOf('if (this.preparingTransferPairKey === pairKey');
+		const refreshCancellationIndex = prewarm.indexOf('this.preparedTransferPairScheduler.cancel();', pairGuardIndex);
+		assert.ok(refreshCancellationIndex > pairGuardIndex, 'a repeated pane refresh must not cancel the scheduled route refresh');
 		assert.ok(prewarm.includes('void Promise.all(['));
 		assert.ok(prewarm.includes('this.toTransferEndpoint(sourceDevice'));
 		assert.ok(prewarm.includes('this.toTransferEndpoint(targetDevice'));
 		assert.ok(prewarm.includes('this.sshService.prepareTransferPair(source, target)'));
+		assert.ok(prewarm.includes('this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_REFRESH_MS)'));
+		assert.ok(prewarm.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS[retryIndex]'));
+		assert.ok(editor.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000]'));
+		assert.ok(editor.includes("this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')"));
+		assert.ok(prewarm.includes('if (this.isEditorVisible) {'));
+		assert.ok(prewarm.includes('this.invalidatePreparedTransferPair();'));
+		assert.ok(prewarm.includes('this.preparedTransferPairGeneration === generation'));
+		for (const field of ['device.host', 'String(device.port)', 'device.username', 'device.authType', "device.privateKeyPath ?? ''", 'device.preferredTransferProtocol']) {
+			assert.ok(keyBuilder.includes(field), `prepared pair key omitted ${field}`);
+		}
+		for (const capability of ['ssh', 'sftp', 'scp', 'rsync', 'tar', 'shell', 'archive']) {
+			assert.ok(keyBuilder.includes(`capabilities.${capability} ? '1' : '0'`), `prepared pair key omitted ${capability}`);
+		}
+		assert.ok(invalidate.includes('this.preparedTransferPairGeneration++;'));
+		assert.ok(invalidate.includes('this.preparingTransferPairKey = undefined;'));
+		assert.ok(invalidate.includes('this.preparedTransferPairKey = undefined;'));
+		assert.ok(invalidate.includes('this.preparedTransferPairScheduler.cancel();'));
+		assert.ok(deleteDevice.includes('this.invalidatePreparedTransferPair();'));
+		assert.ok(deleteDevice.includes('this.prewarmCurrentTransferPair(true);'));
+		assert.ok(saveDevice.includes('this.invalidatePreparedTransferPair();'));
+		assert.ok(saveDevice.includes('this.prewarmCurrentTransferPair(true);'));
+		assert.ok(editor.includes('this.preparedTransferPairScheduler.cancel();'));
+		assert.ok(editor.includes('this.prewarmCurrentTransferPair(true);'));
 		assert.ok(editor.includes("Promise.all([this.refreshPane('left'), this.refreshPane('right')]).finally(() => this.prewarmCurrentTransferPair())"));
+		const pageRestoreStart = editor.indexOf('private refreshBothPanesAfterPageRestore');
+		const pageRestore = editor.slice(pageRestoreStart, editor.indexOf('override layout', pageRestoreStart));
+		assert.ok(pageRestore.includes('this.invalidatePreparedTransferPair();'));
+		assert.ok(pageRestore.includes('this.prewarmCurrentTransferPair(true);'));
+		assert.ok(editor.includes('this.deviceStore.onDidChangeDeviceSecret(() => {'));
+		assert.ok(editor.includes('this.preparedTransferPairScheduler.schedule(0);'));
 	});
 });

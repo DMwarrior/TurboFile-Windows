@@ -9,6 +9,7 @@ import { $, clearNode, Dimension, getWindow, IDomPosition } from '../../../../ba
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
+import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -494,6 +495,9 @@ const EXTERNAL_PATH_PARENT_LIST_CONCURRENCY = 4;
 const PANE_DIRECTORY_VISIBLE_PREFETCH_LIMIT = 8;
 const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
+const PREPARED_TRANSFER_PAIR_REFRESH_MS = 60 * 1000;
+const PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000] as const;
+const PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS = 5000;
 const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 const RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS;
 const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = 350;
@@ -823,7 +827,19 @@ export class TurboFileEditor extends EditorPane {
 	private isEditorVisible = false;
 	private aboutDialogElement: HTMLElement | undefined;
 	private remoteDocumentLabelFormatterRegistered = false;
+	private preparingTransferPairKey: string | undefined;
 	private preparedTransferPairKey: string | undefined;
+	private preparedTransferPairGeneration = 0;
+	private preparedTransferPairRetryCount = 0;
+	private readonly preparedTransferPairScheduler = this._register(new RunOnceScheduler(() => {
+		if (this.isEditorVisible) {
+			if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
+				this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS);
+			} else {
+				this.prewarmCurrentTransferPair(true);
+			}
+		}
+	}, PREPARED_TRANSFER_PAIR_REFRESH_MS));
 
 	constructor(
 		group: IEditorGroup,
@@ -894,7 +910,13 @@ export class TurboFileEditor extends EditorPane {
 		this.acquireEditorGroupClassReference();
 		this.container = $('.turbofile-workbench');
 		parent.appendChild(this.container);
-		this.deviceStore = this.instantiationService.createInstance(TurboFileDeviceStore);
+		this.deviceStore = this._register(this.instantiationService.createInstance(TurboFileDeviceStore));
+		this._register(this.deviceStore.onDidChangeDeviceSecret(() => {
+			this.invalidatePreparedTransferPair();
+			if (this.isEditorVisible) {
+				this.preparedTransferPairScheduler.schedule(0);
+			}
+		}));
 		this.devices = this.deviceStore.loadDevices();
 		void this.ensureDefaultSshDevices().catch(error => this.handleDefaultSshDevicesError(error));
 		void this.ensureTurboFileChrome();
@@ -968,6 +990,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.devices = this.deviceStore.loadDevices();
+		this.invalidatePreparedTransferPair();
 		this.ensurePaneDeviceSelection({ preferFirstSshOnRight: result.added > 0 });
 		this.statusMessage = result.removed
 			? `已清理内置 SSH 设备 ${result.removed} 台。`
@@ -992,9 +1015,11 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		this.devices = this.deviceStore?.loadDevices() ?? [];
+		this.invalidatePreparedTransferPair();
 		this.ensurePaneDeviceSelection();
 		this.statusMessage = `Device list refreshed: ${this.devices.length} SSH devices.`;
 		this.render();
+		this.prewarmCurrentTransferPair(true);
 	}
 
 	override async setInput(input: TurboFileEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -1028,6 +1053,11 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private refreshBothPanesAfterPageRestore(): void {
+		// A reused editor pane can switch to a completely different pair of devices. Invalidate the
+		// renderer-side preparation state before any transfer can observe the restored selection, then
+		// start the new pair proof immediately while the directory refreshes continue in parallel.
+		this.invalidatePreparedTransferPair();
+		this.prewarmCurrentTransferPair(true);
 		for (const side of ['left', 'right'] as const) {
 			const state = this.paneStates[side];
 			++this.paneRequestSeq[side];
@@ -1053,6 +1083,9 @@ export class TurboFileEditor extends EditorPane {
 			void this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
 			this.ensureTitlebarChrome();
+			this.prewarmCurrentTransferPair(true);
+		} else {
+			this.preparedTransferPairScheduler.cancel();
 		}
 	}
 
@@ -1588,11 +1621,7 @@ export class TurboFileEditor extends EditorPane {
 	 */
 	private deferAfterDrag(action: () => void): void {
 		const ownerWindow = getWindow(this.container);
-		ownerWindow.setTimeout(() => {
-			ownerWindow.requestAnimationFrame(() => {
-				ownerWindow.requestAnimationFrame(action);
-			});
-		}, 0);
+		ownerWindow.setTimeout(action, 0);
 	}
 
 	private clearInternalDropTargetHighlight(): void {
@@ -3010,6 +3039,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const affectedSides = (['left', 'right'] as const).filter(side => this.paneStates[side].deviceId === device.id);
 		await this.deviceStore.deleteDevice(device.id);
+		this.invalidatePreparedTransferPair();
 		this.deviceConnectionMessages.delete(device.id);
 		this.deviceRuntimeStatuses.delete(device.id);
 		this.devices = this.deviceStore.loadDevices();
@@ -3028,6 +3058,7 @@ export class TurboFileEditor extends EditorPane {
 		for (const side of affectedSides) {
 			void this.refreshPane(side);
 		}
+		this.prewarmCurrentTransferPair(true);
 	}
 
 	async testDeviceConnection(device: TurboFileDevice): Promise<void> {
@@ -4922,7 +4953,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const sourceDevice = retry.sourceDeviceId ? this.getDeviceById(retry.sourceDeviceId) : this.getPaneDevice(retry.sourceSide);
 		const targetDevice = this.getPaneDevice(retry.targetSide);
-		const nextTask = this.beginTask('transfer', `重试 ${retry.sourceItem.name}`, `${sourceDevice?.name ?? retry.sourceSide} -> ${targetDevice?.name ?? retry.targetSide}`);
+		const nextTask = this.beginTask('transfer', `重试 ${retry.sourceItem.name}`, `${sourceDevice?.name ?? retry.sourceSide} -> ${targetDevice?.name ?? retry.targetSide}`, false);
 		nextTask.retryTransfer = retry;
 		const result = await this.transferItem(retry.sourceSide, retry.targetSide, retry.sourceItem, {
 			refreshTarget: true,
@@ -8515,7 +8546,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		this.updateTask(task, `正在计算目录大小：${sourceItem.name}`, Math.max(10, task.progress));
+		this.updateTask(task, `正在计算目录大小：${sourceItem.name}`, Math.max(10, task.progress), false);
 		const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, sourceItem.path));
 		if (!result.ok) {
 			transferItem.displaySize = '';
@@ -8669,7 +8700,7 @@ export class TurboFileEditor extends EditorPane {
 		const batch = sourceItems.length > 1;
 		const actionLabel = operation === 'move' ? '剪切粘贴' : '本地复制';
 		const label = batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`;
-		const task = this.beginTask('transfer', label, `Windows -> ${targetDevice.name}`);
+		const task = this.beginTask('transfer', label, `Windows -> ${targetDevice.name}`, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
@@ -8719,7 +8750,7 @@ export class TurboFileEditor extends EditorPane {
 			await this.ensureTransferItemSize(this.localWindowsDevice, sourceItem, transferItem, task, {
 				skipDirectorySize: !!sourceItem.directory
 			});
-			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
+			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress, false);
 			const result = await this.transferItem(targetSide, targetSide, sourceItem, {
 				refreshTarget: false,
 				task,
@@ -8894,7 +8925,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const batch = sourceItems.length > 1;
 		const actionLabel = clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴';
-		const task = this.beginTask('transfer', batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`, `${sourceDevice.name} -> ${targetDevice.name}`);
+		const task = this.beginTask('transfer', batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`, `${sourceDevice.name} -> ${targetDevice.name}`, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
@@ -8949,7 +8980,7 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 
-			this.updateTask(task, batch ? `正在粘贴 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在粘贴：${sourceItem.name}`, progress);
+			this.updateTask(task, batch ? `正在粘贴 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在粘贴：${sourceItem.name}`, progress, false);
 			const result = await this.transferItem(clipboard.sourceSide, targetSide, sourceItem, {
 				refreshTarget: false,
 				task,
@@ -9107,7 +9138,7 @@ export class TurboFileEditor extends EditorPane {
 		const windowsPath = this.isWindowsDevice(device);
 		const batch = sourceItems.length > 1;
 		const strategy = windowsPath ? 'local-move' : 'remote-move';
-		const task = this.beginTask('transfer', batch ? `移动 ${sourceItems.length} 项到 ${targetLabel}` : `移动 ${sourceItems[0].name} 到 ${targetLabel}`, device.name);
+		const task = this.beginTask('transfer', batch ? `移动 ${sourceItems.length} 项到 ${targetLabel}` : `移动 ${sourceItems[0].name} 到 ${targetLabel}`, device.name, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
@@ -9125,7 +9156,7 @@ export class TurboFileEditor extends EditorPane {
 			transferItem.progress = 0;
 			transferItem.strategy = strategy;
 		}
-		this.updateTask(task, batch ? `正在移动 ${sourceItems.length} 项到 ${targetLabel}` : `正在移动：${sourceItems[0].name}`, 45);
+		this.updateTask(task, batch ? `正在移动 ${sourceItems.length} 项到 ${targetLabel}` : `正在移动：${sourceItems[0].name}`, 45, false);
 		// A same-device move is a metadata-only rename: hand the whole selection to one batched
 		// movePathsIntoDirectory (POSIX remote: a single `xargs -0 mv` round trip) instead of issuing one
 		// renamePath round trip per item, which made dragging many files feel like a slow per-file copy.
@@ -9206,7 +9237,7 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 
-			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
+			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
 			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path), targetPath);
 			if (result.ok) {
 				completed++;
@@ -9279,7 +9310,7 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 
-			this.updateTask(task, batch ? `正在本机移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在本机移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)));
+			this.updateTask(task, batch ? `正在本机移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在本机移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
 			const result = await this.sshService.renamePath(await this.toTransferEndpoint(this.localWindowsDevice, sourceItem.path), targetPath);
 			if (result.ok) {
 				completed++;
@@ -9467,7 +9498,7 @@ export class TurboFileEditor extends EditorPane {
 		const targetDevice = this.localWindowsDevice;
 		if (operation === 'copy' && items.length === 1) {
 			const sourceItem = items[0];
-			const task = this.beginTask('transfer', `拖出 ${sourceItem.name}`, `${sourceDevice.name} -> Windows`);
+			const task = this.beginTask('transfer', `拖出 ${sourceItem.name}`, `${sourceDevice.name} -> Windows`, false);
 			task.progress = 0;
 			task.cancelRequested = false;
 			task.transferItems = [this.createTransferTaskItem(sourceItem)];
@@ -9504,7 +9535,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		const task = this.beginTask('transfer', `拖出 ${items.length} 项`, `${sourceDevice.name} -> Windows`);
+		const task = this.beginTask('transfer', `拖出 ${items.length} 项`, `${sourceDevice.name} -> Windows`, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = items.map(item => this.createTransferTaskItem(item));
@@ -9623,7 +9654,7 @@ export class TurboFileEditor extends EditorPane {
 		const batch = sourceItems.length > 1;
 		const actionLabel = operation === 'move' ? '剪切' : '复制';
 		const label = batch ? `${actionLabel} ${sourceItems.length} 项` : `${actionLabel} ${sourceItems[0].name}`;
-		const task = this.beginTask('transfer', label, `${sourceDevice.name} -> ${targetDevice.name}`);
+		const task = this.beginTask('transfer', label, `${sourceDevice.name} -> ${targetDevice.name}`, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
@@ -9662,7 +9693,7 @@ export class TurboFileEditor extends EditorPane {
 			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
 				skipDirectorySize: !!sourceItem.directory
 			});
-			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress);
+			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress, false);
 			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task, initiatedAt });
 			if (result.ok) {
 				completed++;
@@ -9760,7 +9791,7 @@ export class TurboFileEditor extends EditorPane {
 				options.task.strategy = initialStrategy;
 			}
 			if (options.task) {
-				this.updateTask(options.task, `正在传输：${sourceItem.name} -> ${targetDevice.name}`, Math.max(35, options.task.progress));
+				this.updateTask(options.task, `正在传输：${sourceItem.name} -> ${targetDevice.name}`, Math.max(35, options.task.progress), false);
 			}
 			const result = await this.sshService.transferFile({
 				source: sourceEndpoint,
@@ -9802,7 +9833,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const actionLabel = operation === 'move' ? '剪切传输' : '批量传输';
-		const task = this.beginTask('transfer', `${actionLabel} ${items.length} 项`, `${sourceDevice.name} -> ${targetDevice.name}`);
+		const task = this.beginTask('transfer', `${actionLabel} ${items.length} 项`, `${sourceDevice.name} -> ${targetDevice.name}`, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = items.map(item => this.createTransferTaskItem(item));
@@ -13793,28 +13824,80 @@ export class TurboFileEditor extends EditorPane {
 		return undefined;
 	}
 
-	private prewarmCurrentTransferPair(): void {
+	private getPreparedTransferPairDeviceKey(device: TurboFileDevice): string {
+		const capabilities = device.capabilities;
+		return [
+			device.id,
+			device.host,
+			String(device.port),
+			device.username,
+			device.authType,
+			device.privateKeyPath ?? '',
+			device.preferredTransferProtocol,
+			capabilities.ssh ? '1' : '0',
+			capabilities.sftp ? '1' : '0',
+			capabilities.scp ? '1' : '0',
+			capabilities.rsync ? '1' : '0',
+			capabilities.tar ? '1' : '0',
+			capabilities.shell ? '1' : '0',
+			capabilities.archive ? '1' : '0'
+		].join('\0');
+	}
+
+	private invalidatePreparedTransferPair(): void {
+		this.preparedTransferPairGeneration++;
+		this.preparingTransferPairKey = undefined;
+		this.preparedTransferPairKey = undefined;
+		this.preparedTransferPairRetryCount = 0;
+		this.preparedTransferPairScheduler.cancel();
+	}
+
+	private prewarmCurrentTransferPair(forceRefresh = false): void {
 		const sourceDevice = this.getPaneDevice('left');
 		const targetDevice = this.getPaneDevice('right');
 		if (!sourceDevice || !targetDevice || sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID || targetDevice.id === LOCAL_WINDOWS_DEVICE_ID || sourceDevice.id === targetDevice.id) {
-			this.preparedTransferPairKey = undefined;
+			this.invalidatePreparedTransferPair();
 			return;
 		}
-
-		const pairKey = [
-			sourceDevice.id, sourceDevice.host, sourceDevice.port, sourceDevice.username,
-			targetDevice.id, targetDevice.host, targetDevice.port, targetDevice.username
-		].join('\0');
-		if (this.preparedTransferPairKey === pairKey) {
+		const pairKey = `${this.getPreparedTransferPairDeviceKey(sourceDevice)}\0${this.getPreparedTransferPairDeviceKey(targetDevice)}`;
+		const canceledDifferentPreparation = this.preparingTransferPairKey !== undefined && this.preparingTransferPairKey !== pairKey;
+		if (canceledDifferentPreparation) {
+			this.preparedTransferPairGeneration++;
+			this.preparingTransferPairKey = undefined;
+		}
+		if (this.preparingTransferPairKey === pairKey || (!forceRefresh && this.preparedTransferPairKey === pairKey)) {
+			if (canceledDifferentPreparation && this.isEditorVisible) {
+				this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_REFRESH_MS);
+			}
 			return;
 		}
-		this.preparedTransferPairKey = pairKey;
+		this.preparedTransferPairScheduler.cancel();
+		if (this.preparingTransferPairKey !== pairKey && this.preparedTransferPairKey !== pairKey) {
+			this.preparedTransferPairRetryCount = 0;
+		}
+		this.preparingTransferPairKey = pairKey;
+		const generation = this.preparedTransferPairGeneration;
 		void Promise.all([
 			this.toTransferEndpoint(sourceDevice, this.paneStates.left.path),
 			this.toTransferEndpoint(targetDevice, this.paneStates.right.path)
-		]).then(([source, target]) => this.sshService.prepareTransferPair(source, target)).catch(() => {
-			if (this.preparedTransferPairKey === pairKey) {
+		]).then(([source, target]) => this.sshService.prepareTransferPair(source, target)).then(() => {
+			if (this.preparedTransferPairGeneration === generation && this.preparingTransferPairKey === pairKey) {
+				this.preparingTransferPairKey = undefined;
+				this.preparedTransferPairKey = pairKey;
+				this.preparedTransferPairRetryCount = 0;
+				if (this.isEditorVisible) {
+					this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_REFRESH_MS);
+				}
+			}
+		}, () => {
+			if (this.preparedTransferPairGeneration === generation && this.preparingTransferPairKey === pairKey) {
+				this.preparingTransferPairKey = undefined;
 				this.preparedTransferPairKey = undefined;
+				const retryIndex = Math.min(this.preparedTransferPairRetryCount, PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS.length - 1);
+				this.preparedTransferPairRetryCount++;
+				if (this.isEditorVisible) {
+					this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS[retryIndex]);
+				}
 			}
 		});
 	}
@@ -14613,6 +14696,7 @@ export class TurboFileEditor extends EditorPane {
 			try {
 				const previousLocalWindowsDefaultPath = isEditingLocalWindows ? this.getLocalWindowsDeviceDefaultPath() : undefined;
 				let savedDevice = isEditingLocalWindows ? this.saveLocalWindowsDevice(draft) : editingDevice ? await this.deviceStore.updateDevice(editingDevice.id, draft) : await this.deviceStore.saveDevice(draft);
+				this.invalidatePreparedTransferPair();
 				const capabilityResult = isEditingLocalWindows ? undefined : await this.detectAndStoreDeviceCapabilities(savedDevice);
 				if (!isEditingLocalWindows) {
 					savedDevice = this.deviceStore.loadDevices().find(device => device.id === savedDevice.id) ?? savedDevice;
@@ -14637,6 +14721,7 @@ export class TurboFileEditor extends EditorPane {
 				this.isDeviceFormVisible = false;
 				this.editingDeviceId = undefined;
 				this.render();
+				this.prewarmCurrentTransferPair(true);
 				if (!isEditingLocalWindows || !refreshedLocalWindowsPanes) {
 					void this.refreshPane('right');
 				}
@@ -14831,6 +14916,8 @@ export class TurboFileEditor extends EditorPane {
 			if (result.capabilities && editingDevice && this.deviceStore) {
 				this.deviceStore.updateDeviceCapabilities(editingDevice.id, this.toDeviceCapabilities(result.capabilities));
 				this.devices = this.deviceStore.loadDevices();
+				this.invalidatePreparedTransferPair();
+				this.prewarmCurrentTransferPair(true);
 			}
 			if (!result.ok) {
 				lastMissingDependencies = result.missingPackages;

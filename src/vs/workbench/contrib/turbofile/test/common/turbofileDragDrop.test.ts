@@ -243,10 +243,12 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(explicitDeleteBlock.includes('moveUserItemsToTrash'));
 	});
 
-	test('defers post-drop transfers until after drag image teardown frames', () => {
+	test('defers post-drop transfers by one timer tick without delaying transfer frames', () => {
 		const editor = readTurboFileEditor();
+		const deferStart = editor.indexOf('private deferAfterDrag');
+		const defer = editor.slice(deferStart, editor.indexOf('private clearInternalDropTargetHighlight', deferStart));
 
-		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(() => {'));
-		assert.ok(editor.includes('ownerWindow.requestAnimationFrame(action);'));
+		assert.ok(defer.includes('ownerWindow.setTimeout(action, 0);'));
+		assert.ok(!defer.includes('requestAnimationFrame'));
 	});
 });

@@ -183,6 +183,22 @@ suite('TurboFileTransferPlan', function () {
 		]);
 	});
 
+	test('uses tar direct first for ssh to ssh multi-file auto-fast even when every item is a file', () => {
+		const plan = resolveTransferPlan({
+			source: ssh(),
+			target: ssh(),
+			sourceType: 'file',
+			itemCount: 12
+		});
+
+		assert.deepStrictEqual(plan.attempts.map(({ protocol, route }) => ({ protocol, route })), [
+			{ protocol: 'tar', route: 'direct' },
+			{ protocol: 'tar', route: 'relay' },
+			{ protocol: 'sftp', route: 'direct' },
+			{ protocol: 'sftp', route: 'relay' }
+		]);
+	});
+
 	test('negotiates mismatched ssh protocols to the more conservative concrete protocol', () => {
 		const plan = resolveTransferPlan({
 			source: ssh('rsync'),

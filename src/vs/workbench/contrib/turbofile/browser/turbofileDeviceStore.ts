@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Emitter } from '../../../../base/common/event.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileDeviceCapabilities, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
@@ -79,12 +81,24 @@ const TURBOFILE_DEFAULT_SSH_DEVICES: readonly TurboFileDefaultDevice[] = [];
 
 const TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX = 'turbofile-default-';
 
-export class TurboFileDeviceStore {
+export class TurboFileDeviceStore extends Disposable {
+	private readonly secretValueCache = new Map<string, Promise<string | undefined>>();
+	private readonly secretMutationChains = new Map<string, Promise<unknown>>();
+	private readonly onDidChangeDeviceSecretEmitter = this._register(new Emitter<string>());
+	readonly onDidChangeDeviceSecret = this.onDidChangeDeviceSecretEmitter.event;
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@ISecretStorageService private readonly secretStorageService: ISecretStorageService
-	) { }
+	) {
+		super();
+		this._register(this.secretStorageService.onDidChangeSecret(key => {
+			if (this.isTurboFileDeviceSecretKey(key)) {
+				this.secretValueCache.delete(key);
+				this.onDidChangeDeviceSecretEmitter.fire(key);
+			}
+		}));
+	}
 
 	loadDevices(): TurboFileDevice[] {
 		const raw = this.storageService.get(TURBOFILE_DEVICES_STORAGE_KEY, StorageScope.PROFILE, '[]');
@@ -118,15 +132,7 @@ export class TurboFileDeviceStore {
 		const devices = [...this.loadDevices(), device];
 		this.storeDevices(devices);
 
-		if (draft.password) {
-			await this.secretStorageService.set(this.getPasswordKey(device.id), draft.password);
-		}
-		if (draft.privateKey) {
-			await this.secretStorageService.set(this.getPrivateKeyKey(device.id), draft.privateKey);
-		}
-		if (draft.passphrase) {
-			await this.secretStorageService.set(this.getPassphraseKey(device.id), draft.passphrase);
-		}
+		await this.storeDeviceSecrets(device.id, draft);
 
 		return device;
 	}
@@ -212,19 +218,9 @@ export class TurboFileDeviceStore {
 	}
 
 	private async storeDefaultDeviceSecrets(defaultDevice: TurboFileDefaultDevice, deviceId: string, previousDeviceId?: string): Promise<void> {
-		if (defaultDevice.password) {
-			await this.secretStorageService.set(this.getPasswordKey(deviceId), defaultDevice.password);
-		}
-		if (defaultDevice.privateKey) {
-			await this.secretStorageService.set(this.getPrivateKeyKey(deviceId), defaultDevice.privateKey);
-		}
-		if (defaultDevice.passphrase) {
-			await this.secretStorageService.set(this.getPassphraseKey(deviceId), defaultDevice.passphrase);
-		}
+		await this.storeDeviceSecrets(deviceId, defaultDevice);
 		if (previousDeviceId && previousDeviceId !== deviceId) {
-			await this.secretStorageService.delete(this.getPasswordKey(previousDeviceId));
-			await this.secretStorageService.delete(this.getPrivateKeyKey(previousDeviceId));
-			await this.secretStorageService.delete(this.getPassphraseKey(previousDeviceId));
+			await this.deleteDeviceSecrets(previousDeviceId);
 		}
 	}
 
@@ -251,15 +247,7 @@ export class TurboFileDeviceStore {
 		devices[index] = device;
 		this.storeDevices(devices);
 
-		if (draft.password) {
-			await this.secretStorageService.set(this.getPasswordKey(device.id), draft.password);
-		}
-		if (draft.privateKey) {
-			await this.secretStorageService.set(this.getPrivateKeyKey(device.id), draft.privateKey);
-		}
-		if (draft.passphrase) {
-			await this.secretStorageService.set(this.getPassphraseKey(device.id), draft.passphrase);
-		}
+		await this.storeDeviceSecrets(device.id, draft);
 
 		return device;
 	}
@@ -273,21 +261,19 @@ export class TurboFileDeviceStore {
 			deletedDefaultDeviceIds.add(deviceId);
 			this.storageService.store(TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY, JSON.stringify([...deletedDefaultDeviceIds]), StorageScope.PROFILE, StorageTarget.MACHINE);
 		}
-		await this.secretStorageService.delete(this.getPasswordKey(deviceId));
-		await this.secretStorageService.delete(this.getPrivateKeyKey(deviceId));
-		await this.secretStorageService.delete(this.getPassphraseKey(deviceId));
+		await this.deleteDeviceSecrets(deviceId);
 	}
 
-	async getPassword(deviceId: string): Promise<string | undefined> {
-		return this.secretStorageService.get(this.getPasswordKey(deviceId));
+	getPassword(deviceId: string): Promise<string | undefined> {
+		return this.getSecret(this.getPasswordKey(deviceId));
 	}
 
-	async getPrivateKey(deviceId: string): Promise<string | undefined> {
-		return this.secretStorageService.get(this.getPrivateKeyKey(deviceId));
+	getPrivateKey(deviceId: string): Promise<string | undefined> {
+		return this.getSecret(this.getPrivateKeyKey(deviceId));
 	}
 
-	async getPassphrase(deviceId: string): Promise<string | undefined> {
-		return this.secretStorageService.get(this.getPassphraseKey(deviceId));
+	getPassphrase(deviceId: string): Promise<string | undefined> {
+		return this.getSecret(this.getPassphraseKey(deviceId));
 	}
 
 	updateDeviceCapabilities(deviceId: string, capabilities: TurboFileDeviceCapabilities): TurboFileDevice | undefined {
@@ -381,6 +367,100 @@ export class TurboFileDeviceStore {
 		};
 	}
 
+	private getSecret(key: string): Promise<string | undefined> {
+		const cachedValue = this.secretValueCache.get(key);
+		if (cachedValue) {
+			return cachedValue;
+		}
+
+		const readPromise = this.secretStorageService.get(key);
+		this.secretValueCache.set(key, readPromise);
+		void readPromise.catch(() => {
+			if (this.secretValueCache.get(key) === readPromise) {
+				this.secretValueCache.delete(key);
+			}
+		});
+		return readPromise;
+	}
+
+	private isTurboFileDeviceSecretKey(key: string): boolean {
+		return key.startsWith(`${TURBOFILE_SECRET_PREFIX}.`)
+			&& (key.endsWith('.password') || key.endsWith('.privateKey') || key.endsWith('.passphrase'));
+	}
+
+	private async storeDeviceSecrets(deviceId: string, secrets: Pick<TurboFileDeviceDraft, 'password' | 'privateKey' | 'passphrase'>): Promise<void> {
+		const writes: Promise<void>[] = [];
+		if (secrets.password) {
+			writes.push(this.storeSecret(this.getPasswordKey(deviceId), secrets.password));
+		}
+		if (secrets.privateKey) {
+			writes.push(this.storeSecret(this.getPrivateKeyKey(deviceId), secrets.privateKey));
+		}
+		if (secrets.passphrase) {
+			writes.push(this.storeSecret(this.getPassphraseKey(deviceId), secrets.passphrase));
+		}
+		await Promise.all(writes);
+	}
+
+	private async deleteDeviceSecrets(deviceId: string): Promise<void> {
+		await Promise.all([
+			this.deleteSecret(this.getPasswordKey(deviceId)),
+			this.deleteSecret(this.getPrivateKeyKey(deviceId)),
+			this.deleteSecret(this.getPassphraseKey(deviceId))
+		]);
+	}
+
+	private async storeSecret(key: string, value: string): Promise<void> {
+		const previousOperation = this.secretMutationChains.get(key) ?? this.secretValueCache.get(key);
+		const writePromise = (async () => {
+			try {
+				await previousOperation;
+			} catch {
+				// A failed read or mutation must not prevent a newer explicit value from being stored.
+			}
+			await this.secretStorageService.set(key, value);
+			return value;
+		})();
+		this.secretMutationChains.set(key, writePromise);
+		this.secretValueCache.set(key, writePromise);
+		try {
+			await writePromise;
+		} catch (error) {
+			if (this.secretValueCache.get(key) === writePromise) {
+				this.secretValueCache.delete(key);
+			}
+			throw error;
+		} finally {
+			if (this.secretMutationChains.get(key) === writePromise) {
+				this.secretMutationChains.delete(key);
+			}
+		}
+	}
+
+	private async deleteSecret(key: string): Promise<void> {
+		const previousOperation = this.secretMutationChains.get(key) ?? this.secretValueCache.get(key);
+		const deletePromise = (async () => {
+			try {
+				await previousOperation;
+			} catch {
+				// Deletion remains authoritative even when an earlier read or mutation failed.
+			}
+			await this.secretStorageService.delete(key);
+			return undefined;
+		})();
+		this.secretMutationChains.set(key, deletePromise);
+		this.secretValueCache.set(key, deletePromise);
+		try {
+			await deletePromise;
+		} finally {
+			if (this.secretMutationChains.get(key) === deletePromise) {
+				this.secretMutationChains.delete(key);
+			}
+			if (this.secretValueCache.get(key) === deletePromise) {
+				this.secretValueCache.delete(key);
+			}
+		}
+	}
 
 	private getPasswordKey(deviceId: string): string {
 		return `${TURBOFILE_SECRET_PREFIX}.${deviceId}.password`;

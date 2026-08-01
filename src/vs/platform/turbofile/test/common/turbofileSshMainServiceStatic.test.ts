@@ -452,7 +452,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!getTrashState.includes('listTrashItems('));
 	});
 
-	test('uses verified direct routes without negative cooldown state', () => {
+	test('uses pane-prepared direct routes without transfer-time verification state', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const removedNegativeState = [
 			'DIRECT_SSH_ROUTE_FAILURE_COOLDOWN_MS',
@@ -467,30 +467,29 @@ suite('TurboFileSshMainServiceStatic', () => {
 
 		assert.deepStrictEqual({
 			removedNegativeState: removedNegativeState.every(name => !service.includes(name)),
-			importsRouteCoordinator: service.includes("import { classifyTurboFileDirectSshVerification, orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';"),
+			importsPreparedRouteCache: service.includes("TurboFilePreparedDirectRouteCache } from '../common/turbofilePreparedDirectRouteCache.js';"),
 			noDuplicateRouteType: !service.includes("type TurboFileDirectSshRoute = 'source-push' | 'target-pull';"),
-			verificationMethod: service.includes('private async verifyDirectSshRoute('),
-			attemptWrapper: service.includes('private async runVerifiedDirectRouteAttempt<T>('),
-			verificationMarker: service.includes('__TURBOFILE_DIRECT_READY__'),
+			noTransferVerificationMethod: !service.includes('private async verifyDirectSshRoute('),
+			preparedAttemptWrapper: service.includes('private async runPreparedDirectRouteAttempt<T>('),
+			noTransferVerificationMarker: !service.includes('__TURBOFILE_DIRECT_READY__'),
 			typedRemoteCommandExit: service.includes('class TurboFileRemoteCommandExitError extends Error') && service.includes('new TurboFileRemoteCommandExitError('),
-			preciseVerificationFailure: service.includes('classifyTurboFileDirectSshVerification(output.toString(\'utf8\') === DIRECT_SSH_READY_MARKER, false)') && service.includes('classifyTurboFileDirectSshVerification(false, error instanceof TurboFileRemoteCommandExitError)'),
-			quotedMarkerPrintf: service.includes('`printf %s ${quotePosixShellArg(DIRECT_SSH_READY_MARKER)}`'),
-			boundedMarkerExec: service.includes('execRemoteBytes(client, command, { timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS, progressId })')
+			backgroundProtocolProof: service.includes('private async probeDirectScpRoute(')
+				&& service.includes('execRemoteBytes(executorSession.client, command, { timeoutMs: remainingMs, token })'),
+			preparedFailureIsTyped: service.includes("throw new TurboFileDirectDataError(route, [{ route, stage: 'initial' }], error);")
 		}, {
 			removedNegativeState: true,
-			importsRouteCoordinator: true,
+			importsPreparedRouteCache: true,
 			noDuplicateRouteType: true,
-			verificationMethod: true,
-			attemptWrapper: true,
-			verificationMarker: true,
+			noTransferVerificationMethod: true,
+			preparedAttemptWrapper: true,
+			noTransferVerificationMarker: true,
 			typedRemoteCommandExit: true,
-			preciseVerificationFailure: true,
-			quotedMarkerPrintf: true,
-			boundedMarkerExec: true
+			backgroundProtocolProof: true,
+			preparedFailureIsTyped: true
 		});
 	});
 
-	test('routes every direct SSH protocol entry through the verified attempt wrapper', () => {
+	test('routes every direct SSH protocol entry through the prepared attempt wrapper', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const entries = [
 			methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute'),
@@ -502,11 +501,13 @@ suite('TurboFileSshMainServiceStatic', () => {
 		];
 
 		assert.deepStrictEqual(entries.map(entry => ({
-			verifiedAttempt: entry.includes('this.runVerifiedDirectRouteAttempt('),
+			preparedAttempt: entry.includes('this.runPreparedDirectRouteAttempt('),
+			legacyVerifier: entry.includes('this.runVerifiedDirectRouteAttempt('),
 			resolvesRoutesDirectly: entry.includes('this.resolveDirectSshRoutes('),
 			loopsRoutesDirectly: entry.includes('for (const route of routes)')
 		})), entries.map(() => ({
-			verifiedAttempt: true,
+			preparedAttempt: true,
+			legacyVerifier: false,
 			resolvesRoutesDirectly: false,
 			loopsRoutesDirectly: false
 		})));
@@ -562,7 +563,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const common = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofile.ts'), 'utf8');
 		const singlePlan = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
 		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
-		const wrapper = methodBlock(service, 'private async runVerifiedDirectRouteAttempt<T>', 'private async verifyDirectSshRoute');
+		const wrapper = methodBlock(service, 'private async runPreparedDirectRouteAttempt<T>', 'private async resolveRemoteRsyncSshBinary');
 		const fallbackMapping = functionBlock(service, 'getDirectFallbackProgress');
 		const directEntries = [
 			methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute'),
@@ -589,8 +590,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			fixedFallbackDetails: fallbackMapping.includes('直连不可用，正在中转。')
 				&& fallbackMapping.includes('直连传输失败，正在中转。'),
 			typedMappingDoesNotInspectMessages: !fallbackMapping.includes('.message') && !fallbackMapping.includes('formatTransferError'),
-			retryCarriesStrategyAndRoute: wrapper.includes("strategy: directStrategy, route"),
-			sixStrategiesProvided: directEntries.every(entry => /runVerifiedDirectRouteAttempt\([^\n]+, '[a-z]+-direct', route =>/.test(entry))
+			preparedFailureCarriesRoute: wrapper.includes("throw new TurboFileDirectDataError(route, [{ route, stage: 'initial' }], error);"),
+			sixPreparedRouteConsumers: directEntries.every(entry => entry.includes('runPreparedDirectRouteAttempt'))
 		}, {
 			typedEvent: true,
 			importsTypedErrors: true,
@@ -598,8 +599,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			plansUseTypedMapping: true,
 			fixedFallbackDetails: true,
 			typedMappingDoesNotInspectMessages: true,
-			retryCarriesStrategyAndRoute: true,
-			sixStrategiesProvided: true
+			preparedFailureCarriesRoute: true,
+			sixPreparedRouteConsumers: true
 		});
 	});
 
@@ -653,7 +654,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
 		const batchTar = methodBlock(service, 'private async tryBatchTarTransfer', 'private createRemoteBatchTarPlan');
 		const batchFlow = functionBlock(batchTransferFlow, 'runTurboFileBatchTransferFlow');
-		const verifiedAttempt = directBatchTar.indexOf('this.runVerifiedDirectRouteAttempt(');
+		const preparedAttempt = directBatchTar.indexOf('this.runPreparedDirectRouteAttempt(');
 		const finalDataAttempt = batchFlow.indexOf('await options.runAttempt(');
 		const sourceCleanup = batchFlow.indexOf('await options.cleanupSources(');
 
@@ -662,7 +663,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			tarRouteHasOperation: directBatchTarRoute.slice(0, directBatchTarRoute.indexOf('{')).includes('operation:'),
 			tarRouteCleansSources: directBatchTarRoute.includes('cleanupBatchSourcesAfterTar(') || directBatchTarRoute.includes('deleteBatchSources('),
 			tarCoordinatorCleansSources: directBatchTar.includes('cleanupBatchSourcesAfterTar(') || directBatchTar.includes('deleteBatchSources('),
-			verifiedAttemptExists: verifiedAttempt >= 0,
+			preparedAttemptExists: preparedAttempt >= 0,
 			usesRuntimeCoordinator: batchPlan.includes('await runTurboFileBatchTransferFlow({'),
 			cleanupAfterFinalDataSuccess: finalDataAttempt >= 0 && sourceCleanup > finalDataAttempt,
 			finalCleanupOnce: (batchFlow.match(/await options\.cleanupSources\(/g)?.length ?? 0) === 1,
@@ -679,7 +680,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			tarRouteHasOperation: false,
 			tarRouteCleansSources: false,
 			tarCoordinatorCleansSources: false,
-			verifiedAttemptExists: true,
+			preparedAttemptExists: true,
 			usesRuntimeCoordinator: true,
 			cleanupAfterFinalDataSuccess: true,
 			finalCleanupOnce: true,
@@ -693,47 +694,57 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
-	test('reuses the warm verification session and cleans credentials before releasing it', () => {
+	test('reuses warm pane sessions for background route proof without owning their lifetime', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const connect = methodBlock(service, 'private async connect(config: ConnectConfig', 'private async getDirectorySftpSession');
-		const verification = methodBlock(service, 'private async verifyDirectSshRoute', 'private async resolveRemoteRsyncSshBinary');
+		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
+		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
 
 		assert.deepStrictEqual({
-			usesLeasedSession: verification.includes('this.acquireTransferSession(executorEndpoint, progressId)') && verification.includes('const client = executorLease.session.client;'),
+			reusesPaneSessions: pairProbe.includes('this.getReusableDirectorySftpSession(connection)')
+				&& pairProbe.includes('getReusableProbeSession(source.connection)')
+				&& pairProbe.includes('getReusableProbeSession(target.connection)'),
 			registersBeforeConnect: connect.indexOf('this.registerTransferCancelHandler(progressId') >= 0 && connect.indexOf('this.registerTransferCancelHandler(progressId') < connect.indexOf('client.connect('),
 			cancelEndsClient: connect.includes('client.end();'),
 			cancelRejectsTyped: connect.includes('reject(new TurboFileTransferCanceledError())'),
-			keepsConnectedClientAlive: !verification.includes('this.registerTransferCancelHandler(progressId, () => client.end())'),
-			cleanupBeforeRelease: verification.indexOf('credential?.cleanupCommand') < verification.lastIndexOf('executorLease.release();')
+			keepsConnectedClientAlive: !routeProbe.includes('.end()') && routeProbe.includes('this.touchDirectorySftpSession(executorSession.key, executorSession.generation);'),
+			credentialCleanupIsScheduled: routeProbe.includes('this.scheduleDirectProbeCredentialCleanup(executorSession, credential.cleanupCommand);')
 		}, {
-			usesLeasedSession: true,
+			reusesPaneSessions: true,
 			registersBeforeConnect: true,
 			cancelEndsClient: true,
 			cancelRejectsTyped: true,
 			keepsConnectedClientAlive: true,
-			cleanupBeforeRelease: true
+			credentialCleanupIsScheduled: true
 		});
 	});
 
 	test('keeps temporary direct credentials cancelable and cleanup-safe', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const wrapper = methodBlock(service, 'private async runVerifiedDirectRouteAttempt<T>', 'private async verifyDirectSshRoute');
-		const verification = methodBlock(service, 'private async verifyDirectSshRoute', 'private async resolveRemoteRsyncSshBinary');
+		const wrapper = methodBlock(service, 'private async runPreparedDirectRouteAttempt<T>', 'private async resolveRemoteRsyncSshBinary');
+		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
 		const batchTar = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
 		const directTar = methodBlock(service, 'private async tryDirectTarTransferRoute', 'private async tryDirectRsyncTransfer');
 		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
-		const credential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
+		const batchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransferRoute', 'private async tryTunneledBatchRsyncRelayTransfer');
+		const directRsync = methodBlock(service, 'private async tryDirectRsyncTransferRoute', 'private resolvePreparedDirectScpRoute');
+		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
+		const credential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
 		const exec = methodBlock(service, 'private execRemote(client: ISSHClient', 'private execRemoteBytes');
 		const execBytes = methodBlock(service, 'private execRemoteBytes', 'private execRemoteWithInput');
+		const credentialConsumers = [batchTar, directTar, directScp, batchRsync, directRsync, directSftp];
 
 		assert.deepStrictEqual({
-			prechecksRun: wrapper.includes('run: async (route, retry) => {\n\t\t\t\tthis.throwIfTransferCanceled(progressId);') && wrapper.indexOf('this.throwIfTransferCanceled(progressId);') < wrapper.indexOf("if (retry) {") && wrapper.indexOf("if (retry) {") < wrapper.indexOf('return await run(route, retry);'),
-			prechecksVerify: wrapper.includes('verify: async route => {\n\t\t\t\tthis.throwIfTransferCanceled(progressId);'),
-			strictVerifierRead: verification.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, progressId, true)'),
+			preparedWrapperDoesNoNetworkWork: wrapper.includes('return await run(route);')
+				&& !wrapper.includes('prepareRemoteScpCredential')
+				&& !wrapper.includes('verifyDirectSshRoute')
+				&& !wrapper.includes('execRemote'),
+			strictBackgroundProbeRead: routeProbe.includes('this.prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)'),
 			legacyFallback: credential.includes('strictPrivateKeyRead = false') && credential.includes('this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined)'),
-			legacyCallersNonStrict: [batchTar, directTar, directScp].every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId)')),
+			transferCallersNonStrict: credentialConsumers.every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId)')
+				|| block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId)')),
 			checksCancelBeforeSetup: credential.indexOf('this.throwIfTransferCanceled(progressId);') > credential.indexOf('const privateKey =') && credential.indexOf('this.throwIfTransferCanceled(progressId);') < credential.indexOf('const identityPath ='),
-			keepsClientsAliveForCleanup: [batchTar, directTar, directScp].every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('executorLease.release();')),
+			keepsClientsAliveForCleanup: credentialConsumers.every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('executorLease.release();')),
 			cancelableDataExec: batchTar.includes('progressId: request.progressId') && directTar.includes('progressId: request.progressId') && (directScp.match(/progressId: request\.progressId/g)?.length ?? 0) >= 2,
 			execPrechecksCancellation: [exec, execBytes].every(block => {
 				const precheck = block.indexOf('this.throwIfTransferCanceled(options.progressId);');
@@ -742,11 +753,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 					&& precheck < block.indexOf('client.exec(');
 			})
 		}, {
-			prechecksRun: true,
-			prechecksVerify: true,
-			strictVerifierRead: true,
+			preparedWrapperDoesNoNetworkWork: true,
+			strictBackgroundProbeRead: true,
 			legacyFallback: true,
-			legacyCallersNonStrict: true,
+			transferCallersNonStrict: true,
 			checksCancelBeforeSetup: true,
 			keepsClientsAliveForCleanup: true,
 			cancelableDataExec: true,
@@ -793,62 +803,109 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
-	test('bounds auto-fast single-file and directory route selection before any direct data attempt', () => {
+	test('uses the prepared auto-fast route without probing on the single-transfer hot path', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transfer = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
+		const directDispatcher = methodBlock(service, 'private async trySshToSshDirectTransfer', 'private async trySshToSshRelayTransfer');
+		const directRsync = methodBlock(service, 'private async tryDirectRsyncTransfer', 'private async tryDirectRsyncTransferRoute');
+		const directTar = methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute');
+		const directSftp = methodBlock(service, 'private async tryDirectSftpTransfer', 'private async tryDirectSftpTransferRoute');
+		const preparedSelector = methodBlock(service, 'private resolvePreparedDirectAttempts', 'private getOrStartDirectScpProbePair');
 
 		assert.deepStrictEqual({
-			singleFileOnly: transfer.includes("sourceType === 'file'"),
-			directoryTarIncluded: transfer.includes("sourceType === 'directory'") && transfer.includes("firstAttempt?.protocol === 'tar'"),
-			autoOnly: transfer.includes("request.strategyHint !== 'direct'") && transfer.includes("request.strategyHint !== 'relay'"),
-			scpOnly: transfer.includes("firstAttempt?.protocol === 'scp'") && transfer.includes("firstAttempt.route === 'direct'"),
-			boundedDecision: transfer.includes('await this.resolveFastDirectScpRoute(effectiveRequest.source, effectiveRequest.target, fastDirectProtocol)'),
+			allDirectProtocolsCanSelectPreparedRoute: transfer.includes('this.resolvePreparedDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute)')
+				&& preparedSelector.includes("if (attempt.route !== 'direct')")
+				&& preparedSelector.includes('getPreparedDirectRouteProtocol(attempt)')
+				&& preparedSelector.includes('prepared.push('),
+			explicitDirectAlsoUsesPaneDecision: transfer.includes("request.strategyHint !== 'relay'")
+				&& !transfer.includes("request.strategyHint !== 'direct'"),
+			preparedDecision: preparedSelector.includes('this.resolvePreparedDirectScpRoute(source, target, probeProtocol)')
+				&& !preparedSelector.includes('await this.resolvePreparedDirectScpRoute'),
+			capabilityChangesSkipStalePreparedProtocols: preparedSelector.includes('isPreparedDirectRouteProtocolSupported(source, target, probeProtocol)'),
+			inheritedRoutesRequireCurrentSnapshot: preparedSelector.includes('inherited.route === decision.route')
+				&& preparedSelector.includes('inherited.generation === decision.generation')
+				&& preparedSelector.indexOf('this.resolvePreparedDirectScpRoute(source, target, probeProtocol)') < preparedSelector.indexOf('inherited?.probeProtocol === probeProtocol'),
+			noDirectProbeProgress: !transfer.includes('Checking direct') && !transfer.includes('getOrStartDirectScpProbePair') && !transfer.includes('probeDirectScpRoute'),
 			relaySkipsEveryDirectAttempt: transfer.includes("effectiveRequest = { ...effectiveRequest, strategyHint: 'relay' }") && transfer.includes('strategyHint: effectiveRequest.strategyHint'),
-			verifiedPlanKeepsOnlySelectedDirectProtocol: transfer.includes("attempts: plan.attempts.filter(attempt => attempt.route === 'relay' || (attempt.route === 'direct' && attempt.protocol === fastDirectProtocol))"),
-			passesVerifiedRoute: transfer.includes("attempt.route === 'direct' ? preverifiedDirectRoute : undefined"),
-			failedVerifiedRouteIsForgotten: transfer.includes("if (attempt.route === 'direct' && preverifiedDirectRoute && fastDirectProtocol) {")
-				&& transfer.includes('this.forgetDirectScpProbeRoute(effectiveRequest.source, effectiveRequest.target, fastDirectProtocol, preverifiedDirectRoute);')
+			verifiedPlanStartsSelectedDirectBeforeRelays: transfer.includes("attempts: [...selected.map(prepared => prepared.attempt), ...plan.attempts.filter(attempt => attempt.route === 'relay')]"),
+			firstEventIncludesPreparedDirection: transfer.includes("route: attempt.route === 'relay' ? 'relay' : selectedPreparedRoute?.route"),
+			directFallbackKeepsPreparedDirection: transfer.includes('const nextPreparedRoute = preparedDirectRoutes.get(nextAttempt);')
+				&& transfer.includes("route: nextAttempt.route === 'relay' ? 'relay' : nextPreparedRoute?.route"),
+			passesPreparedRouteToEveryProtocol: ['tryDirectRsyncTransfer(request, startedAt, true, preverifiedDirectRoute)', 'tryDirectTarTransfer(request, startedAt, true, preverifiedDirectRoute)', 'tryDirectSftpTransfer(request, startedAt, true, preverifiedDirectRoute)', 'tryDirectScpTransfer(request, startedAt, true, preverifiedDirectRoute)'].every(call => directDispatcher.includes(call)),
+			allDirectMethodsRequirePreparedRoute: [directRsync, directTar, directScp, directSftp].every(block => block.includes('runPreparedDirectRouteAttempt') && !block.includes('runVerifiedDirectRouteAttempt')),
+			legacyTransferVerifierRemoved: !service.includes('runVerifiedDirectRouteAttempt') && !service.includes('verifyDirectSshRoute'),
+			failedTopologyRouteIsForgotten: transfer.includes("if (attempt.route === 'direct' && selectedPreparedRoute && shouldInvalidatePreparedDirectRoute(error)) {")
+				&& transfer.includes('selectedPreparedRoute.probeProtocol, selectedPreparedRoute.route')
 		}, {
-			singleFileOnly: true,
-			directoryTarIncluded: true,
-			autoOnly: true,
-			scpOnly: true,
-			boundedDecision: true,
+			allDirectProtocolsCanSelectPreparedRoute: true,
+			explicitDirectAlsoUsesPaneDecision: true,
+			preparedDecision: true,
+			capabilityChangesSkipStalePreparedProtocols: true,
+			inheritedRoutesRequireCurrentSnapshot: true,
+			noDirectProbeProgress: true,
 			relaySkipsEveryDirectAttempt: true,
-			verifiedPlanKeepsOnlySelectedDirectProtocol: true,
-			passesVerifiedRoute: true,
-			failedVerifiedRouteIsForgotten: true
+			verifiedPlanStartsSelectedDirectBeforeRelays: true,
+			firstEventIncludesPreparedDirection: true,
+			directFallbackKeepsPreparedDirection: true,
+			passesPreparedRouteToEveryProtocol: true,
+			allDirectMethodsRequirePreparedRoute: true,
+			legacyTransferVerifierRemoved: true,
+			failedTopologyRouteIsForgotten: true
 		});
 	});
 
-	test('bounds auto-fast SSH batch route selection before any direct data attempt', () => {
+	test('uses the prepared auto-fast route without probing on the batch-transfer hot path', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
 		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
 		const batchAttempt = methodBlock(service, 'private async runSshToSshBatchTransferAttempt', 'private async runLocalNativeBatchTransfer');
 		const batchTar = methodBlock(service, 'private async tryBatchTarTransfer', 'private createRemoteBatchTarPlan');
 		const directTar = methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute');
+		const directBatchTar = methodBlock(service, 'private async tryDirectBatchTarTransfer', 'private async tryDirectBatchTarTransferRoute');
+		const directBatchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransfer', 'private async tryDirectBatchRsyncTransferRoute');
+		const directBatchRsyncRoute = methodBlock(service, 'private async tryDirectBatchRsyncTransferRoute', 'private async tryTunneledBatchRsyncRelayTransfer');
+		const directRsyncRoute = methodBlock(service, 'private async tryDirectRsyncTransferRoute', 'private resolvePreparedDirectScpRoute');
+		const directSftpRoute = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
+		const concurrentBatch = methodBlock(service, 'private async runConcurrentBatchTransfer', 'private async runSftpRelayTransfer');
 		const batchRelayTar = methodBlock(service, 'private async tryRelayBatchTarTransfer', 'private async runConcurrentBatchTransfer');
 		const singleRelayTar = methodBlock(service, 'private async tryTarRelayTransfer', 'private async tryStreamRelayTransfer');
 
 		assert.deepStrictEqual({
-			autoTarOnly: transferBatchCore.includes("request.strategyHint !== 'direct'")
-				&& transferBatchCore.includes("request.strategyHint !== 'relay'")
-				&& transferBatchCore.includes("initialAttempt?.protocol === 'tar'")
-				&& transferBatchCore.includes("initialAttempt.route === 'direct'"),
-			boundedDecision: transferBatchCore.includes("await this.resolveFastDirectScpRoute(request.source, request.targetDirectory, 'tar')"),
-			relaySkipsEveryDirectAttempt: transferBatchCore.includes("effectiveRequest = { ...request, strategyHint: 'relay' }")
-				&& transferBatchCore.includes('this.runSshToSshBatchTransferPlan(effectiveRequest,'),
-			verifiedPlanKeepsOnlySelectedDirectProtocol: batchPlan.includes("attempts: plan.attempts.filter(attempt => attempt.route === 'relay' || (attempt.route === 'direct' && attempt.protocol === directProtocol))"),
-			passesVerifiedRoute: batchPlan.includes("attempt.route === 'direct' ? preverifiedDirectRoute : undefined")
-				&& batchAttempt.includes('preverifiedDirectRoute?: TurboFileDirectSshRoute')
-				&& batchAttempt.includes("}, items, 'copy', expectedBytes, startedAt, true, preverifiedDirectRoute);"),
-			directTarSkipsLegacyVerification: batchTar.includes('? await this.tryDirectBatchTarTransferRoute(request, items, plan, bytes, startedAt, preverifiedDirectRoute)')
-				&& batchTar.includes(': await this.tryDirectBatchTarTransfer(request, items, plan, bytes, startedAt);'),
+			multiFileUsesActualPlanDecision: batchPlan.includes('this.resolvePreparedDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
+			explicitDirectAlsoUsesPaneDecision: batchPlan.includes("request.strategyHint !== 'relay'")
+				&& !batchPlan.includes("request.strategyHint !== 'direct'"),
+			preparedDecision: batchPlan.includes('this.resolvePreparedDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)')
+				&& !batchPlan.includes('await this.resolvePreparedDirectAttempts'),
+			noDirectProbeProgress: !transferBatchCore.includes('Checking direct'),
+			sshRsyncDoesNotPublishPlannedDirectStrategy: transferBatchCore.includes("const initialIsRsync = initialAttempt?.protocol === 'rsync' && !sshToSsh;"),
+			relaySkipsEveryDirectAttempt: batchPlan.includes("strategyHint: 'relay'")
+				&& batchPlan.includes('resolveTransferPlan({'),
+			verifiedPlanStartsSelectedDirectBeforeRelays: batchPlan.includes("? [...selected.map(prepared => prepared.attempt), ...plan.attempts.filter(attempt => attempt.route === 'relay')]"),
+			firstEventIncludesPreparedDirection: batchPlan.includes("route: attempt.route === 'relay' ? 'relay' : selectedPreparedRoute?.route"),
+			directFallbackKeepsPreparedDirection: batchPlan.includes('const nextPreparedRoute = preparedDirectRoutes.get(nextAttempt);')
+				&& batchPlan.includes("route: nextAttempt.route === 'relay' ? 'relay' : nextPreparedRoute?.route"),
+			passesPreparedRoute: batchPlan.includes('const selectedPreparedRoute = preparedDirectRoutes.get(attempt);')
+				&& batchPlan.includes('attempt, selectedPreparedRoute')
+				&& batchAttempt.includes('preparedDirectRoute?: IPreparedDirectRoute')
+				&& batchAttempt.includes('preparedDirectRoute?.route'),
+			directTarSkipsLegacyVerification: batchTar.includes('this.tryDirectBatchTarTransfer(request, items, plan, bytes, startedAt, preverifiedDirectRoute)')
+				&& directBatchTar.includes('this.runPreparedDirectRouteAttempt(preparedRoute')
+				&& !directBatchTar.includes('runVerifiedDirectRouteAttempt'),
+			directRsyncSkipsLegacyVerification: directBatchRsync.includes('this.runPreparedDirectRouteAttempt(preparedRoute')
+				&& batchAttempt.includes('this.tryDirectBatchRsyncTransfer(request, items, expectedBytes, startedAt, true, preparedDirectRoute?.route)'),
+			privateKeyCredentialsReachEveryDirectProtocol: [directBatchRsyncRoute, directRsyncRoute].every(block => block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId)')
+				&& block.includes('credential.identityPath')
+				&& block.includes('credential.cleanupCommand'))
+				&& directSftpRoute.includes('buildOptimizedSftpCommand(remote.port || 22, !!remote.password, credential.identityPath)')
+				&& directSftpRoute.includes('buildCompatibleSshCommand(remote.port || 22, !!remote.password, credential.identityPath)')
+				&& directSftpRoute.includes('credential.cleanupCommand'),
+			concurrentChildrenReusePreparedRoute: batchAttempt.includes("}, items, 'copy', expectedBytes, startedAt, false, preparedDirectRoute)")
+				&& concurrentBatch.includes('}, preserveDirectErrors, preparedDirectRoute);'),
 			singleDirectoryTarSkipsLegacyVerification: directTar.includes('preverifiedDirectRoute?: TurboFileDirectSshRoute')
-				&& directTar.includes('? this.tryDirectTarTransferRoute(request, startedAt, bytes, preverifiedDirectRoute)'),
-			failedVerifiedRouteIsForgotten: batchPlan.includes("if (attempt.route === 'direct' && preverifiedDirectRoute) {")
-				&& batchPlan.includes("this.forgetDirectScpProbeRoute(request.source, request.targetDirectory, 'tar', preverifiedDirectRoute);"),
+				&& directTar.includes('this.runPreparedDirectRouteAttempt(preverifiedDirectRoute'),
+			failedTopologyRouteIsForgotten: batchPlan.includes("if (attempt.route === 'direct' && selectedPreparedRoute && shouldInvalidatePreparedDirectRoute(error)) {")
+				&& batchPlan.includes('selectedPreparedRoute.probeProtocol, selectedPreparedRoute.route'),
 			warmParallelRelayStreams: batchRelayTar.includes('await this.acquireTransferSessionPair(request.source, request.targetDirectory, request.progressId)')
 				&& batchRelayTar.includes('const [sourceStream, targetStream] = await Promise.all([')
 				&& batchRelayTar.includes('sourceLease.release();')
@@ -858,41 +915,81 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& !batchRelayTar.includes('sourceClient?.end()')
 				&& !singleRelayTar.includes('sourceClient?.end()')
 		}, {
-			autoTarOnly: true,
-			boundedDecision: true,
+			multiFileUsesActualPlanDecision: true,
+			explicitDirectAlsoUsesPaneDecision: true,
+			preparedDecision: true,
+			noDirectProbeProgress: true,
+			sshRsyncDoesNotPublishPlannedDirectStrategy: true,
 			relaySkipsEveryDirectAttempt: true,
-			verifiedPlanKeepsOnlySelectedDirectProtocol: true,
-			passesVerifiedRoute: true,
+			verifiedPlanStartsSelectedDirectBeforeRelays: true,
+			firstEventIncludesPreparedDirection: true,
+			directFallbackKeepsPreparedDirection: true,
+			passesPreparedRoute: true,
 			directTarSkipsLegacyVerification: true,
+			directRsyncSkipsLegacyVerification: true,
+			privateKeyCredentialsReachEveryDirectProtocol: true,
+			concurrentChildrenReusePreparedRoute: true,
 			singleDirectoryTarSkipsLegacyVerification: true,
-			failedVerifiedRouteIsForgotten: true,
+			failedTopologyRouteIsForgotten: true,
 			warmParallelRelayStreams: true
 		});
 	});
 
-	test('uses protocol-matched isolated route probes with session-bound bidirectional caching', () => {
+	test('invalidates a prepared direct route only for topology and connection failures', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const resolver = methodBlock(service, 'private async resolveFastDirectScpRoute', 'private async runDirectScpProbePair');
+		const invalidation = functionBlock(service, 'shouldInvalidatePreparedDirectRoute');
+
+		assert.deepStrictEqual({
+			directUnavailableInvalidates: invalidation.includes('error instanceof TurboFileDirectUnavailableError'),
+			unwrapsDirectDataCause: invalidation.includes('error instanceof TurboFileDirectDataError ? error.transferCause : error'),
+			connectionFailuresInvalidate: ['authentication', 'protocol-unavailable', 'direct-unavailable', 'network-transient'].every(category => invalidation.includes(`category === '${category}'`)),
+			dataAndTargetFailuresStayPrepared: ['permission', 'conflict', 'no-space', 'integrity', 'unknown'].every(category => !invalidation.includes(`category === '${category}'`))
+		}, {
+			directUnavailableInvalidates: true,
+			unwrapsDirectDataCause: true,
+			connectionFailuresInvalidate: true,
+			dataAndTargetFailuresStayPrepared: true
+		});
+	});
+
+	test('uses protocol-matched pane probes with persistent bidirectional decisions', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const preparedCache = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofilePreparedDirectRouteCache.ts'), 'utf8');
+		const panePreparation = methodBlock(service, 'async prepareTransferPair', 'async transferFile');
+		const resolver = methodBlock(service, 'private resolvePreparedDirectScpRoute', 'private getOrStartDirectScpProbePair');
 		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
 		const prepareProbe = methodBlock(service, 'private async createEmptyRemoteProbeFile', 'private async probeDirectScpRoute');
 		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
-		const reachabilityProbe = methodBlock(service, 'private async probeDirectNetworkReachability', 'private scheduleDirectProbeCredentialCleanup');
 		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
 		const cleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
 		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
 		const failedCredentialCleanup = methodBlock(service, 'private scheduleRemoteScpCredentialCleanupRetry', 'private async tryDirectSftpTransfer');
 		const cachedRoute = methodBlock(service, 'private getCachedDirectScpProbeRoute', 'private rememberDirectScpProbeRoute');
 		const rememberRoute = methodBlock(service, 'private rememberDirectScpProbeRoute', 'private rememberDirectScpProbeUnavailable');
+		const forgetRoute = methodBlock(service, 'private forgetDirectScpProbeRoute', 'private async runPreparedDirectRouteAttempt');
 		const command = functionBlock(service, 'buildDirectScpProbeCommand');
 		const tarCommand = functionBlock(service, 'buildDirectTarProbeCommand');
-		const pingCommand = functionBlock(service, 'buildDirectPingProbeCommand');
+		const rsyncCommand = functionBlock(service, 'buildDirectRsyncProbeCommand');
+		const sftpCommand = functionBlock(service, 'buildDirectSftpProbeCommand');
+		const preparedProtocols = functionBlock(service, 'getPreparedDirectRouteProtocols');
 		const connectionKey = functionBlock(service, 'getDirectScpProbeConnectionKey');
 		const pairKey = functionBlock(service, 'getDirectScpProbePairKey');
-		const routeKey = functionBlock(service, 'getDirectScpProbeRouteKey');
 
 		assert.deepStrictEqual({
-			foregroundWaitIs800ms: resolver.includes('return waitForTurboFileDirectRouteProbe('),
+			transferNeverWaitsForProbe: resolver.includes(': PreparedDirectRouteDecision')
+				&& resolver.includes("return { kind: 'relay' };")
+				&& !resolver.includes('Promise<')
+				&& !resolver.includes('await ')
+				&& !resolver.includes('waitForTurboFileDirectRouteProbe'),
+			transferNeverStartsProbe: !resolver.includes('getOrStartDirectScpProbePair'),
+			paneRetriesOnlyIndeterminateProbes: panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_ATTEMPTS')
+				&& panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_RETRY_MS')
+				&& panePreparation.includes('this.getOrStartDirectScpProbePair(source, target, protocol, true)')
+				&& panePreparation.includes('throw new Error(`Direct route preparation is still pending'),
+			staleDecisionsRefreshOnlyInBackground: panePreparation.includes('this.preparedDirectRouteCache.needsRefresh(')
+				&& panePreparation.includes('DIRECT_ROUTE_BACKGROUND_REFRESH_MS'),
 			backgroundHasIndependentLimit: pairProbe.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && pairProbe.includes('coordinateTurboFileDirectRouteProbe'),
+			boundedUnprovenRoutesBecomeRefreshableRelay: pairProbe.includes('{ ...decision, confirmedUnavailable: true, sourceSession, targetSession }'),
 			reusesBothPaneSessions: pairProbe.includes('this.getReusableDirectorySftpSession(connection)')
 				&& pairProbe.includes('getReusableProbeSession(source.connection)')
 				&& pairProbe.includes('getReusableProbeSession(target.connection)'),
@@ -907,12 +1004,22 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& tarCommand.includes('buildDirectTarProgressPrerequisiteCommand()')
 				&& tarCommand.includes('command -v bash')
 				&& tarCommand.includes('command -v tar'),
-			directionalPingPrecheck: routeProbe.includes('this.probeDirectNetworkReachability(executorSession.client, remoteConnection.host, token, reachabilityBudget)')
-				&& routeProbe.includes("const executorSession = route === 'source-push' ? sourceSession : targetSession;")
-				&& routeProbe.includes("const remoteConnection = route === 'source-push' ? target.connection : source.connection;")
-				&& reachabilityProbe.includes('execRemoteBytes(client, command')
-				&& pingCommand.includes('ping -n -c 1 -W 1')
-				&& pingCommand.includes('quotePosixShellArg(host)'),
+			matchedRsyncAndSftpCommands: routeProbe.includes("protocol === 'rsync'")
+				&& routeProbe.includes('buildDirectRsyncProbeCommand(remoteConnection, credential.identityPath, marker)')
+				&& routeProbe.includes('buildDirectSftpProbeCommand(remoteConnection, credential.identityPath, marker)')
+				&& rsyncCommand.includes('command -v rsync')
+				&& rsyncCommand.includes('buildDirectScpSshCommand(')
+				&& sftpCommand.includes('buildOptimizedSftpCommand(')
+				&& sftpCommand.includes("printf 'quit\\\\n'"),
+			preparesOnlyPlannedDirectProtocols: preparedProtocols.includes('resolveTransferPlan({ source, target, ...shape })')
+				&& preparedProtocols.includes("if (attempt.route !== 'direct')")
+				&& preparedProtocols.includes('isPreparedDirectRouteProtocolSupported(source, target, attempt.protocol)')
+				&& preparedProtocols.includes('protocols.add(attempt.protocol)'),
+			allPlannedDirectProtocolsAreCollected: preparedProtocols.includes('for (const attempt of resolveTransferPlan({ source, target, ...shape }).attempts)')
+				&& !preparedProtocols.includes('.attempts.find('),
+			noSerialPingBeforeProtocolProof: !service.includes('probeDirectNetworkReachability')
+				&& !service.includes('buildDirectPingProbeCommand')
+				&& routeProbe.includes('execRemoteBytes(executorSession.client, command, { timeoutMs: remainingMs, token })'),
 			noBusinessPaths: !command.includes('request.source.path') && !command.includes('request.target.path'),
 			privateKeyParity: routeProbe.includes('prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)') && routeProbe.includes('credential.identityPath'),
 			boundedCredentialSetup: routeProbe.includes('const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && service.includes('await this.execRemote(client, setupCommand, { progressId, token, timeoutMs });'),
@@ -929,31 +1036,44 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)')
 				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
 			credentialAwareKey: connectionKey.includes("createHash('sha256')") && connectionKey.includes('connection.password') && connectionKey.includes('connection.privateKey') && connectionKey.includes('connection.passphrase'),
-			directionalSingleFlight: pairKey.includes('source)}=>${getDirectScpProbeConnectionKey(target)}:${protocol}') && !pairKey.includes('.sort()'),
-			protocolSpecificOperationCache: routeKey.includes(':${protocol}:${route}') && routeKey.includes('DirectRouteProbeProtocol'),
-			cacheRequiresLiveProbeSessions: cachedRoute.includes('!entry.sourceSession.closed')
-				&& cachedRoute.includes('!entry.targetSession.closed')
-				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.sourceSession.key, entry.sourceSession.generation)')
-				&& cachedRoute.includes('this.directorySftpSessionGenerations.isCurrent(entry.targetSession.key, entry.targetSession.generation)'),
-			positiveAndNegativeCache: service.includes('directScpProbeAvailableAt.set(')
-				&& service.includes('directScpProbeUnavailableAt.set(')
-				&& service.includes('DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS')
+			bidirectionalSingleFlight: pairKey.includes('.sort()') && pairKey.includes('<=>${pair[1]}:${protocol}'),
+			protocolSpecificOperationCache: preparedCache.includes('`${this.pairKey(sourceKey, targetKey, protocol)}:${route}`'),
+			cachePersistsBeyondProbeSessions: !cachedRoute.includes('entry.sourceSession')
+				&& !cachedRoute.includes('entry.targetSession')
+				&& !cachedRoute.includes('DIRECT_SCP_PROBE_AVAILABLE_TTL_MS'),
+			positiveAndNegativeCache: preparedCache.includes('this.directRoutes.set(')
+				&& preparedCache.includes('this.relayPairs.set(')
+				&& !service.includes('DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS')
 				&& service.includes('invertDirectSshRoute(route)'),
+			lastDecisionSurvivesRefreshAge: preparedCache.includes('needsRefresh(')
+				&& preparedCache.includes('return preparedAt === undefined || now - preparedAt')
+				&& !preparedCache.includes('this.directRoutes.delete(this.routeKey(sourceKey, targetKey, protocol, route));\n\t\treturn undefined;'),
 			reverseDirectionCache: rememberRoute.includes('const reverseRoute = invertDirectSshRoute(route);')
-				&& rememberRoute.includes('getDirectScpProbeRouteKey(target, source, protocol, reverseRoute)')
-				&& rememberRoute.includes('sourceSession: targetSession, targetSession: sourceSession')
+				&& preparedCache.includes('this.routeKey(targetKey, sourceKey, protocol, reverseRoute)')
 				&& rememberRoute.includes('this.directSshRouteCache.set(getDirectSshRouteCacheKey(target, source), reverseRoute);'),
-			negativeCacheRequiresConfirmedFailure: service.includes('outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession')
+			failedPhysicalDirectionClearsMirror: forgetRoute.includes('this.preparedDirectRouteCache.forgetRoute(')
+				&& forgetRoute.includes('generation')
+				&& preparedCache.includes('?.generation !== generation')
+				&& preparedCache.includes('this.routeKey(targetKey, sourceKey, protocol, invertDirectSshRoute(route))'),
+			backgroundRelayIsPersisted: service.includes('else if (outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession)')
+				&& service.includes('this.rememberDirectScpProbeUnavailable(source.connection!, target.connection!, protocol);')
 		}, {
-			foregroundWaitIs800ms: true,
+			transferNeverWaitsForProbe: true,
+			transferNeverStartsProbe: true,
+			paneRetriesOnlyIndeterminateProbes: true,
+			staleDecisionsRefreshOnlyInBackground: true,
 			backgroundHasIndependentLimit: true,
+			boundedUnprovenRoutesBecomeRefreshableRelay: true,
 			reusesBothPaneSessions: true,
 			restoresLateSessionIdleTimers: true,
 			isolatedTemporaryPaths: true,
 			latePreparationIsUnlinked: true,
 			realScpCommand: true,
 			matchedTarCommand: true,
-			directionalPingPrecheck: true,
+			matchedRsyncAndSftpCommands: true,
+			preparesOnlyPlannedDirectProtocols: true,
+			allPlannedDirectProtocolsAreCollected: true,
+			noSerialPingBeforeProtocolProof: true,
 			noBusinessPaths: true,
 			privateKeyParity: true,
 			boundedCredentialSetup: true,
@@ -962,12 +1082,14 @@ suite('TurboFileSshMainServiceStatic', () => {
 			failedCredentialSetupCleanupRetries: true,
 			exactCleanup: true,
 			credentialAwareKey: true,
-			directionalSingleFlight: true,
+			bidirectionalSingleFlight: true,
 			protocolSpecificOperationCache: true,
-			cacheRequiresLiveProbeSessions: true,
+			cachePersistsBeyondProbeSessions: true,
 			positiveAndNegativeCache: true,
+			lastDecisionSurvivesRefreshAge: true,
 			reverseDirectionCache: true,
-			negativeCacheRequiresConfirmedFailure: true
+			failedPhysicalDirectionClearsMirror: true,
+			backgroundRelayIsPersisted: true
 		});
 	});
 
