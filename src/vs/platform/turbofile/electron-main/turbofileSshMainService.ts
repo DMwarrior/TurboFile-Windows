@@ -280,7 +280,7 @@ interface IDirectScpProbeUnavailableCacheEntry {
 
 type IDirectScpProbeOutcome =
 	| { readonly kind: 'direct'; readonly route: TurboFileDirectSshRoute; readonly sourceSession: IRemoteDirectorySftpSession; readonly targetSession: IRemoteDirectorySftpSession }
-	| { readonly kind: 'relay'; readonly sourceSession?: IRemoteDirectorySftpSession; readonly targetSession?: IRemoteDirectorySftpSession };
+	| { readonly kind: 'relay'; readonly confirmedUnavailable?: true; readonly sourceSession?: IRemoteDirectorySftpSession; readonly targetSession?: IRemoteDirectorySftpSession };
 
 type DirectRouteProbeProtocol = 'scp' | 'tar';
 
@@ -5968,7 +5968,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		started = this.runDirectScpProbePair(source, target, protocol).then(outcome => {
 			if (outcome.kind === 'direct') {
 				this.rememberDirectScpProbeRoute(source.connection!, target.connection!, protocol, outcome.route, outcome.sourceSession, outcome.targetSession);
-			} else if (outcome.sourceSession && outcome.targetSession) {
+			} else if (outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession) {
 				this.rememberDirectScpProbeUnavailable(source.connection!, target.connection!, protocol, outcome.sourceSession, outcome.targetSession);
 			}
 		}).catch(() => undefined).finally(() => {
@@ -6077,6 +6077,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const remoteConnection = route === 'source-push' ? target.connection : source.connection;
 		let credential: IRemoteScpCredential | undefined;
 		try {
+			const reachabilityBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS - (performance.now() - startedAt));
+			if (reachabilityBudget <= 0) {
+				return 'indeterminate';
+			}
+			const reachability = await this.probeDirectNetworkReachability(executorSession.client, remoteConnection.host, token, reachabilityBudget);
+			if (reachability === 'available') {
+				return 'available';
+			}
+			if (token.isCancellationRequested) {
+				return 'indeterminate';
+			}
 			const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS - (performance.now() - startedAt));
 			if (credentialBudget <= 0) {
 				return 'indeterminate';
@@ -6110,6 +6121,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (credential?.cleanupCommand) {
 				this.scheduleDirectProbeCredentialCleanup(executorSession, credential.cleanupCommand);
 			}
+		}
+	}
+
+	private async probeDirectNetworkReachability(client: ISSHClient, host: string, token: CancellationToken, timeoutMs: number): Promise<TurboFileDirectVerification> {
+		const marker = `__TURBOFILE_DIRECT_PING_READY__${randomUUID()}`;
+		const command = buildDirectPingProbeCommand(host, marker);
+		try {
+			const output = await this.execRemoteBytes(client, command, { timeoutMs: Math.max(1, Math.min(timeoutMs, 1500)), token });
+			return output.toString('utf8') === marker ? 'available' : 'indeterminate';
+		} catch {
+			// ICMP may be disabled even when SSH is reachable. Keep the protocol-level probe as fallback.
+			return 'indeterminate';
 		}
 	}
 
@@ -11527,6 +11550,10 @@ function buildDirectScpProbeCommand(
 	const targetArg = route === 'source-push' ? `${remoteUserHost}:${sourcePushTargetPath}` : targetPullTargetPath;
 	const command = `${buildSshpassPrefix(remote.password)}${buildDirectScpCommand(remote.port || 22, !!remote.password, identityPath)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`;
 	return `${command} && printf %s ${quotePosixShellArg(marker)}`;
+}
+
+function buildDirectPingProbeCommand(host: string, marker: string): string {
+	return `command -v ping >/dev/null 2>&1 && ping -n -c 1 -W 1 ${quotePosixShellArg(host)} >/dev/null 2>&1 && printf %s ${quotePosixShellArg(marker)}`;
 }
 
 function buildDirectTarProbeCommand(remote: ITurboFileSshConnectionOptions, identityPath: string | undefined, marker: string): string {

@@ -876,13 +876,16 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
 		const prepareProbe = methodBlock(service, 'private async createEmptyRemoteProbeFile', 'private async probeDirectScpRoute');
 		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
+		const reachabilityProbe = methodBlock(service, 'private async probeDirectNetworkReachability', 'private scheduleDirectProbeCredentialCleanup');
 		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
 		const cleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
 		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
 		const failedCredentialCleanup = methodBlock(service, 'private scheduleRemoteScpCredentialCleanupRetry', 'private async tryDirectSftpTransfer');
 		const cachedRoute = methodBlock(service, 'private getCachedDirectScpProbeRoute', 'private rememberDirectScpProbeRoute');
+		const rememberRoute = methodBlock(service, 'private rememberDirectScpProbeRoute', 'private rememberDirectScpProbeUnavailable');
 		const command = functionBlock(service, 'buildDirectScpProbeCommand');
 		const tarCommand = functionBlock(service, 'buildDirectTarProbeCommand');
+		const pingCommand = functionBlock(service, 'buildDirectPingProbeCommand');
 		const connectionKey = functionBlock(service, 'getDirectScpProbeConnectionKey');
 		const pairKey = functionBlock(service, 'getDirectScpProbePairKey');
 		const routeKey = functionBlock(service, 'getDirectScpProbeRouteKey');
@@ -904,6 +907,12 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& tarCommand.includes('buildDirectTarProgressPrerequisiteCommand()')
 				&& tarCommand.includes('command -v bash')
 				&& tarCommand.includes('command -v tar'),
+			directionalPingPrecheck: routeProbe.includes('this.probeDirectNetworkReachability(executorSession.client, remoteConnection.host, token, reachabilityBudget)')
+				&& routeProbe.includes("const executorSession = route === 'source-push' ? sourceSession : targetSession;")
+				&& routeProbe.includes("const remoteConnection = route === 'source-push' ? target.connection : source.connection;")
+				&& reachabilityProbe.includes('execRemoteBytes(client, command')
+				&& pingCommand.includes('ping -n -c 1 -W 1')
+				&& pingCommand.includes('quotePosixShellArg(host)'),
 			noBusinessPaths: !command.includes('request.source.path') && !command.includes('request.target.path'),
 			privateKeyParity: routeProbe.includes('prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)') && routeProbe.includes('credential.identityPath'),
 			boundedCredentialSetup: routeProbe.includes('const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && service.includes('await this.execRemote(client, setupCommand, { progressId, token, timeoutMs });'),
@@ -929,7 +938,12 @@ suite('TurboFileSshMainServiceStatic', () => {
 			positiveAndNegativeCache: service.includes('directScpProbeAvailableAt.set(')
 				&& service.includes('directScpProbeUnavailableAt.set(')
 				&& service.includes('DIRECT_SCP_PROBE_UNAVAILABLE_TTL_MS')
-				&& service.includes('invertDirectSshRoute(route)')
+				&& service.includes('invertDirectSshRoute(route)'),
+			reverseDirectionCache: rememberRoute.includes('const reverseRoute = invertDirectSshRoute(route);')
+				&& rememberRoute.includes('getDirectScpProbeRouteKey(target, source, protocol, reverseRoute)')
+				&& rememberRoute.includes('sourceSession: targetSession, targetSession: sourceSession')
+				&& rememberRoute.includes('this.directSshRouteCache.set(getDirectSshRouteCacheKey(target, source), reverseRoute);'),
+			negativeCacheRequiresConfirmedFailure: service.includes('outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession')
 		}, {
 			foregroundWaitIs800ms: true,
 			backgroundHasIndependentLimit: true,
@@ -939,6 +953,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			latePreparationIsUnlinked: true,
 			realScpCommand: true,
 			matchedTarCommand: true,
+			directionalPingPrecheck: true,
 			noBusinessPaths: true,
 			privateKeyParity: true,
 			boundedCredentialSetup: true,
@@ -950,7 +965,9 @@ suite('TurboFileSshMainServiceStatic', () => {
 			directionalSingleFlight: true,
 			protocolSpecificOperationCache: true,
 			cacheRequiresLiveProbeSessions: true,
-			positiveAndNegativeCache: true
+			positiveAndNegativeCache: true,
+			reverseDirectionCache: true,
+			negativeCacheRequiresConfirmedFailure: true
 		});
 	});
 

@@ -14,7 +14,7 @@ export const TURBO_FILE_DIRECT_ROUTE_PROBE_DECISION_BUDGET_MS = 100;
 
 export type TurboFileDirectRouteProbeDecision =
 	| { readonly kind: 'direct'; readonly route: TurboFileDirectSshRoute }
-	| { readonly kind: 'relay' };
+	| { readonly kind: 'relay'; readonly confirmedUnavailable?: true };
 
 export interface ITurboFileDirectRouteProbeOptions {
 	readonly probe: (route: TurboFileDirectSshRoute, token: CancellationToken) => Promise<TurboFileDirectVerification>;
@@ -58,6 +58,7 @@ export function coordinateTurboFileDirectRouteProbe(options: ITurboFileDirectRou
 
 	return new Promise<TurboFileDirectRouteProbeDecision>((resolve, reject) => {
 		let settled = false;
+		const verifications = new Map<TurboFileDirectSshRoute, TurboFileDirectVerification>();
 		let cancellationListener: IDisposable | undefined;
 		let deadline: ReturnType<typeof setTimeout> | undefined;
 
@@ -88,7 +89,8 @@ export function coordinateTurboFileDirectRouteProbe(options: ITurboFileDirectRou
 			callback();
 		};
 		const finishRelay = (cancelActive: boolean): void => {
-			finish(() => resolve({ kind: 'relay' }), cancelActive);
+			const confirmedUnavailable = routes.every(route => verifications.get(route) === 'unavailable');
+			finish(() => resolve(confirmedUnavailable ? { kind: 'relay', confirmedUnavailable: true } : { kind: 'relay' }), cancelActive);
 		};
 		const finishCancellation = (error: unknown): void => {
 			finish(() => reject(error), true);
@@ -102,6 +104,7 @@ export function coordinateTurboFileDirectRouteProbe(options: ITurboFileDirectRou
 				return;
 			}
 			activeRoutes.delete(route);
+			verifications.set(route, verification);
 			if (verification === 'available') {
 				finish(() => resolve({ kind: 'direct', route }), true);
 				return;

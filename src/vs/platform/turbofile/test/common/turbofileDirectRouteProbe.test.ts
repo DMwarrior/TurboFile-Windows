@@ -59,7 +59,7 @@ suite('TurboFileDirectRouteProbe', () => {
 		assert.strictEqual(settled, false);
 		probes.get('target-pull')?.complete('unavailable');
 
-		assert.deepStrictEqual(await decision, { kind: 'relay' });
+		assert.deepStrictEqual(await decision, { kind: 'relay', confirmedUnavailable: true });
 	});
 
 	test('keeps waiting for the other direction after an indeterminate result', async () => {
@@ -111,6 +111,14 @@ suite('TurboFileDirectRouteProbe', () => {
 		} finally {
 			clock.restore();
 		}
+	});
+
+	test('does not confirm relay when either direction is indeterminate', async () => {
+		const decision = await coordinateTurboFileDirectRouteProbe({
+			probe: async route => route === 'source-push' ? 'unavailable' : 'indeterminate'
+		});
+
+		assert.deepStrictEqual(decision, { kind: 'relay' });
 	});
 
 	test('uses an 800ms default hard deadline and cancels both hanging probes on timeout', async () => {
@@ -212,7 +220,7 @@ suite('TurboFileDirectRouteProbe', () => {
 		const second = await coordinateTurboFileDirectRouteProbe({ probe });
 
 		assert.deepStrictEqual([first, second], [
-			{ kind: 'relay' },
+			{ kind: 'relay', confirmedUnavailable: true },
 			{ kind: 'direct', route: 'source-push' }
 		]);
 	});
