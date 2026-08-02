@@ -35,6 +35,9 @@ export function classifyTurboFileTransferFailure(error: unknown): ITurboFileTran
 	if (name.includes('canceled') || name.includes('cancelled') || /\b(cancel(?:ed|led)?|aborted)\b|取消/.test(message)) {
 		return failure('canceled', false, false);
 	}
+	if (/turbofile_scp_commit_failed/.test(message)) {
+		return failure('integrity', false, false);
+	}
 	if (/authentication|auth fail|all configured authentication methods failed|invalid credential|login incorrect/.test(message)) {
 		return failure('authentication', false, false);
 	}

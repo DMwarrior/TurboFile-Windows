@@ -18,6 +18,7 @@ suite('TurboFileTransferFailure', () => {
 			['Permission denied', 'permission'],
 			['Target already exists', 'conflict'],
 			['ENOSPC: no space left on device', 'no-space'],
+			['TURBOFILE_SCP_COMMIT_FAILED: remote target commit failed', 'integrity'],
 			['Transfer canceled', 'canceled']
 		] as const) {
 			const failure = classifyTurboFileTransferFailure(new Error(message));

@@ -56,6 +56,16 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(progress.includes("activeItem.status = isCompleted ? 'success' : isFailed ? 'error' : isCanceled ? 'canceled' : 'running'"));
 	});
 
+	test('renders the first positive byte without waiting for the steady-state throttle', () => {
+		const editor = readEditor();
+		const progressStart = editor.indexOf('private updateTransferProgress');
+		const progress = editor.slice(progressStart, editor.indexOf('private calculateTransferSpeed', progressStart));
+
+		assert.ok(progress.includes('const previousVisibleTransferredBytes = activeItem?.transferredBytes ?? task.transferredBytes ?? 0;'));
+		assert.ok(progress.includes('const isFirstPositiveBytes = transferredBytes > 0 && previousVisibleTransferredBytes <= 0;'));
+		assert.ok(progress.includes('semanticChanged || isFirstPositiveBytes || isTerminal'));
+	});
+
 	test('starts native batch transfers with a taskbar-only refresh', () => {
 		const editor = readEditor();
 		const batchStart = editor.indexOf('private async transferItemsBatch');
@@ -82,6 +92,54 @@ suite('TurboFileRendererBatchHotPath', () => {
 		const itemTransfer = editor.slice(itemStart, editor.indexOf('private async transferItemsBatch', itemStart));
 		assert.ok(sizePreparation.includes('Math.max(10, task.progress), false);'));
 		assert.ok(itemTransfer.includes('Math.max(35, options.task.progress), false);'));
+	});
+
+	test('updates visible task-log terminal state without restoring a full render', () => {
+		const editor = readEditor();
+		const rowStart = editor.indexOf('private renderTaskRow');
+		const renderTaskRow = editor.slice(rowStart, editor.indexOf('private async cancelTask', rowStart));
+		const finishStart = editor.indexOf('private finishTask');
+		const finishTask = editor.slice(finishStart, editor.indexOf('private refreshVisibleTaskLogEntry', finishStart));
+		const normalizedFinishTask = finishTask.replace(/\r\n/g, '\n');
+		const refreshStart = editor.indexOf('private refreshVisibleTaskLogEntry');
+		const refreshVisibleTaskLogEntry = editor.slice(refreshStart, editor.indexOf('private getTaskStats', refreshStart));
+
+		assert.ok(renderTaskRow.includes('row.dataset.taskId = String(task.id);'));
+		assert.ok(normalizedFinishTask.includes([
+			'if (shouldRender) {',
+			'\t\t\tthis.render();',
+			'\t\t} else {',
+			'\t\t\tthis.refreshTaskbar();',
+			'\t\t\tthis.refreshVisibleTaskLogEntry(task);',
+			'\t\t}'
+		].join('\n')));
+		assert.ok(refreshVisibleTaskLogEntry.includes("this.activePage !== 'tasks' && !this.isTaskLogVisible"));
+		assert.ok(refreshVisibleTaskLogEntry.includes("querySelectorAll<HTMLElement>('.turbofile-task-log-list')"));
+		assert.ok(refreshVisibleTaskLogEntry.includes('current.replaceWith(this.renderTaskRow(task));'));
+		assert.ok(refreshVisibleTaskLogEntry.includes("'.turbofile-task-summary-grid .turbofile-summary-card strong'"));
+		assert.ok(!refreshVisibleTaskLogEntry.includes('this.render();'));
+	});
+
+	test('gives cancellable file tasks an operation id and forwards it to the backend', () => {
+		const editor = readEditor();
+		const beginTaskStart = editor.indexOf('private beginTask(');
+		const beginTask = editor.slice(beginTaskStart, editor.indexOf('private updateTask', beginTaskStart));
+		const permanentDeleteStart = editor.indexOf('private async permanentlyDeleteSelected(');
+		const permanentDelete = editor.slice(permanentDeleteStart, editor.indexOf('private formatPermanentDeleteError', permanentDeleteStart));
+		const compressStart = editor.indexOf('private async compressSelected(');
+		const compress = editor.slice(compressStart, editor.indexOf('private async extractSelected', compressStart));
+		const cancelStart = editor.indexOf('private async cancelTask(');
+		const cancelTask = editor.slice(cancelStart, editor.indexOf('private async retryTask', cancelStart));
+		const syncScanStart = editor.indexOf('private async collectSyncTree(');
+		const syncScan = editor.slice(syncScanStart, editor.indexOf('private async listPaneDirectory', syncScanStart));
+
+		assert.ok(beginTask.includes('progressId: this.isTaskCancellable(kind)'));
+		assert.ok(permanentDelete.includes('{ progressId: task.progressId }'));
+		assert.ok(compress.includes('{ progressId: task.progressId }'));
+		assert.ok(cancelTask.includes("task.kind === 'sync' && this.syncPreviewState"));
+		assert.ok(cancelTask.includes('preview.resolve(undefined)'));
+		assert.ok(cancelTask.includes('this.prewarmCurrentTransferPair(true)'));
+		assert.ok(syncScan.includes('this.throwIfTaskCancelRequested(task)'));
 	});
 
 	test('defers native drops by one timer tick without animation-frame waits', () => {
@@ -173,10 +231,14 @@ suite('TurboFileRendererBatchHotPath', () => {
 			assert.ok(transfer.includes('this.toTransferEndpoint(sourceDevice'));
 			assert.ok(transfer.includes('this.toTransferEndpoint(targetDevice'));
 		}
-		assert.ok(options.includes('const [password, privateKey, passphrase] = await Promise.all(['));
+		assert.ok(options.includes('const connection = Promise.all(['));
+		assert.ok(options.includes(']).then(([password, privateKey, passphrase]) => ({'));
 		assert.ok(options.includes('this.deviceStore?.getPassword(device.id)'));
 		assert.ok(options.includes('this.deviceStore?.getPrivateKey(device.id)'));
 		assert.ok(options.includes('this.deviceStore?.getPassphrase(device.id)'));
+		assert.ok(options.includes('this.preparedTransferConnections.get(cacheKey)'));
+		assert.ok(options.includes('this.preparedTransferConnections.set(cacheKey, connection)'));
+		assert.ok(options.includes('this.preparedTransferConnections.delete(cacheKey)'));
 	});
 
 	test('prewarms both remote panes before the user starts a transfer', () => {
@@ -203,6 +265,11 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(prewarm.includes('this.toTransferEndpoint(sourceDevice'));
 		assert.ok(prewarm.includes('this.toTransferEndpoint(targetDevice'));
 		assert.ok(prewarm.includes('this.sshService.prepareTransferPair(source, target)'));
+		const resolvedEndpointGuard = prewarm.indexOf('if (this.preparedTransferPairGeneration !== generation || this.preparingTransferPairKey !== pairKey)');
+		assert.ok(resolvedEndpointGuard > prewarm.indexOf('this.toTransferEndpoint(targetDevice'));
+		assert.ok(resolvedEndpointGuard < prewarm.indexOf('this.sshService.prepareTransferPair(source, target)'), 'a superseded pair must not enter the main-process prewarm after secret resolution');
+		assert.ok(!prewarm.includes('sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID || targetDevice.id === LOCAL_WINDOWS_DEVICE_ID'));
+		assert.ok(prewarm.includes("sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID"));
 		assert.ok(prewarm.includes('this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_REFRESH_MS)'));
 		assert.ok(prewarm.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS[retryIndex]'));
 		assert.ok(editor.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000]'));
@@ -220,6 +287,7 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(invalidate.includes('this.preparingTransferPairKey = undefined;'));
 		assert.ok(invalidate.includes('this.preparedTransferPairKey = undefined;'));
 		assert.ok(invalidate.includes('this.preparedTransferPairScheduler.cancel();'));
+		assert.ok(invalidate.includes('this.preparedTransferConnections.clear();'));
 		assert.ok(deleteDevice.includes('this.invalidatePreparedTransferPair();'));
 		assert.ok(deleteDevice.includes('this.prewarmCurrentTransferPair(true);'));
 		assert.ok(saveDevice.includes('this.invalidatePreparedTransferPair();'));
@@ -233,5 +301,52 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(pageRestore.includes('this.prewarmCurrentTransferPair(true);'));
 		assert.ok(editor.includes('this.deviceStore.onDidChangeDeviceSecret(() => {'));
 		assert.ok(editor.includes('this.preparedTransferPairScheduler.schedule(0);'));
+	});
+
+	test('keeps post-transfer mutations bound to the captured device and directory context', () => {
+		const editor = readEditor();
+		const contextStart = editor.indexOf('private createTransferContext');
+		const contextHelpers = editor.slice(contextStart, editor.indexOf('private remapSelectionAfterMove', contextStart));
+		const batchStart = editor.indexOf('private async transferItemsBatch');
+		const batch = editor.slice(batchStart, editor.indexOf('/**', batchStart));
+
+		assert.ok(contextHelpers.includes('sourceDirectoryPath: string = this.paneStates[sourceSide].path'));
+		assert.ok(contextHelpers.includes('targetDirectoryPath: string = this.paneStates[targetSide].path'));
+		assert.ok(contextHelpers.includes('joinPanePath(context.target.directoryPath'));
+		assert.ok(contextHelpers.includes("return (['left', 'right'] as const).filter(side => this.isPaneAtTransferLocation(side, location));"));
+		assert.ok(contextHelpers.includes('this.paneDeviceSnapshots.delete(snapshotKey);'));
+		assert.ok(batch.includes('this.toTransferEndpoint(targetDevice, transferContext.target.directoryPath)'));
+		assert.ok(!batch.includes('this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path)'));
+	});
+
+	test('finishes failed or canceled batches before starting non-blocking reconciliation', () => {
+		const editor = readEditor();
+		const batchStart = editor.indexOf('private async transferItemsBatch');
+		const batch = editor.slice(batchStart, editor.indexOf('/**', batchStart));
+		const canceledFinish = batch.indexOf("this.finishTask(task, 'canceled'");
+		const canceledReconcile = batch.indexOf('this.schedulePostTransferReconcile(operation, transferContext);', canceledFinish);
+		const errorFinish = batch.indexOf("this.finishTask(task, 'error'", canceledReconcile);
+		const errorReconcile = batch.indexOf('this.schedulePostTransferReconcile(operation, transferContext);', errorFinish);
+
+		assert.ok(canceledFinish >= 0 && canceledReconcile > canceledFinish);
+		assert.ok(errorFinish >= 0 && errorReconcile > errorFinish);
+		assert.ok(!batch.includes('await this.refreshTransferPanes'));
+		assert.ok(!batch.includes('await this.refreshPane'));
+	});
+
+	test('invalidates active reconciliation and removes native move rows only after success', () => {
+		const editor = readEditor();
+		const beginStart = editor.indexOf('private beginTask');
+		const beginTask = editor.slice(beginStart, editor.indexOf('private updateTask', beginStart));
+		const moveStart = editor.indexOf('private async moveSelectedItemsIntoDirectory');
+		const move = editor.slice(moveStart, editor.indexOf('private async moveInternalItemsNatively', moveStart));
+
+		assert.ok(beginTask.includes('this.postTransferReconcileGeneration.left++;'));
+		assert.ok(beginTask.includes('this.postTransferReconcileGeneration.right++;'));
+		assert.ok(move.includes('result = await this.sshService.movePathsIntoDirectory'));
+		assert.ok(move.includes("this.applyOptimisticTransferResult('move', transferContext, sourceItems);"));
+		assert.ok(move.indexOf("this.applyOptimisticTransferResult('move', transferContext, sourceItems);") > move.indexOf('if (!result.ok)'));
+		assert.ok(!move.includes('this.removePaneItems(side, sourceItems)'));
+		assert.ok(move.includes('} catch (error) {'));
 	});
 });

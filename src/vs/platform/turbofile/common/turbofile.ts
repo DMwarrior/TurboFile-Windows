@@ -47,22 +47,22 @@ export interface ITurboFileSshService {
 	listTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashListing>;
 	restoreTrashItems(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult>;
 	permanentlyDeleteTrashItems(request: ITurboFileTrashItemsRequest): Promise<ITurboFileTrashOperationResult>;
-	emptyTrash(device: ITurboFileTrashDevice): Promise<ITurboFileTrashOperationResult>;
+	emptyTrash(device: ITurboFileTrashDevice, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileTrashOperationResult>;
 	getTrashState(device: ITurboFileTrashDevice): Promise<ITurboFileTrashState>;
-	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean): Promise<ITurboFileFileOperationResult>;
+	deletePath(endpoint: ITurboFileTransferEndpoint, recursive?: boolean, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
 	/**
 	 * Deletes many paths in as few round trips as possible (POSIX remote: a single `xargs -0 rm`).
 	 * All endpoints must target the same device/connection.
 	 */
-	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean): Promise<ITurboFileFileOperationResult>;
+	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
 	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
 	/**
 	 * Moves many paths into a single target directory in as few round trips as possible (POSIX remote:
 	 * one `xargs -0 mv` — a metadata-only rename, no data copied). All sources must be on the same
 	 * device as the target directory.
 	 */
-	movePathsIntoDirectory(sources: readonly ITurboFileTransferEndpoint[], targetDirectory: string): Promise<ITurboFileFileOperationResult>;
-	calculatePathSize(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFilePathSizeResult>;
+	movePathsIntoDirectory(sources: readonly ITurboFileTransferEndpoint[], targetDirectory: string, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
+	calculatePathSize(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFilePathSizeResult>;
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
 	completeWindowsFileDrag(sessionId: string): Promise<void>;
@@ -82,8 +82,8 @@ export interface ITurboFileSshService {
 	releaseImageResource(url: string): Promise<void>;
 	writeClipboardImage(content: string, mime: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
 	writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding?: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult>;
-	compressPath(endpoint: ITurboFileTransferEndpoint, targetPath?: string): Promise<ITurboFileFileOperationResult>;
-	extractPath(endpoint: ITurboFileTransferEndpoint, targetDirectory?: string): Promise<ITurboFileFileOperationResult>;
+	compressPath(endpoint: ITurboFileTransferEndpoint, targetPath?: string, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
+	extractPath(endpoint: ITurboFileTransferEndpoint, targetDirectory?: string, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
 	createSshTerminal(options: ITurboFileSshConnectionOptions, cwd: string, cols: number, rows: number): Promise<ITurboFileSshTerminalSession>;
 	writeSshTerminal(sessionId: string, data: string): Promise<void>;
 	resizeSshTerminal(sessionId: string, cols: number, rows: number): Promise<void>;
@@ -205,11 +205,17 @@ export interface ITurboFileTrashSource {
 export interface ITurboFileMoveToTrashRequest {
 	readonly device: ITurboFileTrashDevice;
 	readonly sources: readonly ITurboFileTrashSource[];
+	readonly progressId?: string;
 }
 
 export interface ITurboFileTrashItemsRequest {
 	readonly device: ITurboFileTrashDevice;
 	readonly items: readonly ITurboFileTrashItem[];
+	readonly progressId?: string;
+}
+
+export interface ITurboFileCancelableOperationOptions {
+	readonly progressId?: string;
 }
 
 export interface ITurboFileRestoreTrashRequest extends ITurboFileTrashItemsRequest {
@@ -383,6 +389,7 @@ export interface ITurboFileTransferProgressEvent {
 export interface ITurboFileFileOperationResult {
 	readonly ok: boolean;
 	readonly message: string;
+	readonly canceled?: boolean;
 }
 
 export interface ITurboFilePathSizeResult extends ITurboFileFileOperationResult {

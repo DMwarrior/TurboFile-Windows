@@ -79,8 +79,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(concurrentBatch.includes('this.transferFileCore({'));
 		assert.ok(!concurrentBatch.includes('this.transferFile({'));
 		assert.ok(concurrentBatch.includes('request.schedulerConcurrency ?? 1'));
-		assert.ok(uploadVerification.includes('this.deletePathCore(target, true)'));
-		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive)'));
+		assert.ok(uploadVerification.includes('this.deletePathCore(target, true, progressId)'));
+		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive, progressId)'));
 	});
 
 	test('queues recycle-bin, delete, and same-device move writes on their device keys', () => {
@@ -101,6 +101,65 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(emptyTrash.includes('getFileOperationDeviceKey(device)'));
 		assert.ok(deletePaths.includes('getFileOperationDeviceKeys(...endpoints)'));
 		assert.ok(movePaths.includes('getFileOperationDeviceKeys(...sources)'));
+	});
+
+	test('waits for transport shutdown before acknowledging cancellation', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const cancelTransfer = methodBlock(service, 'async cancelTransfer', 'async testConnection');
+		const registerCancel = methodBlock(service, 'private registerTransferCancelHandler', 'private runCancelableLocalCommand');
+		const killTree = functionBlock(service, 'killLocalProcessTree');
+		const withSshClient = methodBlock(service, 'private async withSshClient', 'private async copyLocalPath');
+
+		assert.ok(service.includes('Set<() => void | Promise<void>>'));
+		assert.ok(cancelTransfer.includes('await Promise.allSettled'));
+		assert.ok(registerCancel.includes('handler: () => void | Promise<void>'));
+		assert.ok(killTree.includes('Promise<void>'));
+		assert.ok(killTree.includes("execFile('taskkill.exe'"));
+		assert.ok(killTree.includes('waitForLocalProcessTermination'));
+		assert.ok(service.includes('const sshClientAbortPromises = new WeakMap'));
+		assert.ok(service.includes('const sshExecStreamAbortPromises = new WeakMap'));
+		assert.ok(withSshClient.includes('progressId?: string'));
+		assert.ok(withSshClient.includes('abortSshClientAndWait'));
+	});
+
+	test('keeps prewarmed task sessions independent from pane browsing sessions', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const preparePair = methodBlock(service, 'async prepareTransferPair', 'async transferFile');
+		const acquireTransfer = methodBlock(service, 'private async acquireTransferSession', 'private acquireReadyTransferSession');
+		const acquireReady = methodBlock(service, 'private acquireReadyTransferSession', 'private async waitForTransferSession');
+		const leaseTask = methodBlock(service, 'private tryLeaseTaskSftpSession', 'private async waitForTransferSession');
+		const closeTask = methodBlock(service, 'private async closeTaskSftpSession', 'private disposeTransferSession');
+		const withDirectorySftp = methodBlock(service, 'private async withDirectorySftp', 'private async withDirectorySshClient');
+
+		assert.ok(service.includes('private readonly taskSftpSessions'));
+		assert.ok(service.includes('private readonly taskSftpPrewarmPending'));
+		assert.ok(preparePair.includes('this.ensureWarmTaskSftpSession'));
+		assert.ok(acquireTransfer.includes('this.acquireReadyTaskSftpSession'));
+		assert.ok(acquireTransfer.includes('this.createTaskSftpSession'));
+		assert.ok(!acquireTransfer.includes('this.ensureWarmDirectorySftpSession'));
+		assert.ok(acquireReady.includes('this.acquireReadyTaskSftpSession'));
+		assert.ok(leaseTask.includes('this.closeTaskSftpSession(session)'));
+		assert.ok(closeTask.includes('this.removeTaskSftpSession(session)'));
+		assert.ok(!closeTask.includes('directorySftpSessions'));
+		assert.ok(withDirectorySftp.includes('progressId'));
+		assert.ok(withDirectorySftp.includes('this.acquireTransferSession(endpoint, progressId)'));
+	});
+
+	test('threads cancellation ids through file mutations', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const operations = [
+			methodBlock(service, 'async movePathsToTrash', 'private async movePathsToTrashCore'),
+			methodBlock(service, 'async deletePaths', 'private async deletePathsCore'),
+			methodBlock(service, 'async compressPath', 'private async compressPathCore'),
+			methodBlock(service, 'async extractPath', 'private async extractPathCore')
+		];
+
+		for (const operation of operations) {
+			assert.ok(operation.includes('progressId'));
+			assert.ok(operation.includes('id:'));
+		}
+		assert.ok(service.includes('this.throwIfTransferCanceled(progressId)'));
+		assert.ok(service.includes('progressId: request.progressId'));
 	});
 
 	test('lists local directory names without per-entry lstat', () => {
@@ -154,10 +213,15 @@ suite('TurboFileSshMainServiceStatic', () => {
 		];
 
 		assert.ok(pipefail.includes('set -o pipefail'));
+		assert.ok(pipefail.includes('BASH_ENV=/dev/null'));
+		assert.ok(pipefail.includes('bash --noprofile --norc -c'));
+		assert.ok(!pipefail.includes('bash -lc'));
 		for (const builder of builders) {
 			assert.ok(builder.includes('buildPipefailBashCommand('));
 			assert.ok(builder.includes('|'));
 		}
+		assert.strictEqual(builders[0].match(/\$\{remoteShell\}/g)?.length, 1);
+		assert.strictEqual(builders[1].match(/\$\{remoteShell\}/g)?.length, 1);
 	});
 
 	test('uses a separate long inactivity timeout for direct tar finalization', () => {
@@ -705,10 +769,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& pairProbe.includes('getReusableProbeSession(source.connection)')
 				&& pairProbe.includes('getReusableProbeSession(target.connection)'),
 			registersBeforeConnect: connect.indexOf('this.registerTransferCancelHandler(progressId') >= 0 && connect.indexOf('this.registerTransferCancelHandler(progressId') < connect.indexOf('client.connect('),
-			cancelEndsClient: connect.includes('client.end();'),
+			cancelEndsClient: connect.includes('await abortSshClientAndWait(client);'),
 			cancelRejectsTyped: connect.includes('reject(new TurboFileTransferCanceledError())'),
 			keepsConnectedClientAlive: !routeProbe.includes('.end()') && routeProbe.includes('this.touchDirectorySftpSession(executorSession.key, executorSession.generation);'),
-			credentialCleanupIsScheduled: routeProbe.includes('this.scheduleDirectProbeCredentialCleanup(executorSession, credential.cleanupCommand);')
+			credentialCleanupIsScheduled: routeProbe.includes('this.scheduleDirectProbeCredentialCleanup(executorSession, credential.identityPath, credential.activePath);')
 		}, {
 			reusesPaneSessions: true,
 			registersBeforeConnect: true,
@@ -716,6 +780,167 @@ suite('TurboFileSshMainServiceStatic', () => {
 			cancelRejectsTyped: true,
 			keepsConnectedClientAlive: true,
 			credentialCleanupIsScheduled: true
+		});
+	});
+
+	test('reports first positive target growth without the steady-state progress delay', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const growthTiming = methodBlock(service, 'private beginTransferGrowthTiming', 'private normalizeGrowthProgressBytes');
+		const remotePathGrowthTiming = methodBlock(service, 'private beginRemotePathGrowthTiming', 'private isTransferCanceled');
+		const progress = methodBlock(service, 'private fireTransferProgress', 'private getTransferProgressEmitter');
+
+		assert.deepStrictEqual({
+			usesFastInitialPollOnlyUntilGrowth: service.includes('const TRANSFER_INITIAL_GROWTH_POLL_INTERVAL_MS = 50;')
+				&& growthTiming.includes('let hasPositiveProgress = false;')
+				&& growthTiming.includes('hasPositiveProgress = true;')
+				&& growthTiming.includes('initialPollIntervalMs = TRANSFER_INITIAL_GROWTH_POLL_INTERVAL_MS')
+				&& growthTiming.includes('hasPositiveProgress ? pollIntervalMs : Math.min(pollIntervalMs, initialPollIntervalMs)'),
+			keepsExpensiveDirectoryGrowthAtTheSteadyCadence: remotePathGrowthTiming.includes('initialDelayMs, pollIntervalMs);'),
+			firstPositiveBypassesSteadyStateThrottle: progress.includes('const isFirstPositiveProgress = normalizedTransferred > 0')
+				&& progress.includes('!isFirstPositiveProgress && !isCompletionEvent')
+		}, {
+			usesFastInitialPollOnlyUntilGrowth: true,
+			keepsExpensiveDirectoryGrowthAtTheSteadyCadence: true,
+			firstPositiveBypassesSteadyStateThrottle: true
+		});
+	});
+
+	test('prewarms and reuses a capability-gated SSH control connection on direct hot paths', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const panePreparation = methodBlock(service, 'async prepareTransferPair', 'async transferFile');
+		const transportPreparation = methodBlock(service, 'private async prepareDirectSshControlConnection', 'private getPreparedDirectSshControlPath');
+		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
+		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
+		const directTar = methodBlock(service, 'private async tryDirectTarTransferRoute', 'private async tryDirectRsyncTransfer');
+		const directRsync = methodBlock(service, 'private async tryDirectRsyncTransferRoute', 'private resolvePreparedDirectScpRoute');
+		const directBatchTar = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
+		const directBatchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransferRoute', 'private async tryTunneledBatchRsyncRelayTransfer');
+		const controlOptions = functionBlock(service, 'appendDirectSshControlOptions');
+		const scpBuilder = functionBlock(service, 'buildDirectScpCommand');
+		const sftpBuilder = functionBlock(service, 'buildOptimizedSftpCommand');
+		const sshBuilder = functionBlock(service, 'buildDirectScpSshCommand');
+		const rsyncBuilder = functionBlock(service, 'buildOptimizedRsyncSshCommand');
+		const controlCheckBuilder = functionBlock(service, 'buildDirectSshControlCheckCommand');
+		const credentialPreparation = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
+		const controlCache = methodBlock(service, 'private rememberDirectSshControlConnection', 'private resolvePreparedDirectScpRoute');
+		const controlLease = methodBlock(service, 'private acquirePreparedDirectSshControlConnection', 'private getDirectSshControlConnectionKey');
+
+		assert.deepStrictEqual({
+			preparesBothPhysicalDirectionsBeforeProtocolProof: panePreparation.includes('this.prepareDirectSshControlConnection(sourceSession, targetConnection)')
+				&& panePreparation.includes('this.prepareDirectSshControlConnection(targetSession, sourceConnection)')
+				&& panePreparation.indexOf('prepareDirectSshControlConnection') < panePreparation.indexOf('getOrStartDirectScpProbePair'),
+			serializesProtocolProofsOnlyWhenBothControlMastersAreReady: panePreparation.includes("preparedControlPaths.every(controlPath => typeof controlPath === 'string')")
+				&& panePreparation.includes('for (const protocol of staleProtocols)')
+				&& panePreparation.includes('Promise.all(staleProtocols.map('),
+			retriesOnlyTransientMissingControlConnectionsOffHotPath: panePreparation.includes('preparedControlPaths.some(controlPath => controlPath === undefined)')
+				&& panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_RETRY_MS')
+				&& panePreparation.includes('controlPaths = await prepareControlConnections();')
+				&& panePreparation.includes('this.directSshControlRetryPending.has(retryKey)')
+				&& panePreparation.includes('this.directSshControlRetryPending.set(retryKey, retry)')
+				&& panePreparation.includes('this.directSshControlRetryPending.delete(retryKey)')
+				&& panePreparation.indexOf('const unresolved =') < panePreparation.indexOf('this.directSshControlRetryPending.has(retryKey)'),
+			capabilityFailurePreservesLegacyProbe: transportPreparation.includes('return undefined;')
+				&& transportPreparation.includes('this.rememberDirectSshControlConnection(')
+				&& routeProbe.includes('this.acquirePreparedDirectSshControlConnection(executorSession, remoteConnection)'),
+			concurrentPrewarmSharesOneControlHandshake: transportPreparation.includes('this.directSshControlConnectionPending.get(pendingKey)')
+				&& transportPreparation.includes('this.directSshControlConnectionPending.set(pendingKey, started)')
+				&& transportPreparation.includes('this.directSshControlConnectionPending.get(pendingKey) === started')
+				&& transportPreparation.includes('this.directSshControlConnectionPending.delete(pendingKey)'),
+			controlPathSurvivesPaneSessionRecycle: transportPreparation.includes('cached.generation === executorSession.generation')
+				&& service.includes("createHash('sha256').update(executorSession.key).digest('hex')")
+				&& service.includes('return `${executorFingerprint}=>${getDirectScpProbeConnectionKey(remoteConnection)}`;')
+				&& !service.includes('forgetDirectSshControlConnectionsForSession'),
+			boundedSecretFreeControlCache: service.includes('const DIRECT_SSH_CONTROL_CACHE_LIMIT = 64;')
+				&& service.includes('this.directSshControlConnections.size > DIRECT_SSH_CONTROL_CACHE_LIMIT')
+				&& !service.includes('return `${executorSession.key}=>${getDirectScpProbeConnectionKey(remoteConnection)}`;'),
+			failedControlCapabilityUsesTypedRetryWindows: service.includes('const DIRECT_SSH_CONTROL_FAILURE_RETRY_MS = 200;')
+				&& service.includes('const DIRECT_SSH_CONTROL_UNSUPPORTED_REFRESH_MS = 5 * 60 * 1000;')
+				&& transportPreparation.includes('cached?.unsupported ? DIRECT_SSH_CONTROL_UNSUPPORTED_REFRESH_MS : DIRECT_SSH_CONTROL_FAILURE_RETRY_MS')
+				&& transportPreparation.includes('return cached.unsupported ? false : cached.controlPath;'),
+			failedValidationDoesNotAdvertiseDeadSocket: transportPreparation.includes('let verifiedDeadSocket = false;')
+				&& transportPreparation.includes('verifiedDeadSocket = true;')
+				&& transportPreparation.includes('existingAtStart?.controlPath && !verifiedDeadSocket')
+				&& transportPreparation.includes('return existingAtStart.controlPath;'),
+			backgroundPrewarmVerifiesRealMasterSocket: transportPreparation.includes('buildDirectSshControlCheckCommand(')
+				&& controlCheckBuilder.includes("'-O check'")
+				&& controlCheckBuilder.includes('`-S ${quotePosixShellArg(controlPath)}`')
+				&& service.includes('const DIRECT_SSH_CONTROL_PREPARE_TIMEOUT_MS = 800;')
+				&& transportPreparation.includes("${quotePosixShellArg('true')} </dev/null >/dev/null 2>&1")
+				&& transportPreparation.includes('wrapRemoteCredentialCommand(establishCommand, credential.cleanupCommand, credential.activePath)')
+				&& transportPreparation.includes('this.execRemoteBytes(executorSession.client, checkWithMarker, { timeoutMs: requireRemainingMs')
+				&& transportPreparation.includes('this.execRemoteBytes(executorSession.client, command, { timeoutMs: requireRemainingMs')
+				&& !transportPreparation.includes('`${establishCommand} && ${checkCommand}`'),
+			capabilityCheckIsPortableAndStructured: transportPreparation.includes('ssh_version=$(ssh -V 2>&1 || true)')
+				&& transportPreparation.includes('case "$ssh_version" in OpenSSH_*')
+				&& transportPreparation.includes('unsupportedMarker')
+				&& transportPreparation.includes('return false;')
+				&& !transportPreparation.includes('| grep')
+				&& transportPreparation.indexOf('const capabilityOutput =') < transportPreparation.indexOf('credential = await this.prepareRemoteScpCredential('),
+			prewarmUsesOneEndToEndBudgetAndDeferredCleanup: transportPreparation.includes("requireRemainingMs('credential preparation')")
+				&& transportPreparation.includes("requireRemainingMs('OpenSSH capability detection')")
+				&& transportPreparation.includes("requireRemainingMs('connection establishment')")
+				&& transportPreparation.includes("requireRemainingMs('validation')")
+				&& credentialPreparation.includes("runWithinPreparationBudget('private key read'")
+				&& credentialPreparation.includes('if (setupBudget <= 0)')
+				&& credentialPreparation.includes('timeoutMs: setupBudget')
+				&& credentialPreparation.includes('if (deferFailureCleanup)')
+				&& credentialPreparation.includes('setTimeout(() => void cleanup(), DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
+			newerSessionControlStateWinsEveryCacheRace: controlCache.includes('if (current && current.generation > entry.generation)')
+				&& controlCache.indexOf('if (current && current.generation > entry.generation)') < controlCache.indexOf('this.directSshControlConnections.delete(cacheKey);'),
+			processPrivateShortSocket: transportPreparation.includes('this.directSshControlInstanceId')
+				&& transportPreparation.includes("'/tmp/tf-'")
+				&& transportPreparation.includes("createHash('sha256')"),
+			buildersGateMultiplexingByPreparedPath: controlOptions.includes("parts.push('-o ControlMaster=auto')")
+				&& controlOptions.includes("parts.push('-o ControlPersist=300')")
+				&& [scpBuilder, sftpBuilder, sshBuilder, rsyncBuilder].every(block => block.includes('controlPath?: string')
+					&& block.includes('appendDirectSshControlOptions(parts, controlPath)')),
+			singleDirectProtocolsReusePreparedTransport: [directScp, directSftp, directTar, directRsync].every(block => block.includes('this.acquirePreparedDirectSshControlConnection(executorLease.session, remote)')
+				&& block.includes('controlLease.release();')),
+			concurrentCommandsBypassTheBusyMaster: [directBatchTar, directBatchRsync].every(block => block.includes('this.acquirePreparedDirectSshControlConnection(executorLease.session, remote)')
+				&& block.includes('controlLease.release();'))
+				&& controlLease.includes('this.activeDirectSshControlConnections.has(cacheKey)')
+				&& controlLease.includes('return { release: () => undefined };')
+				&& controlLease.includes('this.activeDirectSshControlConnections.add(cacheKey)')
+				&& controlLease.includes('this.activeDirectSshControlConnections.delete(cacheKey)'),
+			controlPrewarmMarksAndCleansCredentialActivity: transportPreparation.includes('wrapRemoteCredentialCommand(')
+				&& transportPreparation.includes('credential.cleanupCommand, credential.activePath)')
+				&& transportPreparation.includes('this.scheduleDirectProbeCredentialCleanup(executorSession, credential.identityPath, credential.activePath);'),
+			preparedControlProofTriesMuxBeforeStrictCredential: routeProbe.includes('const verification = await runProof({}, controlLease.controlPath);')
+				&& routeProbe.indexOf('const verification = await runProof({}, controlLease.controlPath);') < routeProbe.indexOf('credential = await this.prepareRemoteScpCredential(')
+				&& routeProbe.includes('controlLease.release();')
+				&& routeProbe.includes('return await runProof(credential, undefined);'),
+			realDataKeepsPrivateKeyFallback: !service.includes('credential = controlPath ? {} : await this.prepareRemoteScpCredential'),
+			onlyScpProofSchedulesProbeFileCleanup: pairProbe.includes("if (protocol === 'scp')")
+				&& pairProbe.indexOf("if (protocol === 'scp')") < pairProbe.indexOf('this.scheduleDirectScpProbeCleanup('),
+			sourcePushPreparationPrecedesCredentialAndRetainedFallback: directScp.includes('this.prepareDirectTargetWithWarmSession(')
+				&& directScp.indexOf('this.prepareDirectTargetWithWarmSession(') < directScp.indexOf('this.prepareRemoteScpCredential(')
+				&& directScp.indexOf('this.prepareRemoteScpCredential(') < directScp.indexOf('const retainedPreparation = wrapRemoteCredentialCommand(')
+				&& directScp.includes('credential.activePath, true')
+		}, {
+			preparesBothPhysicalDirectionsBeforeProtocolProof: true,
+			serializesProtocolProofsOnlyWhenBothControlMastersAreReady: true,
+			retriesOnlyTransientMissingControlConnectionsOffHotPath: true,
+			capabilityFailurePreservesLegacyProbe: true,
+			concurrentPrewarmSharesOneControlHandshake: true,
+			controlPathSurvivesPaneSessionRecycle: true,
+			boundedSecretFreeControlCache: true,
+			failedControlCapabilityUsesTypedRetryWindows: true,
+			failedValidationDoesNotAdvertiseDeadSocket: true,
+			backgroundPrewarmVerifiesRealMasterSocket: true,
+			capabilityCheckIsPortableAndStructured: true,
+			prewarmUsesOneEndToEndBudgetAndDeferredCleanup: true,
+			newerSessionControlStateWinsEveryCacheRace: true,
+			processPrivateShortSocket: true,
+			buildersGateMultiplexingByPreparedPath: true,
+			singleDirectProtocolsReusePreparedTransport: true,
+			concurrentCommandsBypassTheBusyMaster: true,
+			controlPrewarmMarksAndCleansCredentialActivity: true,
+			preparedControlProofTriesMuxBeforeStrictCredential: true,
+			realDataKeepsPrivateKeyFallback: true,
+			onlyScpProofSchedulesProbeFileCleanup: true,
+			sourcePushPreparationPrecedesCredentialAndRetainedFallback: true
 		});
 	});
 
@@ -729,7 +954,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const batchRsync = methodBlock(service, 'private async tryDirectBatchRsyncTransferRoute', 'private async tryTunneledBatchRsyncRelayTransfer');
 		const directRsync = methodBlock(service, 'private async tryDirectRsyncTransferRoute', 'private resolvePreparedDirectScpRoute');
 		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
-		const credential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
+		const credential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
 		const exec = methodBlock(service, 'private execRemote(client: ISSHClient', 'private execRemoteBytes');
 		const execBytes = methodBlock(service, 'private execRemoteBytes', 'private execRemoteWithInput');
 		const credentialConsumers = [batchTar, directTar, directScp, batchRsync, directRsync, directSftp];
@@ -739,12 +964,28 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& !wrapper.includes('prepareRemoteScpCredential')
 				&& !wrapper.includes('verifyDirectSshRoute')
 				&& !wrapper.includes('execRemote'),
-			strictBackgroundProbeRead: routeProbe.includes('this.prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)'),
-			legacyFallback: credential.includes('strictPrivateKeyRead = false') && credential.includes('this.readPrivateKey(remoteConnection.privateKeyPath).catch(() => undefined)'),
-			transferCallersNonStrict: credentialConsumers.every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId)')
-				|| block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId)')),
+			strictBackgroundProbeRead: routeProbe.includes('this.prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, executorSession.sftp, true, token, credentialBudget)'),
+			legacyFallback: credential.includes('strictPrivateKeyRead = false')
+				&& credential.includes("runWithinPreparationBudget('private key read', () => this.readPrivateKey(remoteConnection.privateKeyPath)).catch(() => undefined)"),
+			transferCallersNonStrict: credentialConsumers.every(block => block.includes('this.prepareRemoteScpCredential(client, remoteEndpoint.connection, request.progressId, executorLease.session.sftp)')
+				|| block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId, executorLease.session.sftp)')),
 			checksCancelBeforeSetup: credential.indexOf('this.throwIfTransferCanceled(progressId);') > credential.indexOf('const privateKey =') && credential.indexOf('this.throwIfTransferCanceled(progressId);') < credential.indexOf('const identityPath ='),
-			keepsClientsAliveForCleanup: credentialConsumers.every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())') && block.indexOf('credential?.cleanupCommand') < block.lastIndexOf('executorLease.release();')),
+			credentialCarriesActiveMarker: service.includes('readonly activePath?: string;')
+				&& credential.includes('const activePath = `${identityPath}.active`;')
+				&& credential.includes('buildPortablePosixRmMany([identityPath, activePath], false)')
+				&& credential.includes('activePath,'),
+			keepsClientsAliveForCleanup: credentialConsumers.every(block => !block.includes('registerTransferCancelHandler(request.progressId, () => client.end())')
+				&& block.includes('this.scheduleDirectProbeCredentialCleanup(executorLease.session, credential.identityPath, credential.activePath);')),
+			dataCommandsOwnCredentialCleanup: credentialConsumers.every(block => block.includes('wrapRemoteCredentialCommand(')
+				&& block.includes('credential.cleanupCommand')
+				&& block.includes('credential.activePath')),
+			longPreprocessingFinishesBeforeCredentialSetup: directScp.indexOf('this.prepareDirectTargetWithWarmSession(') < directScp.indexOf('this.prepareRemoteScpCredential(')
+				&& directSftp.indexOf('const sourceType =') < directSftp.indexOf('this.prepareRemoteScpCredential(')
+				&& directSftp.indexOf('this.prepareDirectTargetWithWarmSession(') < directSftp.indexOf('this.prepareRemoteScpCredential(')
+				&& batchTar.indexOf('const usePreparedTarget =') < batchTar.indexOf('this.prepareRemoteScpCredential(')
+				&& batchTar.indexOf('this.prepareRemoteBatchTarTarget(') < batchTar.indexOf('this.prepareRemoteScpCredential(')
+				&& directRsync.indexOf('const sourceType =') < directRsync.indexOf('this.prepareRemoteScpCredential(')
+				&& directRsync.indexOf('this.resolveRemoteRsyncSshBinary(') < directRsync.indexOf('this.prepareRemoteScpCredential('),
 			cancelableDataExec: batchTar.includes('progressId: request.progressId') && directTar.includes('progressId: request.progressId') && (directScp.match(/progressId: request\.progressId/g)?.length ?? 0) >= 2,
 			execPrechecksCancellation: [exec, execBytes].every(block => {
 				const precheck = block.indexOf('this.throwIfTransferCanceled(options.progressId);');
@@ -758,7 +999,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 			legacyFallback: true,
 			transferCallersNonStrict: true,
 			checksCancelBeforeSetup: true,
+			credentialCarriesActiveMarker: true,
 			keepsClientsAliveForCleanup: true,
+			dataCommandsOwnCredentialCleanup: true,
+			longPreprocessingFinishesBeforeCredentialSetup: true,
 			cancelableDataExec: true,
 			execPrechecksCancellation: true
 		});
@@ -772,11 +1016,13 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const remoteSize = methodBlock(service, 'private async getRemotePathSize(sftp:', 'private async getRemotePathSizeByCommand');
 		const remoteSizeByCommand = methodBlock(service, 'private async getRemotePathSizeByCommand', 'private async getRemotePathContentSizeByCommand');
 		const remoteContentSizeByCommand = methodBlock(service, 'private async getRemotePathContentSizeByCommand', 'private async getPathHumanSize');
+		const cleanupScheduler = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
+		const credentialWrapper = functionBlock(service, 'wrapRemoteCredentialCommand');
 		const tarValidation = directTar.indexOf('const targetSize = await this.getRemotePathContentSizeByCommand(request.target, request.progressId)');
 		const tarPostcheck = directTar.indexOf('this.throwIfTransferCanceled(request.progressId);', tarValidation);
 		const scpValidation = directScp.indexOf('const targetSize = await this.withDirectorySftp(request.target');
 		const scpPostcheck = directScp.indexOf('this.throwIfTransferCanceled(request.progressId);', scpValidation);
-		const cleanup = 'await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);';
+		const cleanup = 'this.scheduleDirectProbeCredentialCleanup(executorLease.session, credential.identityPath, credential.activePath);';
 
 		assert.deepStrictEqual({
 			batchTarPostchecksDataCommand: batchTar.indexOf('this.throwIfTransferCanceled(request.progressId);') > batchTar.indexOf('await this.execRemote(client, command'),
@@ -793,13 +1039,27 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& remoteContentSizeByCommand.includes('this.getRemotePathSizeByCommand(endpoint, progressId)')
 				&& remoteContentSizeByCommand.includes('this.execRemoteBytes(client, buildPosixContentSizeCommand(endpoint.path), { progressId })')
 				&& remoteContentSizeByCommand.includes('this.getRemotePathSize(sftp, endpoint.path, progressId)'),
-			cleanupIsShortAndUncancelable: [batchTar, directTar, directScp].every(block => block.includes(cleanup))
+			cleanupUsesTheExistingSftpSubsystem: [batchTar, directTar, directScp].every(block => block.includes(cleanup))
+				&& cleanupScheduler.includes('this.unlinkRemoteBestEffort(candidate.sftp, identityPath)')
+				&& cleanupScheduler.includes('activePath ? this.unlinkRemoteBestEffort(candidate.sftp, activePath) : Promise.resolve(true)')
+				&& !cleanupScheduler.includes('this.execRemote(')
+				&& cleanupScheduler.includes('if (cleaned)')
+				&& cleanupScheduler.includes('const currentPromise = this.directorySftpSessions.get(session.key)')
+				&& cleanupScheduler.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS'),
+			credentialTrapRunsOnNormalAndInterruptedExit: credentialWrapper.includes('const markActive = activePath')
+				&& credentialWrapper.includes('printf \'%s\\\\n\' "$$" > ${quotePosixShellArg(activePath)}')
+				&& credentialWrapper.includes('trap ${quotePosixShellArg(releaseCommand)} 0;')
+				&& credentialWrapper.includes('trap - 0 HUP INT TERM; ${releaseCommand}; exit ${exitCode}')
+				&& credentialWrapper.includes('signalCleanup(129)')
+				&& credentialWrapper.includes('signalCleanup(130)')
+				&& credentialWrapper.includes('signalCleanup(143)')
 		}, {
 			batchTarPostchecksDataCommand: true,
 			directTarPostchecksValidation: true,
 			directScpPostchecksValidation: true,
 			sizeHelpersPropagateCancellation: true,
-			cleanupIsShortAndUncancelable: true
+			cleanupUsesTheExistingSftpSubsystem: true,
+			credentialTrapRunsOnNormalAndInterruptedExit: true
 		});
 	});
 
@@ -870,6 +1130,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const concurrentBatch = methodBlock(service, 'private async runConcurrentBatchTransfer', 'private async runSftpRelayTransfer');
 		const batchRelayTar = methodBlock(service, 'private async tryRelayBatchTarTransfer', 'private async runConcurrentBatchTransfer');
 		const singleRelayTar = methodBlock(service, 'private async tryTarRelayTransfer', 'private async tryStreamRelayTransfer');
+		const credentialWrapper = functionBlock(service, 'wrapRemoteCredentialCommand');
 
 		assert.deepStrictEqual({
 			multiFileUsesActualPlanDecision: batchPlan.includes('this.resolvePreparedDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
@@ -894,12 +1155,20 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& !directBatchTar.includes('runVerifiedDirectRouteAttempt'),
 			directRsyncSkipsLegacyVerification: directBatchRsync.includes('this.runPreparedDirectRouteAttempt(preparedRoute')
 				&& batchAttempt.includes('this.tryDirectBatchRsyncTransfer(request, items, expectedBytes, startedAt, true, preparedDirectRoute?.route)'),
-			privateKeyCredentialsReachEveryDirectProtocol: [directBatchRsyncRoute, directRsyncRoute].every(block => block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId)')
+			privateKeyCredentialsReachEveryDirectProtocol: [directBatchRsyncRoute, directRsyncRoute].every(block => block.includes('this.prepareRemoteScpCredential(client, remote, request.progressId, executorLease.session.sftp)')
 				&& block.includes('credential.identityPath')
-				&& block.includes('credential.cleanupCommand'))
-				&& directSftpRoute.includes('buildOptimizedSftpCommand(remote.port || 22, !!remote.password, credential.identityPath)')
-				&& directSftpRoute.includes('buildCompatibleSshCommand(remote.port || 22, !!remote.password, credential.identityPath)')
-				&& directSftpRoute.includes('credential.cleanupCommand'),
+				&& block.includes('credential.cleanupCommand')
+				&& block.includes('credential.activePath'))
+				&& directSftpRoute.includes('buildOptimizedSftpCommand(remote.port || 22, !!remote.password, credential.identityPath, controlPath)')
+				&& directSftpRoute.includes('buildCompatibleSshCommand(remote.port || 22, !!remote.password, credential.identityPath, controlPath)')
+				&& directSftpRoute.includes('credential.cleanupCommand, credential.activePath'),
+			batchRsyncMarksEveryGroupAndOnlyRetainsIntermediateCredentials: directBatchRsyncRoute.includes('const executableCommand = wrapRemoteCredentialCommand(')
+				&& directBatchRsyncRoute.includes('credential.activePath,')
+				&& directBatchRsyncRoute.includes('groupIndex < sourceGroups.length - 1')
+				&& !directBatchRsyncRoute.includes("groupIndex === sourceGroups.length - 1\n\t\t\t\t\t? wrapRemoteCredentialCommand")
+				&& credentialWrapper.includes('retainCredential && activePath')
+				&& credentialWrapper.includes('buildPortablePosixRm(activePath, false)')
+				&& credentialWrapper.includes(': cleanupCommand;'),
 			concurrentChildrenReusePreparedRoute: batchAttempt.includes("}, items, 'copy', expectedBytes, startedAt, false, preparedDirectRoute)")
 				&& concurrentBatch.includes('}, preserveDirectErrors, preparedDirectRoute);'),
 			singleDirectoryTarSkipsLegacyVerification: directTar.includes('preverifiedDirectRoute?: TurboFileDirectSshRoute')
@@ -928,6 +1197,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			directTarSkipsLegacyVerification: true,
 			directRsyncSkipsLegacyVerification: true,
 			privateKeyCredentialsReachEveryDirectProtocol: true,
+			batchRsyncMarksEveryGroupAndOnlyRetainsIntermediateCredentials: true,
 			concurrentChildrenReusePreparedRoute: true,
 			singleDirectoryTarSkipsLegacyVerification: true,
 			failedTopologyRouteIsForgotten: true,
@@ -957,20 +1227,23 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const preparedCache = fs.readFileSync(path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofilePreparedDirectRouteCache.ts'), 'utf8');
 		const panePreparation = methodBlock(service, 'async prepareTransferPair', 'async transferFile');
 		const resolver = methodBlock(service, 'private resolvePreparedDirectScpRoute', 'private getOrStartDirectScpProbePair');
+		const probeStarter = methodBlock(service, 'private getOrStartDirectScpProbePair', 'private async runDirectScpProbePair');
 		const pairProbe = methodBlock(service, 'private async runDirectScpProbePair', 'private async createEmptyRemoteProbeFile');
 		const prepareProbe = methodBlock(service, 'private async createEmptyRemoteProbeFile', 'private async probeDirectScpRoute');
 		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
 		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
 		const cleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
-		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private scheduleRemoteScpCredentialCleanupRetry');
-		const failedCredentialCleanup = methodBlock(service, 'private scheduleRemoteScpCredentialCleanupRetry', 'private async tryDirectSftpTransfer');
+		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
+		const bestEffortUnlink = methodBlock(service, 'private async unlinkRemoteBestEffort', 'private async uploadDirectory');
 		const cachedRoute = methodBlock(service, 'private getCachedDirectScpProbeRoute', 'private rememberDirectScpProbeRoute');
 		const rememberRoute = methodBlock(service, 'private rememberDirectScpProbeRoute', 'private rememberDirectScpProbeUnavailable');
 		const forgetRoute = methodBlock(service, 'private forgetDirectScpProbeRoute', 'private async runPreparedDirectRouteAttempt');
 		const command = functionBlock(service, 'buildDirectScpProbeCommand');
 		const tarCommand = functionBlock(service, 'buildDirectTarProbeCommand');
+		assert.ok(tarCommand.includes("buildPipefailBashCommand('true')"));
 		const rsyncCommand = functionBlock(service, 'buildDirectRsyncProbeCommand');
 		const sftpCommand = functionBlock(service, 'buildDirectSftpProbeCommand');
+		const credentialWrapper = functionBlock(service, 'wrapRemoteCredentialCommand');
 		const preparedProtocols = functionBlock(service, 'getPreparedDirectRouteProtocols');
 		const connectionKey = functionBlock(service, 'getDirectScpProbeConnectionKey');
 		const pairKey = functionBlock(service, 'getDirectScpProbePairKey');
@@ -989,50 +1262,103 @@ suite('TurboFileSshMainServiceStatic', () => {
 			staleDecisionsRefreshOnlyInBackground: panePreparation.includes('this.preparedDirectRouteCache.needsRefresh(')
 				&& panePreparation.includes('DIRECT_ROUTE_BACKGROUND_REFRESH_MS'),
 			backgroundHasIndependentLimit: pairProbe.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && pairProbe.includes('coordinateTurboFileDirectRouteProbe'),
-			boundedUnprovenRoutesBecomeRefreshableRelay: pairProbe.includes('{ ...decision, confirmedUnavailable: true, sourceSession, targetSession }'),
+			preservesCoordinatorAvailabilityDistinction: pairProbe.includes('{ ...decision, sourceSession, targetSession }')
+				&& !pairProbe.includes('confirmedUnavailable: true')
+				&& probeStarter.includes('else if (outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession)')
+				&& probeStarter.includes('this.rememberDirectScpProbeUnavailable('),
 			reusesBothPaneSessions: pairProbe.includes('this.getReusableDirectorySftpSession(connection)')
 				&& pairProbe.includes('getReusableProbeSession(source.connection)')
 				&& pairProbe.includes('getReusableProbeSession(target.connection)'),
 			restoresLateSessionIdleTimers: pairProbe.includes('this.touchDirectorySftpSession(session.key, session.generation);'),
 			isolatedTemporaryPaths: pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-source') && pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-push') && pairProbe.includes('/tmp/.turbofile-scp-probe-${nonce}-pull'),
-			latePreparationIsUnlinked: prepareProbe.includes("await this.execRemote(client, `umask 077; : > ${quotePosixShellArg(path)}`")
-				&& prepareProbe.includes("this.execRemote(client, `rm -f ${quotePosixShellArg(path)}`"),
-			realScpCommand: command.includes('buildDirectScpCommand(') && command.includes('buildSshpassPrefix(remote.password)') && !command.includes('buildDirectScpSshCommand('),
+			latePreparationIsUnlinked: prepareProbe.includes("await this.execRemote(session.client, `umask 077; : > ${quotePosixShellArg(path)}`")
+				&& prepareProbe.includes('void this.unlinkRemoteBestEffort(session.sftp, path);')
+				&& !prepareProbe.includes('this.execRemote(session.client, `rm -f'),
+			realScpCommand: command.includes('buildDirectScpCommand(')
+				&& command.includes('buildSshpassPrefix(remote.password)')
+				&& command.includes('sourceProbePath')
+				&& command.includes('sourcePushTargetPath')
+				&& command.includes('targetPullTargetPath')
+				&& !command.includes('buildDirectScpSshCommand(')
+				&& !command.includes('buildPortablePosix'),
 			matchedTarCommand: routeProbe.includes("protocol === 'scp'")
-				&& routeProbe.includes('buildDirectTarProbeCommand(remoteConnection, credential.identityPath, marker)')
+				&& routeProbe.includes('buildDirectTarProbeCommand(remoteConnection, proofCredential.identityPath, marker, controlPath)')
 				&& tarCommand.includes('buildDirectScpSshCommand(')
 				&& tarCommand.includes('buildDirectTarProgressPrerequisiteCommand()')
 				&& tarCommand.includes('command -v bash')
-				&& tarCommand.includes('command -v tar'),
+				&& tarCommand.includes('command -v tar')
+				&& tarCommand.includes("const remotePrerequisites = 'command -v tar >/dev/null 2>&1';")
+				&& !tarCommand.includes('dialectPath')
+				&& !tarCommand.includes('buildPortablePosix'),
 			matchedRsyncAndSftpCommands: routeProbe.includes("protocol === 'rsync'")
-				&& routeProbe.includes('buildDirectRsyncProbeCommand(remoteConnection, credential.identityPath, marker)')
-				&& routeProbe.includes('buildDirectSftpProbeCommand(remoteConnection, credential.identityPath, marker)')
+				&& routeProbe.includes('buildDirectRsyncProbeCommand(remoteConnection, proofCredential.identityPath, marker, controlPath)')
+				&& routeProbe.includes('buildDirectSftpProbeCommand(remoteConnection, proofCredential.identityPath, marker, controlPath)')
 				&& rsyncCommand.includes('command -v rsync')
 				&& rsyncCommand.includes('buildDirectScpSshCommand(')
+				&& !rsyncCommand.includes('dialectPath')
+				&& !rsyncCommand.includes('buildPortablePosix')
 				&& sftpCommand.includes('buildOptimizedSftpCommand(')
+				&& !sftpCommand.includes('buildDirectScpSshCommand(')
+				&& !sftpCommand.includes('dialectPath')
+				&& !sftpCommand.includes('buildPortablePosix')
 				&& sftpCommand.includes("printf 'quit\\\\n'"),
 			preparesOnlyPlannedDirectProtocols: preparedProtocols.includes('resolveTransferPlan({ source, target, ...shape })')
 				&& preparedProtocols.includes("if (attempt.route !== 'direct')")
 				&& preparedProtocols.includes('isPreparedDirectRouteProtocolSupported(source, target, attempt.protocol)')
 				&& preparedProtocols.includes('protocols.add(attempt.protocol)'),
+			windowsPathsSkipEveryPosixProbe: preparedProtocols.includes('if (looksLikeWindowsPath(source.path) || looksLikeWindowsPath(target.path))')
+				&& preparedProtocols.indexOf('return [];') < preparedProtocols.indexOf('resolveTransferPlan({ source, target, ...shape })')
+				&& panePreparation.includes('const protocols = getPreparedDirectRouteProtocols(source, target);')
+				&& panePreparation.includes('if (!protocols.length)')
+				&& panePreparation.indexOf('if (!protocols.length)') < panePreparation.indexOf('this.prepareDirectSshControlConnection('),
 			allPlannedDirectProtocolsAreCollected: preparedProtocols.includes('for (const attempt of resolveTransferPlan({ source, target, ...shape }).attempts)')
 				&& !preparedProtocols.includes('.attempts.find('),
 			noSerialPingBeforeProtocolProof: !service.includes('probeDirectNetworkReachability')
 				&& !service.includes('buildDirectPingProbeCommand')
 				&& routeProbe.includes('execRemoteBytes(executorSession.client, command, { timeoutMs: remainingMs, token })'),
 			noBusinessPaths: !command.includes('request.source.path') && !command.includes('request.target.path'),
-			privateKeyParity: routeProbe.includes('prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, true, token, credentialBudget)') && routeProbe.includes('credential.identityPath'),
-			boundedCredentialSetup: routeProbe.includes('const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && service.includes('await this.execRemote(client, setupCommand, { progressId, token, timeoutMs });'),
+			privateKeyParity: routeProbe.includes('prepareRemoteScpCredential(executorSession.client, remoteConnection, undefined, executorSession.sftp, true, token, credentialBudget)') && routeProbe.includes('proofCredential.identityPath'),
+			boundedCredentialSetup: routeProbe.includes('const credentialBudget = Math.max(0, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS')
+				&& service.includes('const REMOTE_SCP_CREDENTIAL_SETUP_TIMEOUT_MS = 10 * 1000;')
+				&& prepareCredential.includes("runWithinPreparationBudget('private key read'")
+				&& prepareCredential.includes('if (setupBudget <= 0)')
+				&& prepareCredential.includes('timeoutMs: setupBudget'),
 			cancelableExec: routeProbe.includes('execRemoteBytes(executorSession.client, command, { timeoutMs: remainingMs, token })'),
-			credentialCleanupRetries: credentialCleanup.includes('cleanup();')
-				&& credentialCleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
-			failedCredentialSetupCleanupRetries: prepareCredential.includes('this.scheduleRemoteScpCredentialCleanupRetry(client, cleanupCommand);')
-				&& prepareCredential.includes('await this.execRemote(client, cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);')
-				&& failedCredentialCleanup.includes('setTimeout(() => {')
-				&& failedCredentialCleanup.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS'),
-			exactCleanup: cleanup.includes('quotePosixShellArg(sourceProbePath)')
-				&& cleanup.includes('quotePosixShellArg(sourcePushTargetPath)')
-				&& cleanup.includes('quotePosixShellArg(targetPullTargetPath)')
+			credentialCommandCarriesItsOwnTrap: routeProbe.includes('const command = wrapRemoteCredentialCommand(')
+				&& routeProbe.includes('proofCredential.cleanupCommand, proofCredential.activePath)')
+				&& credentialWrapper.includes('printf \'%s\\\\n\' "$$" > ${quotePosixShellArg(activePath)}')
+				&& credentialWrapper.includes('trap ${quotePosixShellArg(releaseCommand)} 0;')
+				&& credentialWrapper.includes('trap - 0 HUP INT TERM; ${releaseCommand}; exit ${exitCode}'),
+			credentialCleanupRetriesOnlyAfterFailure: credentialCleanup.includes('void cleanup(session).then(cleaned => {')
+				&& credentialCleanup.includes('this.unlinkRemoteBestEffort(candidate.sftp, identityPath)')
+				&& credentialCleanup.includes('activePath ? this.unlinkRemoteBestEffort(candidate.sftp, activePath) : Promise.resolve(true)')
+				&& !credentialCleanup.includes('this.execRemote(')
+				&& credentialCleanup.includes('if (cleaned)')
+				&& credentialCleanup.includes('const currentPromise = this.directorySftpSessions.get(session.key)')
+				&& credentialCleanup.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS'),
+			failedCredentialSetupUsesExistingSftp: prepareCredential.includes('cleanupSftp?: ISFTPWrapper')
+				&& prepareCredential.includes('const cleanup = () => cleanupSftp')
+				&& prepareCredential.includes('this.unlinkRemoteBestEffort(cleanupSftp, identityPath)')
+				&& prepareCredential.includes('this.unlinkRemoteBestEffort(cleanupSftp, activePath)')
+				&& prepareCredential.includes('setTimeout(() => void cleanup(), DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)')
+				&& prepareCredential.includes('setTimeout(() => void cleanup(), DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)')
+				&& !service.includes('scheduleRemoteScpCredentialCleanupRetry'),
+			bestEffortCleanupIsBounded: bestEffortUnlink.includes('timeoutMs = 2000')
+				&& bestEffortUnlink.includes('withTurboFileTimeout(this.unlinkRemote(sftp, remotePath), timeoutMs')
+				&& bestEffortUnlink.includes('return isRemotePathMissingError(error);'),
+			credentialHasActivityAwareExpiryFallback: service.includes('const REMOTE_SCP_CREDENTIAL_TTL_SECONDS = 60;')
+				&& prepareCredential.includes('command -v nohup')
+				&& prepareCredential.includes('const activePath = `${identityPath}.active`;')
+				&& (prepareCredential.match(/sleep \$\{REMOTE_SCP_CREDENTIAL_TTL_SECONDS\}/g)?.length ?? 0) === 2
+				&& (prepareCredential.match(/kill -0 "\$pid"/g)?.length ?? 0) === 2
+				&& (prepareCredential.match(/pid=\$\(cat "\$active"/g)?.length ?? 0) === 2
+				&& (prepareCredential.match(/\[ -e "\$key" \] \|\| break/g)?.length ?? 0) === 2
+				&& prepareCredential.includes('rm -f "$key" "$active"')
+				&& !prepareCredential.includes('sleep ${REMOTE_SCP_CREDENTIAL_TTL_SECONDS}; ${cleanupCommand}'),
+			exactCleanup: cleanup.includes('this.unlinkRemoteBestEffort(sourceSession.sftp, sourceProbePath)')
+				&& cleanup.includes('this.unlinkRemoteBestEffort(targetSession.sftp, sourcePushTargetPath)')
+				&& cleanup.includes('this.unlinkRemoteBestEffort(targetSession.sftp, targetPullTargetPath)')
+				&& !cleanup.includes('this.execRemote(')
 				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)')
 				&& cleanup.includes('setTimeout(cleanup, DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS + DIRECT_SCP_PROBE_CLEANUP_DELAY_MS)'),
 			credentialAwareKey: connectionKey.includes("createHash('sha256')") && connectionKey.includes('connection.password') && connectionKey.includes('connection.privateKey') && connectionKey.includes('connection.passphrase'),
@@ -1063,7 +1389,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			paneRetriesOnlyIndeterminateProbes: true,
 			staleDecisionsRefreshOnlyInBackground: true,
 			backgroundHasIndependentLimit: true,
-			boundedUnprovenRoutesBecomeRefreshableRelay: true,
+			preservesCoordinatorAvailabilityDistinction: true,
 			reusesBothPaneSessions: true,
 			restoresLateSessionIdleTimers: true,
 			isolatedTemporaryPaths: true,
@@ -1072,14 +1398,18 @@ suite('TurboFileSshMainServiceStatic', () => {
 			matchedTarCommand: true,
 			matchedRsyncAndSftpCommands: true,
 			preparesOnlyPlannedDirectProtocols: true,
+			windowsPathsSkipEveryPosixProbe: true,
 			allPlannedDirectProtocolsAreCollected: true,
 			noSerialPingBeforeProtocolProof: true,
 			noBusinessPaths: true,
 			privateKeyParity: true,
 			boundedCredentialSetup: true,
 			cancelableExec: true,
-			credentialCleanupRetries: true,
-			failedCredentialSetupCleanupRetries: true,
+			credentialCommandCarriesItsOwnTrap: true,
+			credentialCleanupRetriesOnlyAfterFailure: true,
+			failedCredentialSetupUsesExistingSftp: true,
+			bestEffortCleanupIsBounded: true,
+			credentialHasActivityAwareExpiryFallback: true,
 			exactCleanup: true,
 			credentialAwareKey: true,
 			bidirectionalSingleFlight: true,

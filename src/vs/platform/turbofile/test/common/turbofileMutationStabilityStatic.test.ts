@@ -116,7 +116,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(moveToTrash.includes('let trashResults'));
 		assert.ok(moveToTrash.includes('runTurboFileTrashFallback('));
 		assert.ok(moveToTrash.includes('mapLimit('));
-		assert.ok(moveToTrash.includes('this.deletePathCore(endpoint, true)'));
+		assert.ok(moveToTrash.includes('this.deletePathCore(endpoint, true, request.progressId)'));
 		assert.ok(moveToTrash.includes("localize('turbofileTrashFallbackOperationSucceeded'"));
 		assert.ok(!moveToTrash.includes('results.find('));
 		assert.ok(!moveToTrash.includes('results.findIndex('));
@@ -177,8 +177,8 @@ suite('TurboFileMutationStabilityStatic', () => {
 
 		assert.ok(cleanup.includes('progressId'));
 		assert.ok(deletePaths.includes('inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS'));
-		assert.ok(trashMove.includes("? {}\n\t\t\t\t: { inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
-		assert.ok(trashDelete.includes("? {}\n\t\t\t\t: { inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
+		assert.ok(trashMove.includes("? { progressId }\n\t\t\t\t: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
+		assert.ok(trashDelete.includes("? { progressId }\n\t\t\t\t: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
 		assert.ok(deleteBuilder.includes('[Console]::Out.WriteLine'));
 		assert.ok(trashMoveBuilder.includes('[Console]::Error.WriteLine'));
 		assert.ok(trashDeleteBuilder.includes('[Console]::Error.WriteLine'));
@@ -307,7 +307,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		const deleteManyBuilder = block(service, 'function buildPosixDeleteManyFromInputCommand', 'function buildPosixMoveManyIntoDirectoryFromInputCommand');
 		const deleteOneBuilder = block(service, 'function buildPosixDeleteCommand', 'function getMimeType');
 
-		assert.ok(contract.includes('deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean)'));
+		assert.ok(contract.includes('deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, options?: ITurboFileCancelableOperationOptions)'));
 		assert.ok(!contract.includes('deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, useSudo?: boolean)'));
 		assert.ok(!deletePaths.includes('useSudo'));
 		assert.ok(!deletePath.includes('useSudo'));
@@ -316,7 +316,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(!deleteOneBuilder.includes('useSudo'));
 		assert.ok(!deleteOneBuilder.includes('sudo -n'));
 		assert.ok(deletePath.includes('return await runTurboFileSingleRemoteDelete('));
-		assert.ok(deletePath.includes('() => this.deleteRemotePathNative(endpoint, recursive)'));
+		assert.ok(deletePath.includes('() => this.deleteRemotePathNative(endpoint, recursive, progressId)'));
 		assert.ok(deletePath.includes('() => this.withSftp(endpoint'));
 		assert.ok(deletePath.includes('() => this.clearRemoteDirectoryListingCache(endpoint)'));
 	});
@@ -326,7 +326,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		const deletePathsCore = block(service, 'private async deletePathsCore', 'private async deleteRemotePathNative');
 		assert.ok(deletePathsCore.includes('buildPosixDeleteManyFromInputCommand(recursive)'));
 		assert.ok(deletePathsCore.includes('return await runTurboFilePosixBatchDelete('));
-		assert.ok(deletePathsCore.includes('endpoint => this.deletePathCore(endpoint, recursive)'));
+		assert.ok(deletePathsCore.includes('endpoint => this.deletePathCore(endpoint, recursive, progressId)'));
 		assert.ok(deletePathsCore.includes('endpoint => this.clearRemoteDirectoryListingCache(endpoint)'));
 	});
 });

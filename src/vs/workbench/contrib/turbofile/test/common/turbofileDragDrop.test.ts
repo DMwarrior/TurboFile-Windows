@@ -95,7 +95,7 @@ suite('TurboFileDragDrop', () => {
 			snapshottedField: editor.includes('private nativeDragSession: TurboFileNativeDragSession<TurboFileFileItem> | undefined;'),
 			passesOperation: editor.includes('operation: session.operation'),
 			moveUsesBatch: editor.includes("if (operation === 'copy' && items.length === 1)"),
-			batchReceivesOperation: editor.includes('\n\t\t\t\toperation,\n\t\t\t\tprogressId,')
+			batchReceivesOperation: /\r?\n\t\t\t\toperation,\r?\n\t\t\t\tprogressId,/.test(editor)
 		}, {
 			requestOperation: true,
 			requestSession: true,
@@ -185,38 +185,45 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(batch.includes('task.trackTotalBytes ? Math.max(0, item.rawSize) : 0'));
 	});
 
-	test('deletes cut sources before refreshing source and target panes', () => {
+	test('deletes cut sources before optimistic updates and background reconciliation', () => {
 		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async pasteInternalTransferClipboard');
 		const block = editor.slice(start, editor.indexOf('private isSameTransferTarget', start));
 		const deleteIndex = block.indexOf('await this.deleteInternalClipboardSources');
-		const refreshIndex = block.lastIndexOf('await this.refreshTransferPanes');
+		const reconcileIndex = block.lastIndexOf('this.schedulePostTransferReconcile');
+		const optimisticIndex = block.lastIndexOf('this.applyOptimisticTransferResult');
 
 		assert.ok(deleteIndex >= 0);
-		assert.ok(refreshIndex > deleteIndex);
+		assert.ok(reconcileIndex > deleteIndex);
+		assert.ok(optimisticIndex > deleteIndex);
+		assert.ok(!block.includes('await this.refreshTransferPanes'));
 	});
 
-	test('refreshes external cut source and target only after source cleanup', () => {
+	test('patches external cut source and target only after source cleanup', () => {
 		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferExternalPaths');
 		const block = editor.slice(start, editor.indexOf('private async pasteWindowsClipboardFiles', start));
 		const deleteIndex = block.indexOf('await this.deleteExternalSourceItems');
-		const refreshIndex = block.indexOf('await Promise.all([', deleteIndex);
+		const sourcePatchIndex = block.indexOf('this.applyOptimisticLocalSourceRemoval', deleteIndex);
+		const reconcileIndex = block.indexOf('this.schedulePostTransferReconcile', deleteIndex);
+		const targetPatchIndex = block.indexOf("this.applyOptimisticTransferResult('copy'", deleteIndex);
 
 		assert.ok(deleteIndex >= 0);
-		assert.ok(refreshIndex > deleteIndex);
-		assert.ok(block.slice(refreshIndex).includes('this.refreshPane(targetSide, { force: true })'));
-		assert.ok(block.slice(refreshIndex).includes('this.refreshLocalPanesForWindowsPaths'));
+		assert.ok(sourcePatchIndex > deleteIndex);
+		assert.ok(reconcileIndex > deleteIndex);
+		assert.ok(targetPatchIndex > deleteIndex);
+		assert.ok(!block.includes('await this.refreshPane'));
 	});
 
-	test('refreshes both panes after pane-to-Windows cut batches finish', () => {
+	test('patches both sides and reconciles in the background after pane-to-Windows batches finish', () => {
 		const editor = readTurboFileEditor();
 		const start = editor.indexOf('private async transferItemsToWindowsDirectory');
 		const block = editor.slice(start, editor.indexOf('private async transferSelected', start));
 
-		assert.ok(block.includes("if (operation === 'move')"));
-		assert.ok(block.includes('this.refreshPane(sourceSide, { force: true })'));
-		assert.ok(block.includes('this.refreshLocalPanesForWindowsPaths'));
+		assert.ok(block.includes('operation,'));
+		assert.ok(block.includes('this.schedulePostTransferReconcile(operation, transferContext)'));
+		assert.ok(block.includes('this.applyOptimisticTransferResult(operation, transferContext, items)'));
+		assert.ok(!block.includes('await this.refreshPane'));
 	});
 
 	test('routes a single cut through the transactional batch path', () => {
@@ -225,7 +232,7 @@ suite('TurboFileDragDrop', () => {
 		const block = editor.slice(start, editor.indexOf('private async transferItem', start));
 
 		assert.ok(block.includes('if (shouldUseBatchTransfer(operation, sourceItems.length))'));
-		assert.ok(block.includes('return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt)'));
+		assert.ok(block.includes('return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt, transferContext)'));
 		assert.ok(!block.includes('moveUserItemsToTrash'));
 	});
 

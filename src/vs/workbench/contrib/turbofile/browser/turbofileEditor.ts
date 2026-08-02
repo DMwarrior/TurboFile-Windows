@@ -64,9 +64,9 @@ import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbench
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { createTurboFileCopyNames } from '../common/turbofileCopyName.js';
-import { getTurboFileDirectoryMoveRefreshPaths, getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage, TurboFileDragOperation } from '../common/turbofileDragDrop.js';
+import { getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage, TurboFileDragOperation } from '../common/turbofileDragDrop.js';
 import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, shouldHandoffTurboFileDragToWindows, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
-import { createTurboFilePostTransferRefreshPlan } from '../common/turbofileTransferRefresh.js';
+import { applyTurboFileOptimisticTransfer, createTurboFilePostTransferRefreshPlan, createTurboFileTransferProgressSemanticKey } from '../common/turbofileTransferRefresh.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
 import { sortTurboFileImageGridItems, TurboFileImageGridSortKey } from '../common/turbofileImageGridSort.js';
@@ -439,6 +439,7 @@ interface TurboFileTask {
 	lastSampleAt?: number;
 	lastSampleBytes?: number;
 	lastProgressRenderAt?: number;
+	lastProgressSemanticKey?: string;
 }
 
 interface TurboFileTransferExecutionResult {
@@ -449,6 +450,17 @@ interface TurboFileTransferExecutionResult {
 	readonly durationMs?: number;
 	readonly averageBytesPerSecond?: number;
 	readonly canceled?: boolean;
+}
+
+interface TurboFileTransferLocation {
+	readonly side: 'left' | 'right';
+	readonly device: TurboFileDevice;
+	readonly directoryPath: string;
+}
+
+interface TurboFileTransferContext {
+	readonly source: TurboFileTransferLocation;
+	readonly target: TurboFileTransferLocation;
 }
 
 type TurboFileDeviceRuntimeStatus = 'unknown' | 'testing' | 'online' | 'offline';
@@ -498,6 +510,9 @@ const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const PREPARED_TRANSFER_PAIR_REFRESH_MS = 60 * 1000;
 const PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000] as const;
 const PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS = 5000;
+// Keep the consistency scan out of the next user-initiated transfer's startup window. The target
+// row is already patched synchronously, so waiting for one full idle second has no visible cost.
+const POST_TRANSFER_RECONCILE_DELAY_MS = 1000;
 const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 const RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS;
 const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = 350;
@@ -829,6 +844,7 @@ export class TurboFileEditor extends EditorPane {
 	private remoteDocumentLabelFormatterRegistered = false;
 	private preparingTransferPairKey: string | undefined;
 	private preparedTransferPairKey: string | undefined;
+	private readonly preparedTransferConnections = new Map<string, Promise<ITurboFileSshConnectionOptions>>();
 	private preparedTransferPairGeneration = 0;
 	private preparedTransferPairRetryCount = 0;
 	private readonly preparedTransferPairScheduler = this._register(new RunOnceScheduler(() => {
@@ -840,6 +856,20 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 	}, PREPARED_TRANSFER_PAIR_REFRESH_MS));
+	private readonly postTransferReconcileContexts = new Map<'left' | 'right', TurboFileTransferLocation>();
+	private readonly postTransferReconcileGeneration: Record<'left' | 'right', number> = { left: 0, right: 0 };
+	private readonly postTransferReconcileScheduler = this._register(new RunOnceScheduler(() => {
+		if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
+			this.postTransferReconcileScheduler.schedule(POST_TRANSFER_RECONCILE_DELAY_MS);
+			return;
+		}
+		const contexts = Array.from(this.postTransferReconcileContexts.entries());
+		this.postTransferReconcileContexts.clear();
+		for (const [side, context] of contexts) {
+			const generation = this.postTransferReconcileGeneration[side];
+			void this.reconcilePaneAfterTransfer(side, context, generation);
+		}
+	}, POST_TRANSFER_RECONCILE_DELAY_MS));
 
 	constructor(
 		group: IEditorGroup,
@@ -4886,6 +4916,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderTaskRow(task: TurboFileTask): HTMLElement {
 		const row = $('.turbofile-task-row');
+		row.dataset.taskId = String(task.id);
 		row.classList.add(`is-${task.status}`);
 
 		const name = $('.turbofile-task-row-name');
@@ -4933,6 +4964,11 @@ export class TurboFileEditor extends EditorPane {
 		task.cancelRequested = true;
 		task.detail = '正在取消任务...';
 		this.statusMessage = task.detail;
+		if (task.kind === 'sync' && this.syncPreviewState) {
+			const preview = this.syncPreviewState;
+			this.syncPreviewState = undefined;
+			preview.resolve(undefined);
+		}
 		this.render();
 
 		if (!task.progressId) {
@@ -4942,6 +4978,9 @@ export class TurboFileEditor extends EditorPane {
 		const result = await this.sshService.cancelTransfer(task.progressId);
 		if (!result.ok && task.status === 'running') {
 			this.finishTask(task, 'error', `取消任务失败：${result.message}`, { error: result.message });
+		} else if (task.status === 'running') {
+			this.finishTask(task, 'canceled', `已取消任务：${task.label}`);
+			this.prewarmCurrentTransferPair(true);
 		}
 	}
 
@@ -5010,8 +5049,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private beginTask(kind: TurboFileTaskKind, label: string, detail: string, shouldRender: boolean = true): TurboFileTask {
+		const id = this.taskSequence++;
 		const task: TurboFileTask = {
-			id: this.taskSequence++,
+			id,
 			kind,
 			label,
 			detail,
@@ -5019,9 +5059,19 @@ export class TurboFileEditor extends EditorPane {
 			startedAt: Date.now(),
 			trackTotalBytes: false,
 			transferItems: [],
-			progress: 35
+			progress: 35,
+			progressId: this.isTaskCancellable(kind) ? `turbofile-task-${id}-${Date.now()}` : undefined
 		};
 		this.tasks.unshift(task);
+		if (kind === 'transfer') {
+			// A new transfer owns the foreground SSH budget. Invalidate any consistency read that was
+			// already in flight so its stale listing can never overwrite this transfer's optimistic rows.
+			this.postTransferReconcileGeneration.left++;
+			this.postTransferReconcileGeneration.right++;
+			if (this.postTransferReconcileContexts.size) {
+				this.postTransferReconcileScheduler.schedule(POST_TRANSFER_RECONCILE_DELAY_MS);
+			}
+		}
 		if (this.tasks.length > 16) {
 			this.tasks.splice(16);
 		}
@@ -5034,6 +5084,10 @@ export class TurboFileEditor extends EditorPane {
 			this.refreshTaskbar();
 		}
 		return task;
+	}
+
+	private isTaskCancellable(kind: TurboFileTaskKind): boolean {
+		return kind === 'transfer' || kind === 'delete' || kind === 'size' || kind === 'compress' || kind === 'extract' || kind === 'sync';
 	}
 
 	private updateTask(task: TurboFileTask, detail: string, progress = task.progress, shouldRender: boolean = true): void {
@@ -5049,10 +5103,24 @@ export class TurboFileEditor extends EditorPane {
 
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
+		const previousVisibleTransferredBytes = activeItem?.transferredBytes ?? task.transferredBytes ?? 0;
 		if (event.currentName) {
 			task.currentTransferName = event.currentName;
 		}
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
+		const semanticKey = createTurboFileTransferProgressSemanticKey({
+			phase: event.phase,
+			state: event.state,
+			protocol: event.protocol,
+			strategy,
+			route: event.route,
+			directFallbackReason: event.directFallbackReason,
+			currentName: event.currentName ?? task.currentTransferName,
+			completedItems: event.completedItems,
+			totalItems: event.totalItems
+		});
+		const semanticChanged = task.lastProgressSemanticKey !== semanticKey;
+		task.lastProgressSemanticKey = semanticKey;
 		const isRsyncProgress = strategy?.startsWith('rsync') ?? false;
 		const isFailed = event.state === 'failed';
 		const isCanceled = event.state === 'canceled';
@@ -5064,6 +5132,7 @@ export class TurboFileEditor extends EditorPane {
 			reportedTotalBytes: event.totalBytes
 		});
 		const transferredBytes = Math.min(event.transferredBytes, totalBytes !== undefined && totalBytes > 0 ? totalBytes : event.transferredBytes);
+		const isFirstPositiveBytes = transferredBytes > 0 && previousVisibleTransferredBytes <= 0;
 		const progress = totalBytes !== undefined && totalBytes > 0
 			? Math.max(0, Math.min(100, Math.round((transferredBytes / totalBytes) * 100)))
 			: isCompleted ? 100 : Math.max(8, task.progress);
@@ -5132,7 +5201,7 @@ export class TurboFileEditor extends EditorPane {
 		this.updateLiveTransferTicker();
 
 		const renderIntervalMs = strategy?.startsWith('rsync') ? RSYNC_PROGRESS_RENDER_INTERVAL_MS : TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
-		if (isTerminal || (totalBytes !== undefined && totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
+		if (semanticChanged || isFirstPositiveBytes || isTerminal || (totalBytes !== undefined && totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
 			task.lastProgressRenderAt = now;
 			if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
 				this.refreshTaskbar();
@@ -5446,6 +5515,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private finishTask(task: TurboFileTask, status: Exclude<TurboFileTaskStatus, 'running'>, detail: string, options: { bytes?: number; strategy?: string; error?: string; durationMs?: number; averageBytesPerSecond?: number } = {}, shouldRender: boolean = true): void {
+		if (task.status === 'canceled' && task.cancelRequested && status !== 'canceled') {
+			return;
+		}
 		task.status = status;
 		task.detail = detail;
 		task.endedAt = Date.now();
@@ -5494,7 +5566,38 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 		} else {
 			this.refreshTaskbar();
+			this.refreshVisibleTaskLogEntry(task);
 		}
+	}
+
+	private refreshVisibleTaskLogEntry(task: TurboFileTask): void {
+		if (!this.container || (this.activePage !== 'tasks' && !this.isTaskLogVisible)) {
+			return;
+		}
+
+		const taskSelector = `.turbofile-task-row[data-task-id="${task.id}"]`;
+		for (const list of this.container.querySelectorAll<HTMLElement>('.turbofile-task-log-list')) {
+			const current = list.querySelector<HTMLElement>(taskSelector);
+			if (current) {
+				current.replaceWith(this.renderTaskRow(task));
+			} else {
+				list.querySelector<HTMLElement>('.turbofile-task-log-empty')?.remove();
+				list.prepend(this.renderTaskRow(task));
+			}
+		}
+
+		if (this.activePage !== 'tasks') {
+			return;
+		}
+		const stats = this.getTaskStats();
+		const summaryValues = [stats.running, stats.success, stats.error, stats.canceled];
+		const summaryNumbers = this.container.querySelectorAll<HTMLElement>('.turbofile-task-summary-grid .turbofile-summary-card strong');
+		summaryNumbers.forEach((number, index) => {
+			const value = summaryValues[index];
+			if (value !== undefined) {
+				number.textContent = String(value);
+			}
+		});
 	}
 
 	private getTaskStats(): { running: number; success: number; error: number; canceled: number } {
@@ -8239,17 +8342,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private getVisiblePaneSidesForDeviceDirectories(device: TurboFileDevice, paths: readonly string[]): ('left' | 'right')[] {
-		const windowsPath = this.isWindowsDevice(device);
-		return (['left', 'right'] as const).filter(side => {
-			const paneDevice = this.getPaneDevice(side);
-			if (!paneDevice || !this.isSameDeviceForNativeOperation(device, paneDevice)) {
-				return false;
-			}
-			return paths.some(path => this.pathsEqualForDevice(this.paneStates[side].path, path, windowsPath));
-		});
-	}
-
 	private isMissingPanePathError(error: unknown): boolean {
 		const message = error instanceof Error ? error.message : String(error);
 		return /no such file|no such file or directory|file not found|path not found|enoent/i.test(message);
@@ -8547,7 +8639,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.updateTask(task, `正在计算目录大小：${sourceItem.name}`, Math.max(10, task.progress), false);
-		const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, sourceItem.path));
+		const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, sourceItem.path), { progressId: task.progressId });
 		if (!result.ok) {
 			transferItem.displaySize = '';
 			return;
@@ -8680,6 +8772,7 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return false;
 		}
+		const targetDirectoryPath = this.paneStates[targetSide].path;
 
 		const normalizedSourcePaths = await this.sshService.normalizeLocalWindowsPaths(sourcePaths);
 		const sourceItems = await this.resolveExternalTransferItems(normalizedSourcePaths);
@@ -8688,11 +8781,13 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return false;
 		}
+		const sourceDirectoryPath = getPaneParentPath(sourceItems[0].path!, true) ?? sourceItems[0].path!;
+		const transferContext = this.createTransferContext(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceDirectoryPath, targetDirectoryPath);
 
 		if (sourceItems.length > 1) {
-			const transferred = await this.transferItemsBatch(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceItems, operation, initiatedAt);
-			if (operation === 'move') {
-				await this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean));
+			const transferred = await this.transferItemsBatch(targetSide, targetSide, this.localWindowsDevice, targetDevice, sourceItems, operation, initiatedAt, transferContext);
+			if (transferred && operation === 'move') {
+				this.applyOptimisticLocalSourceRemoval(sourceItems);
 			}
 			return transferred;
 		}
@@ -8711,13 +8806,13 @@ export class TurboFileEditor extends EditorPane {
 				sourceSide: targetSide,
 				targetSide,
 				sourceItem: { ...sourceItems[0] },
-				targetPath: joinPanePath(this.paneStates[targetSide].path, sourceItems[0].name, this.isWindowsDevice(targetDevice)),
+				targetPath: joinPanePath(transferContext.target.directoryPath, sourceItems[0].name, this.isWindowsDevice(targetDevice)),
 				sourceDeviceId: LOCAL_WINDOWS_DEVICE_ID
 			};
 		}
 
 		if (operation === 'move' && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
-			return this.moveExternalWindowsItemsNatively(targetSide, task, sourceItems);
+			return this.moveExternalWindowsItemsNatively(task, sourceItems, transferContext);
 		}
 
 		let completed = 0;
@@ -8733,6 +8828,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消外部拖入传输：${sourceItem.name}` : `已取消传输：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
 
@@ -8754,6 +8850,7 @@ export class TurboFileEditor extends EditorPane {
 			const result = await this.transferItem(targetSide, targetSide, sourceItem, {
 				refreshTarget: false,
 				task,
+				targetPath: joinPanePath(transferContext.target.directoryPath, sourceItem.name, this.isWindowsDevice(targetDevice)),
 				sourceDeviceOverride: this.localWindowsDevice,
 				targetDeviceOverride: targetDevice,
 				initiatedAt
@@ -8778,6 +8875,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消外部拖入传输：${sourceItem.name}` : `已取消传输：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			} else {
 				failed++;
@@ -8790,32 +8888,27 @@ export class TurboFileEditor extends EditorPane {
 
 		const strategy = [...strategies].join(', ') || undefined;
 		if (failed > 0) {
-			this.updateTask(task, `正在刷新目标目录：${targetDevice.name}`, 92);
-			await this.refreshPane(targetSide, { force: true });
 			this.finishTask(task, 'error', batch ? `本地 Windows 传输完成 ${completed} 项，失败 ${failed} 项。` : `传输失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.schedulePostTransferReconcile(operation, transferContext);
 			return false;
 		}
 
 		if (operation === 'move') {
 			const cleanupFailures = await this.deleteExternalSourceItems(task, sourceItems);
-			this.updateTask(task, `正在刷新目录：Windows / ${targetDevice.name}`, 98);
-			await Promise.all([
-				this.refreshPane(targetSide, { force: true }),
-				this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean))
-			]);
 			if (cleanupFailures.length) {
 				this.finishTask(task, 'error', `目标已复制，但删除本地来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy, error: cleanupFailures[0] });
+				this.schedulePostTransferReconcile('move', transferContext);
 				return false;
 			}
-		} else {
-			this.updateTask(task, `正在刷新目标目录：${targetDevice.name}`, 92);
-			await this.refreshPane(targetSide, { force: true });
+			this.applyOptimisticLocalSourceRemoval(sourceItems);
 		}
 
 		const successMessage = batch
 			? `${operation === 'move' ? '本地剪切传输' : '本地复制传输'}完成：${completed} 项，${formatSize(totalBytes)}。`
 			: `${operation === 'move' ? '剪切传输' : '复制传输'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
-		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
+		this.schedulePostTransferReconcile(operation, transferContext);
+		this.applyOptimisticTransferResult('copy', transferContext, sourceItems);
+		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy }, false);
 		return true;
 	}
 
@@ -8916,8 +9009,16 @@ export class TurboFileEditor extends EditorPane {
 
 		const sourceDevice = clipboard.sourceDevice;
 		const sourceItems = this.createSameDirectoryCopyItems(clipboard, targetSide, targetDevice);
+		const transferContext = this.createTransferContext(
+			clipboard.sourceSide,
+			targetSide,
+			sourceDevice,
+			targetDevice,
+			clipboard.sourcePath,
+			this.paneStates[targetSide].path
+		);
 		if (sourceItems.length > 1) {
-			const transferred = await this.transferItemsBatch(clipboard.sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, clipboard.operation);
+			const transferred = await this.transferItemsBatch(clipboard.sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, clipboard.operation, undefined, transferContext);
 			if (transferred && clipboard.operation === 'move') {
 				this.internalTransferClipboard = undefined;
 			}
@@ -8933,7 +9034,7 @@ export class TurboFileEditor extends EditorPane {
 		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, sourceItems);
 
 		if (clipboard.operation === 'move' && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
-			const moved = await this.moveInternalItemsNatively(task, sourceDevice, clipboard.sourceSide, targetSide, sourceItems);
+			const moved = await this.moveInternalItemsNatively(task, sourceDevice, sourceItems, transferContext);
 			if (moved) {
 				this.internalTransferClipboard = undefined;
 			}
@@ -8953,6 +9054,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消内部粘贴：${sourceItem.name}` : `已取消粘贴：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(clipboard.operation, transferContext);
 				return false;
 			}
 
@@ -8970,7 +9072,7 @@ export class TurboFileEditor extends EditorPane {
 			await this.ensureTransferItemSize(sourceDevice, sourceItem, transferItem, task, {
 				skipDirectorySize: !!sourceItem.directory
 			});
-			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(targetDevice));
+			const targetPath = joinPanePath(transferContext.target.directoryPath, sourceItem.name, this.isWindowsDevice(targetDevice));
 			if (this.isSameTransferTarget(sourceDevice, sourceItem.path, targetDevice, targetPath)) {
 				failed++;
 				transferItem.status = 'error';
@@ -8984,6 +9086,7 @@ export class TurboFileEditor extends EditorPane {
 			const result = await this.transferItem(clipboard.sourceSide, targetSide, sourceItem, {
 				refreshTarget: false,
 				task,
+				targetPath,
 				sourceDeviceOverride: sourceDevice,
 				targetDeviceOverride: targetDevice
 			});
@@ -9007,6 +9110,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消内部粘贴：${sourceItem.name}` : `已取消粘贴：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(clipboard.operation, transferContext);
 				return false;
 			} else {
 				failed++;
@@ -9019,30 +9123,27 @@ export class TurboFileEditor extends EditorPane {
 
 		const strategy = [...strategies].join(', ') || undefined;
 		if (failed > 0) {
-			this.updateTask(task, `正在刷新目标目录：${targetDevice.name}`, 92);
-			await this.refreshTransferPanes('copy', clipboard.sourceSide, targetSide);
 			this.finishTask(task, 'error', batch ? `内部粘贴完成 ${completed} 项，失败 ${failed} 项。` : `内部粘贴失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.schedulePostTransferReconcile('copy', transferContext);
 			return false;
 		}
 
 		if (clipboard.operation === 'move') {
-			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, clipboard.sourceSide, sourceItems);
+			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, sourceItems);
 			if (cleanupFailures.length) {
-				this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 98);
-				await this.refreshTransferPanes('move', clipboard.sourceSide, targetSide);
 				this.finishTask(task, 'error', `目标已复制，但删除来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy, error: cleanupFailures[0] });
+				this.schedulePostTransferReconcile('move', transferContext);
 				return false;
 			}
 			this.internalTransferClipboard = undefined;
 		}
 
-		this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 98);
-		await this.refreshTransferPanes(clipboard.operation, clipboard.sourceSide, targetSide);
-
 		const successMessage = batch
 			? `${clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴'}完成：${completed} 项，${formatSize(totalBytes)}。`
 			: `${clipboard.operation === 'move' ? '剪切粘贴' : '复制粘贴'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
-		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
+		this.schedulePostTransferReconcile(clipboard.operation, transferContext);
+		this.applyOptimisticTransferResult(clipboard.operation, transferContext, sourceItems);
+		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy }, false);
 		return true;
 	}
 
@@ -9134,21 +9235,16 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const refreshPaths = getTurboFileDirectoryMoveRefreshPaths(this.paneStates[side].path, targetDir);
+		const sourceDirectoryPath = this.paneStates[side].path;
 		const windowsPath = this.isWindowsDevice(device);
 		const batch = sourceItems.length > 1;
 		const strategy = windowsPath ? 'local-move' : 'remote-move';
+		const transferContext = this.createTransferContext(side, side, device, device, sourceDirectoryPath, targetDir);
 		const task = this.beginTask('transfer', batch ? `移动 ${sourceItems.length} 项到 ${targetLabel}` : `移动 ${sourceItems[0].name} 到 ${targetLabel}`, device.name, false);
 		task.progress = 0;
 		task.cancelRequested = false;
 		task.transferItems = sourceItems.map(item => this.createTransferTaskItem(item));
 		task.speedSamples = [];
-		this.invalidatePaneDirectoryCaches(device, refreshPaths);
-		this.removePaneItems(side, sourceItems);
-
-		const failures: string[] = [];
-		let completed = 0;
-		let totalBytes = 0;
 		for (const [index, transferItem] of task.transferItems.entries()) {
 			task.activeTransferItemIndex = index;
 			transferItem.status = 'running';
@@ -9160,14 +9256,28 @@ export class TurboFileEditor extends EditorPane {
 		// A same-device move is a metadata-only rename: hand the whole selection to one batched
 		// movePathsIntoDirectory (POSIX remote: a single `xargs -0 mv` round trip) instead of issuing one
 		// renamePath round trip per item, which made dragging many files feel like a slow per-file copy.
-		const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
-		const endpoints = await Promise.all(sourceItems.map(item => this.toTransferEndpoint(device, item.path!, connection)));
-		const result = await this.sshService.movePathsIntoDirectory(endpoints, targetDir);
+		let result: Awaited<ReturnType<ITurboFileSshService['movePathsIntoDirectory']>>;
+		try {
+			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
+			const endpoints = await Promise.all(sourceItems.map(item => this.toTransferEndpoint(device, item.path!, connection)));
+			result = await this.sshService.movePathsIntoDirectory(endpoints, transferContext.target.directoryPath, { progressId: task.progressId });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			for (const transferItem of task.transferItems) {
+				transferItem.status = 'error';
+				transferItem.error = message;
+				transferItem.endedAt = Date.now();
+			}
+			this.finishTask(task, 'error', `移动失败：${message}`, { strategy, error: message });
+			this.schedulePostTransferReconcile('move', transferContext);
+			return;
+		}
+
+		let totalBytes = 0;
 		for (const [index, sourceItem] of sourceItems.entries()) {
 			const transferItem = task.transferItems[index];
 			const itemBytes = Math.max(sourceItem.rawSize, transferItem.totalBytes, 0);
 			if (result.ok) {
-				completed++;
 				totalBytes += itemBytes;
 				transferItem.status = 'success';
 				transferItem.progress = 100;
@@ -9178,33 +9288,27 @@ export class TurboFileEditor extends EditorPane {
 				transferItem.status = 'error';
 				transferItem.error = result.message;
 				transferItem.endedAt = Date.now();
-				failures.push(`${sourceItem.name}: ${result.message}`);
 			}
 		}
-		this.invalidatePaneDirectoryCaches(device, refreshPaths);
-
-		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
-		this.invalidatePaneDirectoryCaches(device, refreshPaths);
-		const visibleRefreshSides = this.getVisiblePaneSidesForDeviceDirectories(device, refreshPaths);
-		await Promise.all([
-			...visibleRefreshSides.map(side => this.refreshPane(side, { force: true })),
-			this.loadPaneDirectory(device, targetDir, true, 'prefetch').catch(() => undefined)
-		]);
-		if (failures.length) {
-			this.finishTask(task, 'error', batch ? `移动完成 ${completed} 项，失败 ${failures.length} 项。` : `移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+		if (!result.ok) {
+			this.finishTask(task, 'error', batch ? `移动 ${sourceItems.length} 项失败：${result.message}` : `移动失败：${result.message}`, { bytes: totalBytes, strategy, error: result.message });
+			this.schedulePostTransferReconcile('move', transferContext);
 			return;
 		}
-		this.finishTask(task, 'success', batch ? `移动完成：${completed} 项 → ${targetLabel}` : `移动完成：${sourceItems[0].name} → ${targetLabel}`, { bytes: totalBytes, strategy });
+
+		this.schedulePostTransferReconcile('move', transferContext);
+		this.applyOptimisticTransferResult('move', transferContext, sourceItems);
+		this.finishTask(task, 'success', batch ? `移动完成：${sourceItems.length} 项 → ${targetLabel}` : `移动完成：${sourceItems[0].name} → ${targetLabel}`, { bytes: totalBytes, strategy }, false);
 	}
 
-	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {
+	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], transferContext: TurboFileTransferContext): Promise<boolean> {
 		const batch = sourceItems.length > 1;
 		const failures: string[] = [];
+		const successfulItems: TurboFileFileItem[] = [];
 		const strategy = this.isWindowsDevice(device) ? 'local-move' : 'remote-move';
 		let completed = 0;
 		let totalBytes = 0;
 
-		this.removePaneItems(sourceSide, sourceItems.filter(item => !!item.path));
 		for (const [index, sourceItem] of sourceItems.entries()) {
 			const transferItem = task.transferItems?.[index];
 			task.activeTransferItemIndex = index;
@@ -9221,12 +9325,17 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			if (!sourceItem.path) {
+				if (transferItem) {
+					transferItem.status = 'error';
+					transferItem.error = 'path missing';
+					transferItem.endedAt = Date.now();
+				}
 				failures.push(`${sourceItem.name}: path missing`);
 				continue;
 			}
 
 			const itemBytes = Math.max(sourceItem.rawSize, transferItem?.totalBytes ?? 0, 0);
-			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, this.isWindowsDevice(device));
+			const targetPath = joinPanePath(transferContext.target.directoryPath, sourceItem.name, this.isWindowsDevice(device));
 			if (this.isSameTransferTarget(device, sourceItem.path, device, targetPath)) {
 				if (transferItem) {
 					transferItem.status = 'error';
@@ -9238,10 +9347,21 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
-			const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path), targetPath);
-			if (result.ok) {
+			try {
+				const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path), targetPath);
+				if (!result.ok) {
+					if (transferItem) {
+						transferItem.status = 'error';
+						transferItem.error = result.message;
+						transferItem.endedAt = Date.now();
+					}
+					failures.push(`${sourceItem.name}: ${result.message}`);
+					continue;
+				}
+
 				completed++;
 				totalBytes += itemBytes;
+				successfulItems.push(sourceItem);
 				if (transferItem) {
 					transferItem.status = 'success';
 					transferItem.progress = 100;
@@ -9250,30 +9370,36 @@ export class TurboFileEditor extends EditorPane {
 					transferItem.strategy = strategy;
 					transferItem.endedAt = Date.now();
 				}
-			} else {
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
 				if (transferItem) {
 					transferItem.status = 'error';
-					transferItem.error = result.message;
+					transferItem.error = message;
 					transferItem.endedAt = Date.now();
 				}
-				failures.push(`${sourceItem.name}: ${result.message}`);
+				failures.push(`${sourceItem.name}: ${message}`);
 			}
 		}
 
-		this.updateTask(task, `正在刷新目录：${device.name}`, 92);
-		await this.refreshTransferPanes('move', sourceSide, targetSide);
 		if (failures.length) {
 			this.finishTask(task, 'error', batch ? `同设备移动完成 ${completed} 项，失败 ${failures.length} 项。` : `同设备移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.schedulePostTransferReconcile('move', transferContext);
+			if (successfulItems.length) {
+				this.applyOptimisticTransferResult('move', transferContext, successfulItems);
+			}
 			return false;
 		}
 
-		this.finishTask(task, 'success', batch ? `同设备移动完成：${completed} 项。` : `同设备移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy });
+		this.schedulePostTransferReconcile('move', transferContext);
+		this.applyOptimisticTransferResult('move', transferContext, successfulItems);
+		this.finishTask(task, 'success', batch ? `同设备移动完成：${completed} 项。` : `同设备移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy }, false);
 		return true;
 	}
 
-	private async moveExternalWindowsItemsNatively(targetSide: 'left' | 'right', task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<boolean> {
+	private async moveExternalWindowsItemsNatively(task: TurboFileTask, sourceItems: readonly TurboFileFileItem[], transferContext: TurboFileTransferContext): Promise<boolean> {
 		const batch = sourceItems.length > 1;
 		const failures: string[] = [];
+		const successfulItems: TurboFileFileItem[] = [];
 		const strategy = 'local-move';
 		let completed = 0;
 		let totalBytes = 0;
@@ -9299,7 +9425,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			const itemBytes = Math.max(sourceItem.rawSize, transferItem?.totalBytes ?? 0, 0);
-			const targetPath = joinPanePath(this.paneStates[targetSide].path, sourceItem.name, true);
+			const targetPath = joinPanePath(transferContext.target.directoryPath, sourceItem.name, true);
 			if (this.isSameTransferTarget(this.localWindowsDevice, sourceItem.path, this.localWindowsDevice, targetPath)) {
 				if (transferItem) {
 					transferItem.status = 'error';
@@ -9311,10 +9437,21 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			this.updateTask(task, batch ? `正在本机移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在本机移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
-			const result = await this.sshService.renamePath(await this.toTransferEndpoint(this.localWindowsDevice, sourceItem.path), targetPath);
-			if (result.ok) {
+			try {
+				const result = await this.sshService.renamePath(await this.toTransferEndpoint(this.localWindowsDevice, sourceItem.path), targetPath);
+				if (!result.ok) {
+					if (transferItem) {
+						transferItem.status = 'error';
+						transferItem.error = result.message;
+						transferItem.endedAt = Date.now();
+					}
+					failures.push(`${sourceItem.name}: ${result.message}`);
+					continue;
+				}
+
 				completed++;
 				totalBytes += itemBytes;
+				successfulItems.push(sourceItem);
 				if (transferItem) {
 					transferItem.status = 'success';
 					transferItem.progress = 100;
@@ -9323,40 +9460,41 @@ export class TurboFileEditor extends EditorPane {
 					transferItem.strategy = strategy;
 					transferItem.endedAt = Date.now();
 				}
-			} else {
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
 				if (transferItem) {
 					transferItem.status = 'error';
-					transferItem.error = result.message;
+					transferItem.error = message;
 					transferItem.endedAt = Date.now();
 				}
-				failures.push(`${sourceItem.name}: ${result.message}`);
+				failures.push(`${sourceItem.name}: ${message}`);
 			}
 		}
 
-		this.updateTask(task, '正在刷新本机目录', 92);
-		await Promise.all([
-			this.refreshPane(targetSide, { force: true }),
-			this.refreshLocalPanesForWindowsPaths(sourceItems.map(item => item.path!).filter(Boolean))
-		]);
 		if (failures.length) {
 			this.finishTask(task, 'error', batch ? `本机移动完成 ${completed} 项，失败 ${failures.length} 项。` : `本机移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.schedulePostTransferReconcile('move', transferContext);
+			if (successfulItems.length) {
+				this.applyOptimisticTransferResult('move', transferContext, successfulItems);
+			}
 			return false;
 		}
 
-		this.finishTask(task, 'success', batch ? `本机移动完成：${completed} 项。` : `本机移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy });
+		this.schedulePostTransferReconcile('move', transferContext);
+		this.applyOptimisticTransferResult('move', transferContext, successfulItems);
+		this.finishTask(task, 'success', batch ? `本机移动完成：${completed} 项。` : `本机移动完成：${sourceItems[0].name}`, { bytes: totalBytes, strategy }, false);
 		return true;
 	}
 
-	private async deleteInternalClipboardSources(task: TurboFileTask, sourceDevice: TurboFileDevice, sourceSide: 'left' | 'right', sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
+	private async deleteInternalClipboardSources(task: TurboFileTask, sourceDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
 		const failures: string[] = [];
 		const batch = sourceItems.length > 1;
-		this.removePaneItems(sourceSide, sourceItems.filter(item => !!item.path));
 		for (const [index, item] of sourceItems.entries()) {
 			if (!item.path) {
 				continue;
 			}
-			this.updateTask(task, batch ? `正在删除来源 ${index + 1}/${sourceItems.length}：${item.name}` : `正在删除来源：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)));
-			const result = await this.sshService.deletePath(await this.toTransferEndpoint(sourceDevice, item.path), true);
+			this.updateTask(task, batch ? `正在删除来源 ${index + 1}/${sourceItems.length}：${item.name}` : `正在删除来源：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)), false);
+			const result = await this.sshService.deletePath(await this.toTransferEndpoint(sourceDevice, item.path), true, { progressId: task.progressId });
 			if (!result.ok) {
 				failures.push(`${item.name}: ${result.message}`);
 			}
@@ -9364,9 +9502,257 @@ export class TurboFileEditor extends EditorPane {
 		return failures;
 	}
 
-	private async refreshTransferPanes(operation: 'copy' | 'move', sourceSide: 'left' | 'right', targetSide: 'left' | 'right'): Promise<void> {
-		const sides = createTurboFilePostTransferRefreshPlan(operation, sourceSide, targetSide);
-		await Promise.all(sides.map(side => this.refreshPane(side, { force: true })));
+	private createTransferContext(
+		sourceSide: 'left' | 'right',
+		targetSide: 'left' | 'right',
+		sourceDevice: TurboFileDevice,
+		targetDevice: TurboFileDevice,
+		sourceDirectoryPath: string = this.paneStates[sourceSide].path,
+		targetDirectoryPath: string = this.paneStates[targetSide].path
+	): TurboFileTransferContext {
+		const cloneDevice = (device: TurboFileDevice): TurboFileDevice => ({
+			...device,
+			capabilities: { ...device.capabilities }
+		});
+		return {
+			source: { side: sourceSide, device: cloneDevice(sourceDevice), directoryPath: sourceDirectoryPath },
+			target: { side: targetSide, device: cloneDevice(targetDevice), directoryPath: targetDirectoryPath }
+		};
+	}
+
+	private isSameTransferLocation(left: TurboFileTransferLocation, right: TurboFileTransferLocation): boolean {
+		return this.isSameCapturedTransferDevice(left.device, right.device)
+			&& this.pathsEqualForDevice(left.directoryPath, right.directoryPath, this.isWindowsDevice(left.device));
+	}
+
+	private isSameCapturedTransferDevice(left: TurboFileDevice, right: TurboFileDevice): boolean {
+		if (left.id === LOCAL_WINDOWS_DEVICE_ID || right.id === LOCAL_WINDOWS_DEVICE_ID) {
+			return left.id === right.id;
+		}
+		return left.host === right.host
+			&& (left.port || 22) === (right.port || 22)
+			&& left.username === right.username;
+	}
+
+	private isPaneAtTransferLocation(side: 'left' | 'right', location: TurboFileTransferLocation): boolean {
+		const paneDevice = this.getPaneDevice(side);
+		return !!paneDevice
+			&& !this.paneStates[side].trashMode.active
+			&& this.isSameCapturedTransferDevice(location.device, paneDevice)
+			&& this.pathsEqualForDevice(this.paneStates[side].path, location.directoryPath, this.isWindowsDevice(location.device));
+	}
+
+	private getVisibleTransferLocationSides(location: TurboFileTransferLocation): ('left' | 'right')[] {
+		return (['left', 'right'] as const).filter(side => this.isPaneAtTransferLocation(side, location));
+	}
+
+	private invalidateTransferLocationCaches(location: TurboFileTransferLocation): void {
+		const aliasDevices: TurboFileDevice[] = [];
+		for (const device of [location.device, this.localWindowsDevice, ...this.devices]) {
+			const cacheKey = this.getPaneDirectoryCacheKey(device, location.directoryPath);
+			if (aliasDevices.some(candidate => this.getPaneDirectoryCacheKey(candidate, location.directoryPath) === cacheKey)
+				|| !this.isSameCapturedTransferDevice(location.device, device)) {
+				continue;
+			}
+			aliasDevices.push(device);
+		}
+
+		for (const device of aliasDevices) {
+			this.invalidatePaneDirectoryCaches(device, [location.directoryPath]);
+			for (const side of ['left', 'right'] as const) {
+				const snapshotKey = this.getPaneDeviceMemoryKey(side, device);
+				const snapshot = this.paneDeviceSnapshots.get(snapshotKey);
+				if (snapshot && this.pathsEqualForDevice(snapshot.path, location.directoryPath, this.isWindowsDevice(device))) {
+					this.paneDeviceSnapshots.delete(snapshotKey);
+				}
+			}
+		}
+	}
+
+	private invalidateTransferContextCaches(operation: 'copy' | 'move', context: TurboFileTransferContext): void {
+		if (operation === 'move') {
+			this.invalidateTransferLocationCaches(context.source);
+		}
+		if (operation !== 'move' || !this.isSameTransferLocation(context.source, context.target)) {
+			this.invalidateTransferLocationCaches(context.target);
+		}
+	}
+
+	private applyOptimisticTransferResult(operation: 'copy' | 'move', context: TurboFileTransferContext, sourceItems: readonly TurboFileFileItem[]): void {
+		const transferableItems = sourceItems.filter((item): item is TurboFileFileItem & { readonly path: string } => !!item.path && !item.parent);
+		if (!transferableItems.length) {
+			return;
+		}
+
+		const sourcePathKey = (path: string): string => this.isWindowsDevice(context.source.device) ? getWindowsPathKey(path) : path;
+		const targetPathKey = (path: string): string => this.isWindowsDevice(context.target.device) ? getWindowsPathKey(path) : path;
+		const mutations = transferableItems.map(item => {
+			const targetPath = joinPanePath(context.target.directoryPath, item.name, this.isWindowsDevice(context.target.device));
+			return {
+				sourceKey: sourcePathKey(item.path),
+				targetKey: targetPathKey(targetPath),
+				targetItem: { ...item, path: targetPath, parent: false }
+			};
+		});
+		const sameLocation = this.isSameTransferLocation(context.source, context.target);
+		const sourceSides = this.getVisibleTransferLocationSides(context.source);
+		const targetSides = this.getVisibleTransferLocationSides(context.target);
+		const changedSides = new Set<'left' | 'right'>();
+		const targetPathBySourceKey = new Map(mutations.map(mutation => [mutation.sourceKey, mutation.targetItem.path!]));
+		if (sameLocation) {
+			for (const side of createTurboFilePostTransferRefreshPlan(operation, sourceSides, targetSides)) {
+				const state = this.paneStates[side];
+				const result = applyTurboFileOptimisticTransfer(operation, state.items, state.items, mutations, true, {
+					source: sourcePathKey,
+					target: targetPathKey
+				});
+				state.items = this.sortPaneItems(side, result.targetItems);
+				if (operation === 'move') {
+					this.remapSelectionAfterMove(side, true, sourcePathKey, targetPathBySourceKey);
+				}
+				changedSides.add(side);
+			}
+		} else {
+			if (operation === 'move') {
+				for (const side of sourceSides) {
+					const state = this.paneStates[side];
+					const result = applyTurboFileOptimisticTransfer('move', state.items, [], mutations, false, {
+						source: sourcePathKey,
+						target: targetPathKey
+					});
+					state.items = this.sortPaneItems(side, result.sourceItems);
+					this.remapSelectionAfterMove(side, false, sourcePathKey, targetPathBySourceKey);
+					changedSides.add(side);
+				}
+			}
+			for (const side of targetSides) {
+				const state = this.paneStates[side];
+				const result = applyTurboFileOptimisticTransfer('copy', [], state.items, mutations, false, {
+					source: sourcePathKey,
+					target: targetPathKey
+				});
+				state.items = this.sortPaneItems(side, result.targetItems);
+				changedSides.add(side);
+			}
+		}
+		for (const side of changedSides) {
+			this.updatePaneAfterOptimisticMutation(side);
+		}
+	}
+
+	private remapSelectionAfterMove(sourceSide: 'left' | 'right', samePane: boolean, sourcePathKey: (path: string) => string, targetPathBySourceKey: ReadonlyMap<string, string>): void {
+		const state = this.paneStates[sourceSide];
+		const mapPath = (path: string | undefined): string | undefined => {
+			if (!path) {
+				return undefined;
+			}
+			const targetPath = targetPathBySourceKey.get(sourcePathKey(path));
+			if (targetPath) {
+				return samePane ? targetPath : undefined;
+			}
+			return path;
+		};
+		const selectedPaths = Array.from(state.selectedPaths);
+		state.selectedPaths.clear();
+		for (const path of selectedPaths) {
+			const mappedPath = mapPath(path);
+			if (mappedPath) {
+				state.selectedPaths.add(mappedPath);
+			}
+		}
+		state.selectedPath = mapPath(state.selectedPath);
+		state.selectionAnchorPath = mapPath(state.selectionAnchorPath);
+	}
+
+	private updatePaneAfterOptimisticMutation(side: 'left' | 'right'): void {
+		const state = this.paneStates[side];
+		const device = this.getPaneDevice(side);
+		if (device) {
+			this.paneDirectoryCache.set(this.getPaneDirectoryCacheKey(device, state.path), {
+				expiresAt: Date.now() + PANE_DIRECTORY_CACHE_TTL_MS,
+				path: state.path,
+				items: state.items
+			});
+		}
+		this.fileListRenderedRange[side] = undefined;
+		this.rememberPaneDeviceSnapshot(side);
+		this.rerenderFileListSliceInPlace(side);
+		const pane = this.container?.querySelector<HTMLElement>(`.turbofile-pane[data-turbofile-side="${side}"]`);
+		if (pane) {
+			const count = pane.querySelector<HTMLElement>('.turbofile-browser-item-count');
+			if (count) {
+				this.updatePaneItemCountElement(side, count);
+			}
+			this.updatePaneSelectionBadge(side, pane);
+		}
+		this.scheduleEnrichVisibleRows(side);
+	}
+
+	private schedulePostTransferReconcile(operation: 'copy' | 'move', context: TurboFileTransferContext): void {
+		this.invalidateTransferContextCaches(operation, context);
+		const sourceSides = this.getVisibleTransferLocationSides(context.source);
+		const targetSides = this.getVisibleTransferLocationSides(context.target);
+		for (const side of createTurboFilePostTransferRefreshPlan(operation, sourceSides, targetSides)) {
+			const location = targetSides.includes(side) ? context.target : context.source;
+			this.queuePaneReconcile(side, location);
+		}
+	}
+
+	private schedulePaneReconcile(sides: readonly ('left' | 'right')[]): void {
+		for (const side of sides) {
+			const device = this.getPaneDevice(side);
+			if (device) {
+				this.queuePaneReconcile(side, {
+					side,
+					device: { ...device, capabilities: { ...device.capabilities } },
+					directoryPath: this.paneStates[side].path
+				});
+			}
+		}
+	}
+
+	private queuePaneReconcile(side: 'left' | 'right', location: TurboFileTransferLocation): void {
+		this.postTransferReconcileContexts.set(side, location);
+		this.postTransferReconcileGeneration[side]++;
+		this.postTransferReconcileScheduler.schedule(POST_TRANSFER_RECONCILE_DELAY_MS);
+	}
+
+	private async reconcilePaneAfterTransfer(side: 'left' | 'right', context: TurboFileTransferLocation, generation: number): Promise<void> {
+		const state = this.paneStates[side];
+		if (!this.isPaneAtTransferLocation(side, context)) {
+			this.invalidateTransferLocationCaches(context);
+			return;
+		}
+		const paneRequestSeq = this.paneRequestSeq[side];
+		try {
+			const listing = await this.loadPaneDirectory(context.device, context.directoryPath, true, 'prefetch', this.paneSortNeedsAttributes(side));
+			if (this.postTransferReconcileGeneration[side] !== generation
+				|| this.paneRequestSeq[side] !== paneRequestSeq
+				|| !this.isPaneAtTransferLocation(side, context)) {
+				return;
+			}
+
+			const pathKey = (itemPath: string): string => this.isWindowsDevice(context.device) ? getWindowsPathKey(itemPath) : itemPath;
+			const itemsByPath = new Map(listing.items.filter(item => !!item.path).map(item => [pathKey(item.path!), item]));
+			const selectedPaths = Array.from(state.selectedPaths);
+			state.items = this.sortPaneItems(side, listing.items);
+			state.selectedPaths.clear();
+			for (const selectedPath of selectedPaths) {
+				const item = itemsByPath.get(pathKey(selectedPath));
+				if (item?.path && !item.parent) {
+					state.selectedPaths.add(item.path);
+				}
+			}
+			state.selectedPath = state.selectedPath ? itemsByPath.get(pathKey(state.selectedPath))?.path : undefined;
+			state.selectionAnchorPath = state.selectionAnchorPath ? itemsByPath.get(pathKey(state.selectionAnchorPath))?.path : undefined;
+			this.setDeviceRuntimeStatus(context.device, 'online');
+			this.rememberPaneDeviceSnapshot(side);
+			this.prefetchNeighborDirectories(context.device, listing.path, listing.items);
+			this.updatePaneAfterOptimisticMutation(side);
+		} catch {
+			// The transfer already succeeded and the optimistic pane state is authoritative enough for
+			// immediate use. A background consistency refresh must never turn success into an error.
+		}
 	}
 
 	private async deleteExternalSourceItems(task: TurboFileTask, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
@@ -9376,8 +9762,8 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 
-			this.updateTask(task, `正在删除本地来源 ${index + 1}/${sourceItems.length}：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)));
-			const result = await this.sshService.deletePath(await this.toTransferEndpoint(this.localWindowsDevice, item.path), true);
+			this.updateTask(task, `正在删除本地来源 ${index + 1}/${sourceItems.length}：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)), false);
+			const result = await this.sshService.deletePath(await this.toTransferEndpoint(this.localWindowsDevice, item.path), true, { progressId: task.progressId });
 			if (!result.ok) {
 				failures.push(`${item.name}: ${result.message}`);
 			}
@@ -9385,27 +9771,34 @@ export class TurboFileEditor extends EditorPane {
 		return failures;
 	}
 
-	private async refreshLocalPanesForWindowsPaths(paths: readonly string[]): Promise<void> {
-		const parentPaths = paths
-			.map(path => getPaneParentPath(path, true))
-			.filter((path): path is string => !!path);
-		if (!parentPaths.length) {
-			return;
-		}
-
-		const refreshes: Promise<void>[] = [];
+	private applyOptimisticLocalSourceRemoval(sourceItems: readonly TurboFileFileItem[]): void {
+		const sourcePathKeys = new Set(sourceItems.map(item => item.path).filter((path): path is string => !!path).map(getWindowsPathKey));
+		const changedSides: Array<'left' | 'right'> = [];
 		for (const side of ['left', 'right'] as const) {
-			const device = this.getPaneDevice(side);
-			if (device?.id !== LOCAL_WINDOWS_DEVICE_ID) {
+			if (this.getPaneDevice(side)?.id !== LOCAL_WINDOWS_DEVICE_ID) {
 				continue;
 			}
-
-			if (parentPaths.some(parentPath => isSameWindowsPath(parentPath, this.paneStates[side].path))) {
-				refreshes.push(this.refreshPane(side, { force: true }));
+			const state = this.paneStates[side];
+			const nextItems = state.items.filter(item => !item.path || !sourcePathKeys.has(getWindowsPathKey(item.path)));
+			if (nextItems.length === state.items.length) {
+				continue;
 			}
+			state.items = nextItems;
+			for (const selectedPath of Array.from(state.selectedPaths)) {
+				if (sourcePathKeys.has(getWindowsPathKey(selectedPath))) {
+					state.selectedPaths.delete(selectedPath);
+				}
+			}
+			if (state.selectedPath && sourcePathKeys.has(getWindowsPathKey(state.selectedPath))) {
+				state.selectedPath = undefined;
+			}
+			if (state.selectionAnchorPath && sourcePathKeys.has(getWindowsPathKey(state.selectionAnchorPath))) {
+				state.selectionAnchorPath = undefined;
+			}
+			this.updatePaneAfterOptimisticMutation(side);
+			changedSides.push(side);
 		}
-
-		await Promise.all(refreshes);
+		this.schedulePaneReconcile(changedSides);
 	}
 
 	private async resolveExternalTransferItems(paths: readonly string[]): Promise<TurboFileFileItem[]> {
@@ -9496,6 +9889,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const targetDevice = this.localWindowsDevice;
+		const transferContext = this.createTransferContext(sourceSide, sourceSide, sourceDevice, targetDevice, this.paneStates[sourceSide].path, targetDirectory);
 		if (operation === 'copy' && items.length === 1) {
 			const sourceItem = items[0];
 			const task = this.beginTask('transfer', `拖出 ${sourceItem.name}`, `${sourceDevice.name} -> Windows`, false);
@@ -9525,13 +9919,16 @@ export class TurboFileEditor extends EditorPane {
 				transferItem.totalBytes = Math.max(result.bytes, transferItem.totalBytes);
 				transferItem.strategy = result.strategy ?? transferItem.strategy;
 				transferItem.endedAt = Date.now();
-				this.finishTask(task, 'success', `拖出完成：${sourceItem.name}，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				this.schedulePostTransferReconcile('copy', transferContext);
+				this.applyOptimisticTransferResult('copy', transferContext, items);
+				this.finishTask(task, 'success', `拖出完成：${sourceItem.name}，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond }, false);
 				return true;
 			}
 			transferItem.status = result.canceled ? 'canceled' : 'error';
 			transferItem.error = result.canceled ? undefined : result.message;
 			transferItem.endedAt = Date.now();
 			this.finishTask(task, result.canceled ? 'canceled' : 'error', result.canceled ? `已取消拖出：${sourceItem.name}` : `拖出失败：${result.message}`, { bytes: result.bytes, strategy: result.strategy, error: result.canceled ? undefined : result.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+			this.schedulePostTransferReconcile('copy', transferContext);
 			return false;
 		}
 
@@ -9582,15 +9979,6 @@ export class TurboFileEditor extends EditorPane {
 				clientStartedAt: initiatedAt ?? task.startedAt
 			});
 
-			if (operation === 'move') {
-				const targetPaths = items.map(item => joinPanePath(targetDirectory, item.name, true));
-				this.updateTask(task, `正在刷新目录：${sourceDevice.name} / Windows`, 98);
-				await Promise.all([
-					this.refreshPane(sourceSide, { force: true }),
-					this.refreshLocalPanesForWindowsPaths(targetPaths)
-				]);
-			}
-
 			const failureMessages = new Map<string, string>();
 			for (const failure of result.failures) {
 				if (!failureMessages.has(failure.path)) {
@@ -9618,17 +10006,22 @@ export class TurboFileEditor extends EditorPane {
 
 			if (result.canceled) {
 				this.finishTask(task, 'canceled', `已取消拖出到 Windows：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
 			if (!result.ok) {
 				this.finishTask(task, 'error', `拖出到 Windows 完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
-			this.finishTask(task, 'success', `拖出到 Windows 完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+			this.schedulePostTransferReconcile(operation, transferContext);
+			this.applyOptimisticTransferResult(operation, transferContext, items);
+			this.finishTask(task, 'success', `拖出到 Windows 完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond }, false);
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `拖出到 Windows 失败：${message}`, { error: message });
+			this.schedulePostTransferReconcile(operation, transferContext);
 			return false;
 		} finally {
 			progressDisposable.dispose();
@@ -9646,9 +10039,10 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return false;
 		}
+		const transferContext = this.createTransferContext(sourceSide, targetSide, sourceDevice, targetDevice);
 
 		if (shouldUseBatchTransfer(operation, sourceItems.length)) {
-			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt);
+			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt, transferContext);
 		}
 
 		const batch = sourceItems.length > 1;
@@ -9677,6 +10071,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消批量传输：${sourceItem.name}` : `已取消传输：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
 			const progress = Math.min(88, 12 + Math.round((index / sourceItems.length) * 70));
@@ -9694,7 +10089,12 @@ export class TurboFileEditor extends EditorPane {
 				skipDirectorySize: !!sourceItem.directory
 			});
 			this.updateTask(task, batch ? `正在传输 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在传输：${sourceItem.name}`, progress, false);
-			const result = await this.transferItem(sourceSide, targetSide, sourceItem, { refreshTarget: false, task, initiatedAt });
+			const result = await this.transferItem(sourceSide, targetSide, sourceItem, {
+				refreshTarget: false,
+				task,
+				targetPath: joinPanePath(transferContext.target.directoryPath, sourceItem.name, this.isWindowsDevice(targetDevice)),
+				initiatedAt
+			});
 			if (result.ok) {
 				completed++;
 				totalBytes += result.bytes;
@@ -9715,6 +10115,7 @@ export class TurboFileEditor extends EditorPane {
 					pending.endedAt = Date.now();
 				}
 				this.finishTask(task, 'canceled', batch ? `已取消批量传输：${sourceItem.name}` : `已取消传输：${sourceItem.name}`, { bytes: totalBytes });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			} else {
 				failed++;
@@ -9726,30 +10127,27 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (operation === 'move' && failed === 0) {
-			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, sourceSide, sourceItems);
+			const cleanupFailures = await this.deleteInternalClipboardSources(task, sourceDevice, sourceItems);
 			if (cleanupFailures.length) {
-				this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 98);
-				await this.refreshTransferPanes('move', sourceSide, targetSide);
 				this.finishTask(task, 'error', `目标已复制，但删除来源失败 ${cleanupFailures.length} 项。`, { bytes: totalBytes, strategy: [...strategies].join(', ') || undefined, error: cleanupFailures[0] });
+				this.schedulePostTransferReconcile('move', transferContext);
 				return false;
 			}
 		}
 
-		this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
-		await Promise.all([
-			this.refreshPane(sourceSide, { force: true }),
-			this.refreshPane(targetSide, { force: true })
-		]);
 		const strategy = [...strategies].join(', ') || undefined;
 		if (failed > 0) {
 			this.finishTask(task, 'error', batch ? `批量传输完成 ${completed} 项，失败 ${failed} 项。` : `传输失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
+			this.schedulePostTransferReconcile(operation, transferContext);
 			return false;
 		}
 
 		const successMessage = batch
 			? `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${completed} 项，${formatSize(totalBytes)}。`
 			: `${operation === 'move' ? '剪切传输' : '传输'}完成：${sourceItems[0].name}，策略 ${strategy ?? 'unknown'}，${formatSize(totalBytes)}。`;
-		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy });
+		this.schedulePostTransferReconcile(operation, transferContext);
+		this.applyOptimisticTransferResult(operation, transferContext, sourceItems);
+		this.finishTask(task, 'success', successMessage, { bytes: totalBytes, strategy }, false);
 		return true;
 	}
 
@@ -9826,11 +10224,12 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move', initiatedAt?: number): Promise<boolean> {
+	private async transferItemsBatch(sourceSide: 'left' | 'right', targetSide: 'left' | 'right', sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], operation: 'copy' | 'move', initiatedAt?: number, transferContextOverride?: TurboFileTransferContext): Promise<boolean> {
 		const items = sourceItems.filter(item => !!item.path && !item.parent);
 		if (!items.length) {
 			return false;
 		}
+		const transferContext = transferContextOverride ?? this.createTransferContext(sourceSide, targetSide, sourceDevice, targetDevice);
 
 		const actionLabel = operation === 'move' ? '剪切传输' : '批量传输';
 		const task = this.beginTask('transfer', `${actionLabel} ${items.length} 项`, `${sourceDevice.name} -> ${targetDevice.name}`, false);
@@ -9852,7 +10251,7 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			const [sourceEndpoint, targetDirectoryEndpoint] = await Promise.all([
 				this.toTransferEndpoint(sourceDevice, items[0].path!),
-				this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path)
+				this.toTransferEndpoint(targetDevice, transferContext.target.directoryPath)
 			]);
 			const expectedBytes = task.trackTotalBytes ? Math.max(0, task.totalBytes ?? 0) : 0;
 			const plannedStrategy = this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, items);
@@ -9904,22 +10303,24 @@ export class TurboFileEditor extends EditorPane {
 				}
 			}
 
-			this.updateTask(task, `正在刷新目录：${sourceDevice.name} / ${targetDevice.name}`, 92);
-			await this.refreshTransferPanes(operation, sourceSide, targetSide);
-
 			if (result.canceled) {
 				this.finishTask(task, 'canceled', `已取消批量传输：${items.length} 项`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
 			if (!result.ok) {
 				this.finishTask(task, 'error', `批量传输完成 ${result.completed} 项，失败 ${result.failed} 项。`, { bytes: result.bytes, strategy: result.strategy, error: result.failures[0]?.message, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
-			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+			this.schedulePostTransferReconcile(operation, transferContext);
+			this.applyOptimisticTransferResult(operation, transferContext, items);
+			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond }, false);
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `批量传输失败：${message}`, { error: message });
+			this.schedulePostTransferReconcile(operation, transferContext);
 			return false;
 		} finally {
 			progressDisposable.dispose();
@@ -10055,7 +10456,7 @@ export class TurboFileEditor extends EditorPane {
 		const task = this.beginTask('delete', batch ? `删除 ${items.length} 项` : `删除 ${items[0].name}`, device.name);
 		try {
 			this.updateTask(task, batch ? `正在删除 ${items.length} 项…` : `正在删除：${items[0].name}`, 40);
-			const result = await this.moveUserItemsToTrash(device, items);
+			const result = await this.moveUserItemsToTrash(device, items, task.progressId);
 			if (result.completed > 0) {
 				this.paneStates[side].trashHasItems = true;
 			}
@@ -10102,7 +10503,7 @@ export class TurboFileEditor extends EditorPane {
 			this.updateTask(task, localize('turbofile.permanentDeletingItems', "正在永久删除 {0} 项…", items.length), 40);
 			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
 			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
-			const result = await this.sshService.deletePaths(endpoints, true);
+			const result = await this.sshService.deletePaths(endpoints, true, { progressId: task.progressId });
 			this.updateTask(task, localize('turbofile.refreshingDirectoryAfterPermanentDelete', "正在刷新目录：{0}", device.name), 90);
 			await this.refreshPane(side, { force: true });
 			if (!result.ok) {
@@ -11120,7 +11521,7 @@ export class TurboFileEditor extends EditorPane {
 			this.updateTask(task, items.length > 1 ? `正在永久删除 ${items.length} 项…` : `正在永久删除：${items[0].name}`, 40);
 			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
 			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
-			const result = await this.sshService.deletePaths(endpoints, true);
+			const result = await this.sshService.deletePaths(endpoints, true, { progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站目录：${device.name}`, 90);
 			await this.refreshTrashBrowsePane(side, true);
 			if (!result.ok) {
@@ -12661,7 +13062,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private async moveUserItemsToTrash(device: TurboFileDevice, items: readonly TurboFileFileItem[]): Promise<ITurboFileTrashOperationResult> {
+	private async moveUserItemsToTrash(device: TurboFileDevice, items: readonly TurboFileFileItem[], progressId?: string): Promise<ITurboFileTrashOperationResult> {
 		const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
 		const sources = await Promise.all(items.filter(item => !!item.path).map(async item => ({
 			endpoint: await this.toTransferEndpoint(device, item.path!, connection),
@@ -12670,7 +13071,8 @@ export class TurboFileEditor extends EditorPane {
 		})));
 		return this.sshService.movePathsToTrash({
 			device: await this.toTrashDevice(device, connection),
-			sources
+			sources,
+			progressId
 		});
 	}
 
@@ -12976,7 +13378,7 @@ export class TurboFileEditor extends EditorPane {
 		const task = this.beginTask('delete', items.length > 1 ? `永久删除 ${items.length} 项` : `永久删除 ${items[0].originalName}`, device.name);
 		try {
 			this.updateTask(task, items.length > 1 ? `正在永久删除 ${items.length} 项…` : `正在永久删除：${items[0].originalName}`, 40);
-			const result = await this.sshService.permanentlyDeleteTrashItems({ device: await this.toTrashDevice(device), items });
+			const result = await this.sshService.permanentlyDeleteTrashItems({ device: await this.toTrashDevice(device), items, progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站：${device.name}`, 90);
 			await this.refreshTrashPane(side);
 			if (result.ok) {
@@ -13010,7 +13412,7 @@ export class TurboFileEditor extends EditorPane {
 		const task = this.beginTask('delete', '清空回收站', device.name);
 		try {
 			this.updateTask(task, `正在清空回收站：${device.name}`, 40);
-			const result = await this.sshService.emptyTrash(await this.toTrashDevice(device));
+			const result = await this.sshService.emptyTrash(await this.toTrashDevice(device), { progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站：${device.name}`, 90);
 			await this.refreshTrashPane(side);
 			if (result.ok) {
@@ -13049,7 +13451,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const task = this.beginTask('compress', `压缩 ${item.name}`, device.name);
 		try {
-			const result = await this.sshService.compressPath(await this.toTransferEndpoint(device, item.path));
+			const result = await this.sshService.compressPath(await this.toTransferEndpoint(device, item.path), undefined, { progressId: task.progressId });
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			if (result.ok) {
 				this.finishTask(task, 'success', `压缩完成：${item.name}`);
@@ -13084,7 +13486,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const task = this.beginTask('extract', `解压 ${item.name}`, device.name);
 		try {
-			const result = await this.sshService.extractPath(await this.toTransferEndpoint(device, item.path));
+			const result = await this.sshService.extractPath(await this.toTransferEndpoint(device, item.path), undefined, { progressId: task.progressId });
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			if (result.ok) {
 				this.finishTask(task, 'success', `解压完成：${item.name}`);
@@ -13136,7 +13538,7 @@ export class TurboFileEditor extends EditorPane {
 		const displayPath = this.formatPanePathForDisplay(item.path, this.isWindowsDevice(device));
 		const task = this.beginTask('size', `计算大小 ${item.name}`, device.name);
 		try {
-			const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, item.path));
+			const result = await this.sshService.calculatePathSize(await this.toTransferEndpoint(device, item.path), { progressId: task.progressId });
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
 			if (result.ok) {
 				const sizeText = result.humanSize ?? formatSize(result.size);
@@ -13498,6 +13900,7 @@ export class TurboFileEditor extends EditorPane {
 		try {
 			this.updateTask(task, '正在扫描同步差异...', 8);
 			const plan = await this.buildSyncPlan(task);
+			this.throwIfTaskCancelRequested(task);
 			if (!plan.length) {
 				this.finishTask(task, 'success', '两侧同步范围已经一致。');
 				return;
@@ -13520,6 +13923,7 @@ export class TurboFileEditor extends EditorPane {
 			const failures: string[] = [];
 
 			for (const [index, step] of confirmedPlan.entries()) {
+				this.throwIfTaskCancelRequested(task);
 				const sourceDevice = this.getPaneDevice(step.sourceSide);
 				const targetDevice = this.getPaneDevice(step.targetSide);
 				const progress = Math.min(88, 10 + Math.round((index / confirmedPlan.length) * 72));
@@ -13543,6 +13947,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 
 			this.updateTask(task, '正在刷新两侧目录', 92);
+			this.throwIfTaskCancelRequested(task);
 			await Promise.all([this.refreshPane('left'), this.refreshPane('right')]);
 
 			const strategy = [...strategies].join(', ') || undefined;
@@ -13571,7 +13976,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async buildSyncPlan(task?: TurboFileTask): Promise<TurboFileSyncPlanItem[]> {
+		this.throwIfTaskCancelRequested(task);
 		const recursivePlan = await this.tryBuildRecursiveSyncPlan(task);
+		this.throwIfTaskCancelRequested(task);
 		return recursivePlan ?? this.buildFlatSyncPlan();
 	}
 
@@ -13629,6 +14036,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async collectSyncTree(side: 'left' | 'right', rootPath: string, relativeRoot: string, counter: { count: number }, task?: TurboFileTask): Promise<TurboFileSyncTreeEntry[]> {
+		this.throwIfTaskCancelRequested(task);
 		counter.count++;
 		if (counter.count > SYNC_RECURSIVE_SCAN_LIMIT) {
 			throw new Error(`递归同步扫描超过 ${SYNC_RECURSIVE_SCAN_LIMIT} 项，请进入更小的目录后再同步。`);
@@ -13638,8 +14046,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const items = await this.listPaneDirectory(side, rootPath);
+		this.throwIfTaskCancelRequested(task);
 		const entries: TurboFileSyncTreeEntry[] = [];
 		for (const item of items) {
+			this.throwIfTaskCancelRequested(task);
 			if (!item.path || item.parent || item.type === 'unknown') {
 				continue;
 			}
@@ -13664,6 +14074,12 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		return entries;
+	}
+
+	private throwIfTaskCancelRequested(task: TurboFileTask | undefined): void {
+		if (task?.cancelRequested) {
+			throw new Error('任务已取消。');
+		}
 	}
 
 	private async listPaneDirectory(side: 'left' | 'right', path: string): Promise<TurboFileFileItem[]> {
@@ -13848,6 +14264,7 @@ export class TurboFileEditor extends EditorPane {
 		this.preparedTransferPairGeneration++;
 		this.preparingTransferPairKey = undefined;
 		this.preparedTransferPairKey = undefined;
+		this.preparedTransferConnections.clear();
 		this.preparedTransferPairRetryCount = 0;
 		this.preparedTransferPairScheduler.cancel();
 	}
@@ -13855,7 +14272,7 @@ export class TurboFileEditor extends EditorPane {
 	private prewarmCurrentTransferPair(forceRefresh = false): void {
 		const sourceDevice = this.getPaneDevice('left');
 		const targetDevice = this.getPaneDevice('right');
-		if (!sourceDevice || !targetDevice || sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID || targetDevice.id === LOCAL_WINDOWS_DEVICE_ID || sourceDevice.id === targetDevice.id) {
+		if (!sourceDevice || !targetDevice || (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID)) {
 			this.invalidatePreparedTransferPair();
 			return;
 		}
@@ -13880,7 +14297,12 @@ export class TurboFileEditor extends EditorPane {
 		void Promise.all([
 			this.toTransferEndpoint(sourceDevice, this.paneStates.left.path),
 			this.toTransferEndpoint(targetDevice, this.paneStates.right.path)
-		]).then(([source, target]) => this.sshService.prepareTransferPair(source, target)).then(() => {
+		]).then(([source, target]) => {
+			if (this.preparedTransferPairGeneration !== generation || this.preparingTransferPairKey !== pairKey) {
+				return;
+			}
+			return this.sshService.prepareTransferPair(source, target);
+		}).then(() => {
 			if (this.preparedTransferPairGeneration === generation && this.preparingTransferPairKey === pairKey) {
 				this.preparingTransferPairKey = undefined;
 				this.preparedTransferPairKey = pairKey;
@@ -13923,12 +14345,16 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async getSshConnectionOptions(device: TurboFileDevice): Promise<ITurboFileSshConnectionOptions> {
-		const [password, privateKey, passphrase] = await Promise.all([
+		const cacheKey = this.getPreparedTransferPairDeviceKey(device);
+		const cached = this.preparedTransferConnections.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+		const connection = Promise.all([
 			this.deviceStore?.getPassword(device.id),
 			this.deviceStore?.getPrivateKey(device.id),
 			this.deviceStore?.getPassphrase(device.id)
-		]);
-		return {
+		]).then(([password, privateKey, passphrase]) => ({
 			host: device.host,
 			port: device.port,
 			username: device.username,
@@ -13936,7 +14362,16 @@ export class TurboFileEditor extends EditorPane {
 			privateKey,
 			privateKeyPath: device.privateKeyPath,
 			passphrase
-		};
+		}));
+		this.preparedTransferConnections.set(cacheKey, connection);
+		try {
+			return await connection;
+		} catch (error) {
+			if (this.preparedTransferConnections.get(cacheKey) === connection) {
+				this.preparedTransferConnections.delete(cacheKey);
+			}
+			throw error;
+		}
 	}
 
 	private async getSshConnectionOptionsFromDraft(draft: TurboFileDeviceDraft, editingDevice?: TurboFileDevice): Promise<ITurboFileSshConnectionOptions> {
