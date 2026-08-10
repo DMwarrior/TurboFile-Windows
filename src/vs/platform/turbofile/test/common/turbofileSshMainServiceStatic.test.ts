@@ -828,12 +828,14 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const controlLease = methodBlock(service, 'private acquirePreparedDirectSshControlConnection', 'private getDirectSshControlConnectionKey');
 
 		assert.deepStrictEqual({
-			preparesBothPhysicalDirectionsBeforeProtocolProof: panePreparation.includes('this.prepareDirectSshControlConnection(sourceSession, targetConnection)')
+			startsBothPhysicalDirectionsAlongsideProtocolProof: panePreparation.includes('this.prepareDirectSshControlConnection(sourceSession, targetConnection)')
 				&& panePreparation.includes('this.prepareDirectSshControlConnection(targetSession, sourceConnection)')
-				&& panePreparation.indexOf('prepareDirectSshControlConnection') < panePreparation.indexOf('getOrStartDirectScpProbePair'),
-			serializesProtocolProofsOnlyWhenBothControlMastersAreReady: panePreparation.includes("preparedControlPaths.every(controlPath => typeof controlPath === 'string')")
-				&& panePreparation.includes('for (const protocol of staleProtocols)')
-				&& panePreparation.includes('Promise.all(staleProtocols.map('),
+				&& panePreparation.includes('const preparedControlPathsPromise = prepareControlConnections();')
+				&& panePreparation.indexOf('preparedControlPathsPromise') < panePreparation.indexOf('getOrStartDirectScpProbePair')
+				&& panePreparation.includes('const preparedControlPaths = await preparedControlPathsPromise;'),
+			primaryProtocolBecomesReadyBeforeBackgroundFallbacks: panePreparation.includes('const primaryProtocol = protocols[0]')
+				&& panePreparation.includes('await this.getOrStartDirectScpProbePair(source, target, primaryProtocol, true)')
+				&& panePreparation.includes('void Promise.all(secondaryProtocols.map('),
 			retriesOnlyTransientMissingControlConnectionsOffHotPath: panePreparation.includes('preparedControlPaths.some(controlPath => controlPath === undefined)')
 				&& panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_RETRY_MS')
 				&& panePreparation.includes('controlPaths = await prepareControlConnections();')
@@ -919,8 +921,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& directScp.indexOf('this.prepareRemoteScpCredential(') < directScp.indexOf('const retainedPreparation = wrapRemoteCredentialCommand(')
 				&& directScp.includes('credential.activePath, true')
 		}, {
-			preparesBothPhysicalDirectionsBeforeProtocolProof: true,
-			serializesProtocolProofsOnlyWhenBothControlMastersAreReady: true,
+			startsBothPhysicalDirectionsAlongsideProtocolProof: true,
+			primaryProtocolBecomesReadyBeforeBackgroundFallbacks: true,
 			retriesOnlyTransientMissingControlConnectionsOffHotPath: true,
 			capabilityFailurePreservesLegacyProbe: true,
 			concurrentPrewarmSharesOneControlHandshake: true,
@@ -1063,7 +1065,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
-	test('uses the prepared auto-fast route without probing on the single-transfer hot path', () => {
+	test('uses prepared auto-fast routes and shares cold single-flight preparation', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transfer = methodBlock(service, 'private async transferBetweenSshDevices', 'private async trySshToSshTransferAttempt');
 		const directDispatcher = methodBlock(service, 'private async trySshToSshDirectTransfer', 'private async trySshToSshRelayTransfer');
@@ -1071,10 +1073,11 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const directTar = methodBlock(service, 'private async tryDirectTarTransfer', 'private async tryDirectTarTransferRoute');
 		const directScp = methodBlock(service, 'private async tryDirectScpTransfer', 'private async tryDirectScpTransferRoute');
 		const directSftp = methodBlock(service, 'private async tryDirectSftpTransfer', 'private async tryDirectSftpTransferRoute');
+		const preparedDecision = methodBlock(service, 'private resolvePreparedDirectScpRoute', 'private resolvePreparedDirectAttempts');
 		const preparedSelector = methodBlock(service, 'private resolvePreparedDirectAttempts', 'private getOrStartDirectScpProbePair');
 
 		assert.deepStrictEqual({
-			allDirectProtocolsCanSelectPreparedRoute: transfer.includes('this.resolvePreparedDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute)')
+			allDirectProtocolsCanSelectPreparedRoute: transfer.includes('await this.resolveOrPrepareDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute)')
 				&& preparedSelector.includes("if (attempt.route !== 'direct')")
 				&& preparedSelector.includes('getPreparedDirectRouteProtocol(attempt)')
 				&& preparedSelector.includes('prepared.push('),
@@ -1082,6 +1085,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& !transfer.includes("request.strategyHint !== 'direct'"),
 			preparedDecision: preparedSelector.includes('this.resolvePreparedDirectScpRoute(source, target, probeProtocol)')
 				&& !preparedSelector.includes('await this.resolvePreparedDirectScpRoute'),
+			coldCacheMissSharesPreparation: preparedDecision.includes("return { kind: 'unknown' };")
+				&& preparedSelector.includes('unknownProtocols.map(protocol => this.getOrStartDirectScpProbePair(source, target, protocol))'),
 			capabilityChangesSkipStalePreparedProtocols: preparedSelector.includes('isPreparedDirectRouteProtocolSupported(source, target, probeProtocol)'),
 			inheritedRoutesRequireCurrentSnapshot: preparedSelector.includes('inherited.route === decision.route')
 				&& preparedSelector.includes('inherited.generation === decision.generation')
@@ -1101,6 +1106,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			allDirectProtocolsCanSelectPreparedRoute: true,
 			explicitDirectAlsoUsesPaneDecision: true,
 			preparedDecision: true,
+			coldCacheMissSharesPreparation: true,
 			capabilityChangesSkipStalePreparedProtocols: true,
 			inheritedRoutesRequireCurrentSnapshot: true,
 			noDirectProbeProgress: true,
@@ -1115,7 +1121,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		});
 	});
 
-	test('uses the prepared auto-fast route without probing on the batch-transfer hot path', () => {
+	test('uses prepared auto-fast routes and shares batch cold preparation', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transferBatchCore = methodBlock(service, 'private async transferBatchCore', 'private getBatchExpectedBytes');
 		const batchPlan = methodBlock(service, 'private async runSshToSshBatchTransferPlan', 'private async runSshToSshBatchTransferAttempt');
@@ -1133,11 +1139,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const credentialWrapper = functionBlock(service, 'wrapRemoteCredentialCommand');
 
 		assert.deepStrictEqual({
-			multiFileUsesActualPlanDecision: batchPlan.includes('this.resolvePreparedDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
+			multiFileUsesActualPlanDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
 			explicitDirectAlsoUsesPaneDecision: batchPlan.includes("request.strategyHint !== 'relay'")
 				&& !batchPlan.includes("request.strategyHint !== 'direct'"),
-			preparedDecision: batchPlan.includes('this.resolvePreparedDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)')
-				&& !batchPlan.includes('await this.resolvePreparedDirectAttempts'),
+			preparedDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
 			noDirectProbeProgress: !transferBatchCore.includes('Checking direct'),
 			sshRsyncDoesNotPublishPlannedDirectStrategy: transferBatchCore.includes("const initialIsRsync = initialAttempt?.protocol === 'rsync' && !sshToSsh;"),
 			relaySkipsEveryDirectAttempt: batchPlan.includes("strategyHint: 'relay'")
@@ -1233,6 +1238,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const routeProbe = methodBlock(service, 'private async probeDirectScpRoute', 'private scheduleDirectProbeCredentialCleanup');
 		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
 		const cleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
+		const routePersistence = methodBlock(service, 'private restorePersistedDirectRoutes', 'private getCachedDirectScpProbeRoute');
 		const prepareCredential = methodBlock(service, 'private async prepareRemoteScpCredential', 'private async tryDirectSftpTransfer');
 		const bestEffortUnlink = methodBlock(service, 'private async unlinkRemoteBestEffort', 'private async uploadDirectory');
 		const cachedRoute = methodBlock(service, 'private getCachedDirectScpProbeRoute', 'private rememberDirectScpProbeRoute');
@@ -1249,16 +1255,19 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const pairKey = functionBlock(service, 'getDirectScpProbePairKey');
 
 		assert.deepStrictEqual({
-			transferNeverWaitsForProbe: resolver.includes(': PreparedDirectRouteDecision')
-				&& resolver.includes("return { kind: 'relay' };")
-				&& !resolver.includes('Promise<')
-				&& !resolver.includes('await ')
-				&& !resolver.includes('waitForTurboFileDirectRouteProbe'),
-			transferNeverStartsProbe: !resolver.includes('getOrStartDirectScpProbePair'),
+			cacheMissStaysUnknown: resolver.includes(': PreparedDirectRouteDecision')
+				&& resolver.includes("return { kind: 'unknown' };")
+				&& resolver.includes('private async resolveOrPrepareDirectAttempts'),
+			foregroundSharesSingleFlight: resolver.includes('const pending = unknownProtocols.map(protocol => this.getOrStartDirectScpProbePair(source, target, protocol))')
+				&& resolver.includes('this.resolvePreparedDirectAttempts(source, target, attempts, inherited).length')
+				&& !resolver.includes('Direct route preparation remained indeterminate after bounded retries.'),
 			paneRetriesOnlyIndeterminateProbes: panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_ATTEMPTS')
 				&& panePreparation.includes('DIRECT_SCP_PROBE_PREPARE_RETRY_MS')
-				&& panePreparation.includes('this.getOrStartDirectScpProbePair(source, target, protocol, true)')
+				&& panePreparation.includes('this.getOrStartDirectScpProbePair(source, target, primaryProtocol, true)')
 				&& panePreparation.includes('throw new Error(`Direct route preparation is still pending'),
+			primaryProtocolFinishesFirst: panePreparation.includes('const primaryProtocol = protocols[0];')
+				&& panePreparation.includes('const secondaryProtocols = protocols.slice(1).filter('),
+			secondaryProtocolsRunInBackground: panePreparation.includes('void Promise.all(secondaryProtocols.map(protocol => this.getOrStartDirectScpProbePair(source, target, protocol, true)))'),
 			staleDecisionsRefreshOnlyInBackground: panePreparation.includes('this.preparedDirectRouteCache.needsRefresh(')
 				&& panePreparation.includes('DIRECT_ROUTE_BACKGROUND_REFRESH_MS'),
 			backgroundHasIndependentLimit: pairProbe.includes('DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS') && pairProbe.includes('coordinateTurboFileDirectRouteProbe'),
@@ -1275,6 +1284,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& prepareProbe.includes('void this.unlinkRemoteBestEffort(session.sftp, path);')
 				&& !prepareProbe.includes('this.execRemote(session.client, `rm -f'),
 			realScpCommand: command.includes('buildDirectScpCommand(')
+				&& command.includes('DIRECT_ROUTE_PROBE_CONNECT_TIMEOUT_SECONDS')
 				&& command.includes('buildSshpassPrefix(remote.password)')
 				&& command.includes('sourceProbePath')
 				&& command.includes('sourcePushTargetPath')
@@ -1284,6 +1294,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 			matchedTarCommand: routeProbe.includes("protocol === 'scp'")
 				&& routeProbe.includes('buildDirectTarProbeCommand(remoteConnection, proofCredential.identityPath, marker, controlPath)')
 				&& tarCommand.includes('buildDirectScpSshCommand(')
+				&& tarCommand.includes('DIRECT_ROUTE_PROBE_CONNECT_TIMEOUT_SECONDS')
 				&& tarCommand.includes('buildDirectTarProgressPrerequisiteCommand()')
 				&& tarCommand.includes('command -v bash')
 				&& tarCommand.includes('command -v tar')
@@ -1295,9 +1306,11 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& routeProbe.includes('buildDirectSftpProbeCommand(remoteConnection, proofCredential.identityPath, marker, controlPath)')
 				&& rsyncCommand.includes('command -v rsync')
 				&& rsyncCommand.includes('buildDirectScpSshCommand(')
+				&& rsyncCommand.includes('DIRECT_ROUTE_PROBE_CONNECT_TIMEOUT_SECONDS')
 				&& !rsyncCommand.includes('dialectPath')
 				&& !rsyncCommand.includes('buildPortablePosix')
 				&& sftpCommand.includes('buildOptimizedSftpCommand(')
+				&& sftpCommand.includes('DIRECT_ROUTE_PROBE_CONNECT_TIMEOUT_SECONDS')
 				&& !sftpCommand.includes('buildDirectScpSshCommand(')
 				&& !sftpCommand.includes('dialectPath')
 				&& !sftpCommand.includes('buildPortablePosix')
@@ -1381,12 +1394,20 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& forgetRoute.includes('generation')
 				&& preparedCache.includes('?.generation !== generation')
 				&& preparedCache.includes('this.routeKey(targetKey, sourceKey, protocol, invertDirectSshRoute(route))'),
+			positiveRoutesPersistAcrossRestarts: routePersistence.includes('this.stateService.getItem<readonly IPersistedDirectRoute[]>')
+				&& routePersistence.includes('DIRECT_ROUTE_PERSISTENCE_TTL_MS')
+				&& routePersistence.includes('this.preparedDirectRouteCache.rememberRoute(')
+				&& rememberRoute.includes('this.rememberPersistedDirectRoute('),
+			persistedRoutesAreInvalidatedWithTopology: forgetRoute.includes('this.forgetPersistedDirectRoute(sourceKey, targetKey, protocol)')
+				&& service.includes('this.forgetPersistedDirectRoute(sourceKey, targetKey, protocol);'),
 			backgroundRelayIsPersisted: service.includes('else if (outcome.confirmedUnavailable && outcome.sourceSession && outcome.targetSession)')
 				&& service.includes('this.rememberDirectScpProbeUnavailable(source.connection!, target.connection!, protocol);')
 		}, {
-			transferNeverWaitsForProbe: true,
-			transferNeverStartsProbe: true,
+			cacheMissStaysUnknown: true,
+			foregroundSharesSingleFlight: true,
 			paneRetriesOnlyIndeterminateProbes: true,
+			primaryProtocolFinishesFirst: true,
+			secondaryProtocolsRunInBackground: true,
 			staleDecisionsRefreshOnlyInBackground: true,
 			backgroundHasIndependentLimit: true,
 			preservesCoordinatorAvailabilityDistinction: true,
@@ -1419,6 +1440,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 			lastDecisionSurvivesRefreshAge: true,
 			reverseDirectionCache: true,
 			failedPhysicalDirectionClearsMirror: true,
+			positiveRoutesPersistAcrossRestarts: true,
+			persistedRoutesAreInvalidatedWithTopology: true,
 			backgroundRelayIsPersisted: true
 		});
 	});
