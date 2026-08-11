@@ -217,17 +217,22 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(!css.includes('.turbofile-recycle-bin-button.is-full .turbofile-recycle-bin-icon::after'));
 	});
 
-	test('keeps the previous Chinese danger confirmation while ordinary deletion moves items to trash', () => {
+	test('uses the user deletion-confirmation setting for files and image-grid items', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const deleteSelected = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async moveUserItemsToTrash('));
 		const deleteGrid = editor.slice(editor.indexOf('private async deleteSelectedImageGridItems('), editor.indexOf('private async deleteImageGridPreview('));
 		const deletePreview = editor.slice(editor.indexOf('private async deleteImageGridPreview('), editor.indexOf('private setImageGridColumns('));
 
-		assert.ok(deleteSelected.includes("showDialogConfirm('删除确认'"));
+		assert.ok(editor.includes("const TURBOFILE_CONFIRM_BEFORE_DELETE_STORAGE_KEY = 'turbofile.delete.confirmBeforeDelete';"));
+		assert.ok(editor.includes("label: localize('turbofile.confirmBeforeDeleteSetting', \"删除前显示确认\")"));
+		assert.ok(editor.includes('checked: confirmBeforeDelete'));
+		assert.ok(editor.includes('StorageScope.PROFILE, StorageTarget.USER'));
+		assert.ok(editor.includes('private confirmDelete('));
+		assert.ok(deleteSelected.includes("confirmDelete('删除确认'"));
 		assert.ok(deleteSelected.includes('确定删除选中的'));
-		assert.ok(deleteGrid.includes("showDialogConfirm('删除图片'"));
+		assert.ok(deleteGrid.includes("confirmDelete('删除图片'"));
 		assert.ok(deleteGrid.includes('确定删除选中的'));
-		assert.ok(deletePreview.includes("showDialogConfirm('删除图片'"));
+		assert.ok(deletePreview.includes("confirmDelete('删除图片'"));
 		for (const method of [deleteSelected, deleteGrid, deletePreview]) {
 			assert.ok(method.includes('moveUserItemsToTrash'));
 			assert.ok(!method.includes('moveToRecycleBinTitle'));

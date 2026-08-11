@@ -77,7 +77,7 @@ import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsA
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
-import { enterTurboFileTrashDirectory, enterTurboFileTrashView, getTurboFileTrashRowHeight, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
+import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
 
 interface TurboFileFileItem {
 	readonly name: string;
@@ -523,6 +523,7 @@ const TURBOFILE_UI_FONT_SIZE_STORAGE_KEY = 'turbofile.ui.fontSize';
 const TURBOFILE_UI_FONT_FAMILY_STORAGE_KEY = 'turbofile.ui.fontFamily';
 const TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY = 'turbofile.localWindows.defaultPath';
 const TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY = 'turbofile.localWindows.preferredTransferProtocol';
+const TURBOFILE_CONFIRM_BEFORE_DELETE_STORAGE_KEY = 'turbofile.delete.confirmBeforeDelete';
 const TURBOFILE_UI_DEFAULT_FONT_SIZE = 14;
 const TURBOFILE_DEFAULT_FONT_FAMILY = '"Archivo", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif';
 const TURBOFILE_UI_DEFAULT_FONT_FAMILY = TURBOFILE_DEFAULT_FONT_FAMILY;
@@ -1293,12 +1294,6 @@ export class TurboFileEditor extends EditorPane {
 		const targetSide = this.activePage === 'images'
 			? (this.imageGridState?.side ?? this.activeFilePaneSide)
 			: this.getExternalDropSideFromEvent(event);
-		if (isTurboFileTrashRootView(this.paneStates[targetSide].trashMode)) {
-			if (event.dataTransfer) {
-				event.dataTransfer.dropEffect = 'none';
-			}
-			return;
-		}
 		const operation = this.getDragOperationFromEvent(event, targetSide);
 		if (event.dataTransfer) {
 			event.dataTransfer.dropEffect = getTurboFileDropEffect(operation);
@@ -1318,11 +1313,6 @@ export class TurboFileEditor extends EditorPane {
 		const side = this.activePage === 'images'
 			? (this.imageGridState?.side ?? this.activeFilePaneSide)
 			: this.getExternalDropSideFromEvent(event);
-		if (isTurboFileTrashRootView(this.paneStates[side].trashMode)) {
-			this.statusMessage = '不能向回收站根目录拖入文件，请先打开一个已删除的文件夹。';
-			this.refreshTaskbar();
-			return;
-		}
 		const operation = this.getDragOperationFromEvent(event, side);
 		this.setExternalDropTargetSide(undefined);
 		const externalPaths = this.extractExternalDropPaths(event);
@@ -1426,20 +1416,11 @@ export class TurboFileEditor extends EditorPane {
 			return true;
 		}
 		if (key === 'c' || key === 'x') {
-			if (isTurboFileTrashRootView(this.paneStates[side].trashMode) && key === 'x') {
-				void this.restoreSelectedTrashItems(side);
-			} else {
-				this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
-			}
+			this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
 			return true;
 		}
 
-		if (isTurboFileTrashRootView(this.paneStates[side].trashMode)) {
-			this.statusMessage = '不能向回收站根目录粘贴文件，请先打开一个已删除的文件夹。';
-			this.refreshTaskbar();
-		} else {
-			void this.pasteIntoPane(side);
-		}
+		void this.pasteIntoPane(side);
 		return true;
 	}
 
@@ -2011,7 +1992,7 @@ export class TurboFileEditor extends EditorPane {
 	private createTitlebarAppMenu(): HTMLElement {
 		const menu = $('.turbofile-titlebar-menu');
 		const updateActionKind = getTurboFileTitlebarUpdateActionKind(this.updateService.state);
-		menu.appendChild(this.createTitlebarMenuButton('设置', button => this.showTitlebarMenu(button, '设置', [])));
+		menu.appendChild(this.createTitlebarMenuButton('设置', button => this.showTitlebarMenu(button, '设置', this.getTitlebarSettingsActions())));
 		menu.appendChild(this.createTitlebarMenuButton('视图', button => this.showTitlebarMenu(button, '视图', [])));
 		menu.appendChild(this.createTitlebarMenuButton('帮助', button => this.showTitlebarMenu(button, '帮助', [
 			toAction({ id: 'turbofile.help.about', label: '关于极速传', enabled: true, run: () => this.showAboutDialog() })
@@ -2020,6 +2001,24 @@ export class TurboFileEditor extends EditorPane {
 			menu.appendChild(this.createTitlebarUpdateButton(updateActionKind));
 		}
 		return menu;
+	}
+
+	private getTitlebarSettingsActions(): IAction[] {
+		const confirmBeforeDelete = this.shouldConfirmBeforeDelete();
+		return [toAction({
+			id: 'turbofile.settings.confirmBeforeDelete',
+			label: localize('turbofile.confirmBeforeDeleteSetting', "删除前显示确认"),
+			checked: confirmBeforeDelete,
+			run: () => this.setConfirmBeforeDelete(!confirmBeforeDelete)
+		})];
+	}
+
+	private shouldConfirmBeforeDelete(): boolean {
+		return this.storageService.getBoolean(TURBOFILE_CONFIRM_BEFORE_DELETE_STORAGE_KEY, StorageScope.PROFILE, true);
+	}
+
+	private setConfirmBeforeDelete(enabled: boolean): void {
+		this.storageService.store(TURBOFILE_CONFIRM_BEFORE_DELETE_STORAGE_KEY, enabled, StorageScope.PROFILE, StorageTarget.USER);
 	}
 
 	private createTitlebarUpdateButton(kind: TurboFileTitlebarUpdateActionKind): HTMLButtonElement {
@@ -3314,26 +3313,21 @@ export class TurboFileEditor extends EditorPane {
 		toolbar.appendChild(toolbarTitle);
 		const toolbarAccent: TurboFileIconColor = side === 'left' ? 'primary' : 'success';
 		const gridAccent: TurboFileIconColor = side === 'left' ? 'info' : 'success';
-		if (state.trashMode.active) {
-			this.appendPaneSortButton(toolbar, side);
-			this.appendToolbarButton(toolbar, Codicon.arrowLeft, state.trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), () => state.trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side));
-			if (isTurboFileTrashRootView(state.trashMode)) {
-				this.appendToolbarButton(toolbar, Codicon.discard, localize('turbofile.recycleBinRestore', "还原"), () => { void this.restoreSelectedTrashItems(side); });
-				this.appendToolbarButton(toolbar, Codicon.trash, localize('turbofile.recycleBinPermanentDelete', "永久删除"), () => { void this.permanentlyDeleteSelectedTrashItems(side); });
-				this.appendToolbarButton(toolbar, Codicon.clearAll, localize('turbofile.recycleBinEmpty', "清空回收站"), () => { void this.emptyTrash(side); });
-			}
-			this.appendToolbarButton(toolbar, Codicon.refresh, localize('turbofile.recycleBinRefresh', "刷新"), () => { void this.refreshTrashPane(side); });
-		} else {
-			this.appendPaneSortButton(toolbar, side, toolbarAccent);
-			this.appendDragOperationButton(toolbar, side);
-			this.appendToolbarButton(toolbar, Codicon.refresh, '刷新', () => this.refreshPane(side, { force: true }), 'arrow-clockwise', toolbarAccent);
-			this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', toolbarAccent);
+		this.appendPaneSortButton(toolbar, side, toolbarAccent);
+		this.appendDragOperationButton(toolbar, side);
+		this.appendToolbarButton(toolbar, Codicon.refresh, '刷新', () => this.refreshPane(side, { force: true }), 'arrow-clockwise', toolbarAccent);
+		this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', toolbarAccent);
+		if (!state.trashMode.active) {
 			this.appendToolbarButton(toolbar, Codicon.trash, '删除选中项', () => this.deleteSelected(side), 'trash', 'danger');
 			this.appendRecycleBinButton(toolbar, side);
-			this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', 'secondary');
-			this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', gridAccent);
-			this.appendToolbarButton(toolbar, side === 'left' ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarRight, '在当前侧展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'));
-			this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
+		}
+		this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', 'secondary');
+		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', gridAccent);
+		this.appendToolbarButton(toolbar, side === 'left' ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarRight, '在当前侧展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'));
+		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
+		if (state.trashMode.active) {
+			this.appendToolbarButton(toolbar, Codicon.arrowLeft, state.trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), () => state.trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side));
+			this.appendToolbarButton(toolbar, Codicon.clearAll, localize('turbofile.recycleBinEmpty', "清空回收站"), () => { void this.emptyTrash(side); });
 		}
 		this.appendToolbarButton(
 			toolbar,
@@ -3375,19 +3369,13 @@ export class TurboFileEditor extends EditorPane {
 			if (event.key === 'F2') {
 				event.preventDefault();
 				this.setActiveFilePaneSide(side);
-				if (!isTurboFileTrashRootView(state.trashMode)) {
-					void this.renameSelected(side);
-				}
+				void this.renameSelected(side);
 				return;
 			}
 			if (event.key === 'Delete') {
 				event.preventDefault();
 				this.setActiveFilePaneSide(side);
-				if (state.trashMode.active) {
-					void this.permanentlyDeleteSelectedTrashItems(side);
-				} else {
-					void this.deleteSelected(side);
-				}
+				void this.deleteSelected(side);
 				return;
 			}
 			if ((event.ctrlKey || event.metaKey) && !event.altKey) {
@@ -3404,25 +3392,16 @@ export class TurboFileEditor extends EditorPane {
 				if (key === 'c' || key === 'x') {
 					event.preventDefault();
 					this.setActiveFilePaneSide(side);
-					if (isTurboFileTrashRootView(state.trashMode) && key === 'x') {
-						void this.restoreSelectedTrashItems(side);
-					} else {
-						this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
-					}
+					this.copySelectedToInternalClipboard(side, key === 'x' ? 'move' : 'copy', false);
 					return;
 				}
 			}
 		});
 		list.addEventListener('paste', event => {
 			event.preventDefault();
-			if (!isTurboFileTrashRootView(state.trashMode)) {
-				void this.pasteIntoPane(side);
-			}
+			void this.pasteIntoPane(side);
 		});
 		list.addEventListener('dragover', event => {
-			if (isTurboFileTrashRootView(state.trashMode)) {
-				return;
-			}
 			const sourceSide = this.getTurboFileDragSourceSide(event) ?? this.nativeDragSession?.sourceSide;
 			if (sourceSide && sourceSide !== side) {
 				this.consumeTurboFileDropEvent(event);
@@ -3452,9 +3431,6 @@ export class TurboFileEditor extends EditorPane {
 			this.setExternalDropTargetSide(undefined);
 		});
 		list.addEventListener('drop', event => {
-			if (isTurboFileTrashRootView(state.trashMode)) {
-				return;
-			}
 			const initiatedAt = Date.now();
 			this.consumeTurboFileDropEvent(event);
 			this.setExternalDropTargetSide(undefined);
@@ -3864,9 +3840,7 @@ export class TurboFileEditor extends EditorPane {
 		this.renderFileListSlice(side, list, range);
 		list.scrollTop = state.scrollTop;
 		this.restoreRenderedFileListScroll(side, list);
-		if (!isTurboFileTrashRootView(state.trashMode)) {
-			this.scheduleEnrichVisibleRows(side);
-		}
+		this.scheduleEnrichVisibleRows(side);
 	}
 
 	private renderFileListSlice(side: 'left' | 'right', list: HTMLElement, range: TurboFileFileListRange): void {
@@ -3895,9 +3869,7 @@ export class TurboFileEditor extends EditorPane {
 			endIndex: range.endIndex,
 			total: visibleItems.length
 		};
-		if (!isTurboFileTrashRootView(state.trashMode)) {
-			this.prefetchRenderedDirectoryRows(side, visibleItems, range);
-		}
+		this.prefetchRenderedDirectoryRows(side, visibleItems, range);
 	}
 
 	private prefetchRenderedDirectoryRows(side: 'left' | 'right', items: TurboFileFileItem[], range: TurboFileFileListRange): void {
@@ -3933,8 +3905,8 @@ export class TurboFileEditor extends EditorPane {
 		};
 	}
 
-	private getFileListRowHeight(state: TurboFilePaneState): number {
-		return state.trashMode.active ? getTurboFileTrashRowHeight(state.trashMode) : FILE_LIST_ROW_HEIGHT;
+	private getFileListRowHeight(_state: TurboFilePaneState): number {
+		return FILE_LIST_ROW_HEIGHT;
 	}
 
 	private clampFileListScrollTop(side: 'left' | 'right'): void {
@@ -4231,9 +4203,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderFileRow(side: 'left' | 'right', item: TurboFileFileItem, selected: boolean): HTMLElement {
 		const row = $('.turbofile-file-row');
-		const trashMode = this.paneStates[side].trashMode;
-		const trashRoot = isTurboFileTrashRootView(trashMode);
-		const renaming = !trashRoot && this.isInlineRenameTarget(side, item);
+		const renaming = this.isInlineRenameTarget(side, item);
 		if (item.path) {
 			row.dataset.turbofilePath = item.path;
 		}
@@ -4244,7 +4214,7 @@ export class TurboFileEditor extends EditorPane {
 			row.classList.add('is-renaming');
 		}
 		row.classList.add('is-clickable');
-		if (!trashRoot && item.path && !item.parent && !renaming) {
+		if (item.path && !item.parent && !renaming) {
 			row.draggable = true;
 			row.addEventListener('dragstart', event => {
 				this.beginFileRowDrag(side, item, event);
@@ -4264,7 +4234,7 @@ export class TurboFileEditor extends EditorPane {
 			this.selectItem(side, item, event, false);
 			this.updateRenderedSelection(side);
 		});
-		if (!trashRoot && (item.directory || item.parent) && item.path && this.isTrashBrowseNavigationAllowed(side, item.path)) {
+		if ((item.directory || item.parent) && item.path && this.isTrashBrowseNavigationAllowed(side, item.path)) {
 			row.addEventListener('pointerenter', () => this.prefetchPaneDirectory(side, item.path, 'hover'));
 			row.addEventListener('pointerdown', event => {
 				this.prefetchPaneDirectory(side, item.path, 'commit');
@@ -4308,18 +4278,10 @@ export class TurboFileEditor extends EditorPane {
 			if (renaming) {
 				return;
 			}
-			if (trashRoot) {
-				void this.openTrashItem(side, item);
-				return;
-			}
 			if ((item.directory || item.parent) && this.consumeSuppressedNativeDirectoryDoubleClick(side, item.path)) {
 				return;
 			}
-			if (item.directory || item.parent) {
-				void this.openItem(side, item);
-			} else {
-				void this.previewSelected(side, item);
-			}
+			void this.openItem(side, item);
 		});
 		row.addEventListener('contextmenu', event => {
 			this.setActiveFilePaneSide(side);
@@ -7927,17 +7889,6 @@ export class TurboFileEditor extends EditorPane {
 	private getFileContextActions(side: 'left' | 'right', item: TurboFileFileItem): IAction[] {
 		const canOperate = !!item.path && !item.parent;
 		const canExtract = canOperate && !item.directory && isArchiveFile(item.name);
-		if (isTurboFileTrashRootView(this.paneStates[side].trashMode)) {
-			return [
-				this.menuAction('turbofile.trash.open', item.directory ? localize('turbofile.recycleBinOpenDirectory', "打开目录") : localize('turbofile.recycleBinOpenFile', "打开文件"), Codicon.goToFile, () => { void this.openTrashItem(side, item); }, canOperate),
-				this.menuAction('turbofile.trash.copy', localize('turbofile.recycleBinCopy', "复制"), Codicon.copy, () => this.copySelectedToInternalClipboard(side, 'copy'), canOperate),
-				this.menuAction('turbofile.trash.calculateSize', localize('turbofile.recycleBinCalculateSize', "计算大小"), Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate),
-				this.menuAction('turbofile.trash.restore', localize('turbofile.recycleBinRestore', "还原"), Codicon.discard, () => { void this.restoreSelectedTrashItems(side); }, canOperate),
-				this.menuAction('turbofile.trash.copyOriginalPath', localize('turbofile.copyOriginalPath', "复制原始路径"), Codicon.copy, () => { void this.copySelectedTrashOriginalPath(side); }, canOperate),
-				this.menuAction('turbofile.trash.deletePermanently', localize('turbofile.recycleBinPermanentDelete', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelectedTrashItems(side); }, canOperate)
-			];
-		}
-
 		if (item.parent) {
 			return this.getPaneContextActions(side);
 		}
@@ -7950,30 +7901,30 @@ export class TurboFileEditor extends EditorPane {
 			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate),
 			this.menuAction('turbofile.extract', '解压', Codicon.unarchive, () => this.extractSelected(side), canExtract),
 			this.menuAction('turbofile.compress', '压缩', Codicon.archive, () => this.compressSelected(side), canOperate),
-			this.menuAction('turbofile.delete', this.paneStates[side].trashMode.browseItem ? '永久删除' : '删除', Codicon.trash, () => this.deleteSelected(side), canOperate),
-			...(!this.paneStates[side].trashMode.active
-				? [this.menuAction('turbofile.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelected(side); }, canOperate)]
-				: [])
+			this.menuAction('turbofile.delete', '删除', Codicon.trash, () => this.deleteSelected(side), canOperate),
+			this.menuAction('turbofile.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelected(side); }, canOperate)
 		];
 	}
 
-	private getPaneContextActions(side: 'left' | 'right'): IAction[] {
-		if (this.paneStates[side].trashMode.active) {
-			return [
-				this.menuAction('turbofile.trash.back', this.paneStates[side].trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), Codicon.arrowLeft, () => this.paneStates[side].trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side)),
-				this.menuAction('turbofile.trash.refresh', localize('turbofile.recycleBinRefresh', "刷新"), Codicon.refresh, () => { void this.refreshTrashPane(side); }),
-				...(isTurboFileTrashRootView(this.paneStates[side].trashMode)
-					? [this.menuAction('turbofile.trash.empty', localize('turbofile.recycleBinEmpty', "清空回收站"), Codicon.clearAll, () => { void this.emptyTrash(side); })]
-					: [
-						this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
-						this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side))
-					])
-			];
+	private confirmDelete(title: string, message: string, detail?: string, danger = false, confirmLabel?: string): Promise<boolean> {
+		if (!this.shouldConfirmBeforeDelete()) {
+			return Promise.resolve(true);
 		}
-		return [
+		return this.showDialogConfirm(title, message, detail, danger, confirmLabel);
+	}
+
+	private getPaneContextActions(side: 'left' | 'right'): IAction[] {
+		const actions: IAction[] = [
 			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
 			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side))
 		];
+		if (this.paneStates[side].trashMode.active) {
+			actions.push(
+				this.menuAction('turbofile.trash.back', this.paneStates[side].trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), Codicon.arrowLeft, () => this.paneStates[side].trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side)),
+				this.menuAction('turbofile.trash.empty', localize('turbofile.recycleBinEmpty', "清空回收站"), Codicon.clearAll, () => { void this.emptyTrash(side); })
+			);
+		}
+		return actions;
 	}
 
 	private getPaneSortActions(side: 'left' | 'right'): IAction[] {
@@ -8581,6 +8532,10 @@ export class TurboFileEditor extends EditorPane {
 
 	private async openItem(side: 'left' | 'right', item: TurboFileFileItem): Promise<void> {
 		if (!item.path) {
+			return;
+		}
+		if (isTurboFileTrashRootView(this.paneStates[side].trashMode)) {
+			await this.openTrashItem(side, item);
 			return;
 		}
 
@@ -9295,6 +9250,12 @@ export class TurboFileEditor extends EditorPane {
 			this.schedulePostTransferReconcile('move', transferContext);
 			return;
 		}
+		const trashMetadataFailures = await this.removeMovedTrashMetadata(device, sourceItems);
+		if (trashMetadataFailures.length) {
+			this.finishTask(task, 'error', `移动完成，但清理回收站记录失败 ${trashMetadataFailures.length} 项。`, { bytes: totalBytes, strategy, error: trashMetadataFailures[0] });
+			await this.refreshTrashPane(side);
+			return;
+		}
 
 		this.schedulePostTransferReconcile('move', transferContext);
 		this.applyOptimisticTransferResult('move', transferContext, sourceItems);
@@ -9381,6 +9342,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 
+		failures.push(...await this.removeMovedTrashMetadata(device, successfulItems));
 		if (failures.length) {
 			this.finishTask(task, 'error', batch ? `同设备移动完成 ${completed} 项，失败 ${failures.length} 项。` : `同设备移动失败：${failures[0]}`, { bytes: totalBytes, strategy, error: failures[0] });
 			this.schedulePostTransferReconcile('move', transferContext);
@@ -9488,9 +9450,25 @@ export class TurboFileEditor extends EditorPane {
 
 	private async deleteInternalClipboardSources(task: TurboFileTask, sourceDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): Promise<string[]> {
 		const failures: string[] = [];
+		const trashItems = sourceItems.map(item => item.trashItem).filter((item): item is ITurboFileTrashItem => !!item);
+		if (trashItems.length) {
+			const result = await this.sshService.permanentlyDeleteTrashItems({
+				device: await this.toTrashDevice(sourceDevice),
+				items: trashItems,
+				progressId: task.progressId
+			});
+			for (const failure of result.results.filter(result => !result.ok)) {
+				failures.push(`${failure.path}: ${failure.message}`);
+			}
+			for (const side of ['left', 'right'] as const) {
+				if (this.paneStates[side].trashMode.active && this.getPaneDevice(side)?.id === sourceDevice.id) {
+					await this.refreshTrashPane(side);
+				}
+			}
+		}
 		const batch = sourceItems.length > 1;
 		for (const [index, item] of sourceItems.entries()) {
-			if (!item.path) {
+			if (!item.path || item.trashItem) {
 				continue;
 			}
 			this.updateTask(task, batch ? `正在删除来源 ${index + 1}/${sourceItems.length}：${item.name}` : `正在删除来源：${item.name}`, Math.min(98, 92 + Math.round(((index + 1) / sourceItems.length) * 6)), false);
@@ -9500,6 +9478,23 @@ export class TurboFileEditor extends EditorPane {
 			}
 		}
 		return failures;
+	}
+
+	private async removeMovedTrashMetadata(device: TurboFileDevice, items: readonly TurboFileFileItem[]): Promise<string[]> {
+		const trashItems = items.map(item => item.trashItem).filter((item): item is ITurboFileTrashItem => !!item);
+		if (!trashItems.length) {
+			return [];
+		}
+		const result = await this.sshService.permanentlyDeleteTrashItems({
+			device: await this.toTrashDevice(device),
+			items: trashItems
+		});
+		for (const side of ['left', 'right'] as const) {
+			if (this.paneStates[side].trashMode.active && this.getPaneDevice(side)?.id === device.id) {
+				await this.refreshTrashPane(side);
+			}
+		}
+		return result.results.filter(result => !result.ok).map(result => `${result.path}: ${result.message}`);
 	}
 
 	private createTransferContext(
@@ -10313,6 +10308,14 @@ export class TurboFileEditor extends EditorPane {
 				this.schedulePostTransferReconcile(operation, transferContext);
 				return false;
 			}
+			if (operation === 'move') {
+				const trashMetadataFailures = await this.removeMovedTrashMetadata(sourceDevice, items);
+				if (trashMetadataFailures.length) {
+					this.finishTask(task, 'error', `传输完成，但清理回收站记录失败 ${trashMetadataFailures.length} 项。`, { bytes: result.bytes, strategy: result.strategy, error: trashMetadataFailures[0], durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond });
+					this.schedulePostTransferReconcile(operation, transferContext);
+					return false;
+				}
+			}
 			this.schedulePostTransferReconcile(operation, transferContext);
 			this.applyOptimisticTransferResult(operation, transferContext, items);
 			this.finishTask(task, 'success', `${operation === 'move' ? '剪切传输' : '批量传输'}完成：${result.completed} 项，${formatSize(result.bytes)}。`, { bytes: result.bytes, strategy: result.strategy, durationMs: result.durationMs, averageBytesPerSecond: result.averageBytesPerSecond }, false);
@@ -10448,7 +10451,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const batch = items.length > 1;
-		if (!await this.showDialogConfirm('删除确认', batch ? `确定删除选中的 ${items.length} 项吗？` : `确定删除 ${items[0].name} 吗？`, undefined, true)) {
+		if (!await this.confirmDelete('删除确认', batch ? `确定删除选中的 ${items.length} 项吗？` : `确定删除 ${items[0].name} 吗？`, undefined, true)) {
 			return;
 		}
 
@@ -10475,8 +10478,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async permanentlyDeleteSelected(side: 'left' | 'right'): Promise<boolean> {
-		if (this.paneStates[side].trashMode.active) {
-			return false;
+		const trashMode = this.paneStates[side].trashMode;
+		if (isTurboFileTrashRootView(trashMode)) {
+			return this.permanentlyDeleteSelectedTrashItems(side);
+		}
+		if (trashMode.browseItem) {
+			return this.permanentlyDeleteTrashBrowseItems(side);
 		}
 
 		const items = this.getSelectedTransferItems(side);
@@ -10487,7 +10494,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		if (!await this.showDialogConfirm(
+		if (!await this.confirmDelete(
 			localize('turbofile.permanentDeleteTitle', "永久删除"),
 			localize('turbofile.permanentDeleteMessage', "永久删除选中的 {0} 个项目吗？此操作无法撤销，且不会进入回收站。", items.length),
 			undefined,
@@ -10683,6 +10690,27 @@ export class TurboFileEditor extends EditorPane {
 	private async performRename(side: 'left' | 'right', item: TurboFileFileItem, nextName: string): Promise<void> {
 		const device = this.getPaneDevice(side);
 		if (!item.path || !device || item.parent || !nextName.trim() || nextName === item.name) {
+			return;
+		}
+		if (isTurboFileTrashRootView(this.paneStates[side].trashMode) && item.trashItem) {
+			const task = this.beginTask('rename', `重命名 ${item.name}`, `${item.name} -> ${nextName}`);
+			try {
+				const result = await this.sshService.renameTrashItem({
+					device: await this.toTrashDevice(device),
+					item: item.trashItem,
+					name: nextName
+				});
+				if (result.ok) {
+					this.finishTask(task, 'success', `已重命名：${item.name} -> ${nextName}`);
+				} else {
+					this.finishTask(task, 'error', `重命名失败：${result.message}`, { error: result.message });
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.finishTask(task, 'error', `重命名失败：${message}`, { error: message });
+			} finally {
+				await this.refreshTrashPane(side);
+			}
 			return;
 		}
 
@@ -10910,12 +10938,10 @@ export class TurboFileEditor extends EditorPane {
 		const anchor = new StandardMouseEvent(getWindow(event), event);
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
-			getActions: () => this.paneStates[state.side].trashMode.active
-				? [this.menuAction('turbofile.imageGrid.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.deleteSelectedImageGridItems(state); })]
-				: [
-					this.menuAction('turbofile.imageGrid.delete', localize('turbofile.delete', "删除"), Codicon.trash, () => { void this.deleteSelectedImageGridItems(state); }),
-					this.menuAction('turbofile.imageGrid.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelectedImageGridItems(state); })
-				],
+			getActions: () => [
+				this.menuAction('turbofile.imageGrid.delete', localize('turbofile.delete', "删除"), Codicon.trash, () => { void this.deleteSelectedImageGridItems(state); }),
+				this.menuAction('turbofile.imageGrid.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelectedImageGridItems(state); })
+			],
 			skipTelemetry: true
 		});
 	}
@@ -11282,7 +11308,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const batch = targets.length > 1;
 		const confirmMessage = batch ? `确定删除选中的 ${targets.length} 张图片？` : `删除 ${targets[0].image.item.name}？`;
-		if (!await this.showDialogConfirm('删除图片', confirmMessage, undefined, true)) {
+		if (!await this.confirmDelete('删除图片', confirmMessage, undefined, true)) {
 			return;
 		}
 
@@ -11382,7 +11408,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!state || !image?.item.path || !device) {
 			return;
 		}
-		if (!await this.showDialogConfirm('删除图片', `删除 ${image.item.name}？`, undefined, true)) {
+		if (!await this.confirmDelete('删除图片', `删除 ${image.item.name}？`, undefined, true)) {
 			return;
 		}
 
@@ -11505,7 +11531,7 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return false;
 		}
-		if (!await this.showDialogConfirm(
+		if (!await this.confirmDelete(
 			localize('turbofile.permanentDeleteTitle', "永久删除"),
 			localize('turbofile.permanentDeleteBrowseMessage', "永久删除选中的 {0} 个项目吗？此操作无法撤销。", items.length),
 			undefined,
@@ -13307,66 +13333,13 @@ export class TurboFileEditor extends EditorPane {
 			.filter((item): item is ITurboFileTrashItem => !!item);
 	}
 
-	private async restoreSelectedTrashItems(side: 'left' | 'right'): Promise<void> {
-		const device = this.getPaneDevice(side);
-		const items = this.getSelectedTrashItems(side);
-		if (!device || !items.length) {
-			return;
-		}
-		const trashDevice = await this.toTrashDevice(device);
-		let result = await this.sshService.restoreTrashItems({ device: trashDevice, items, conflictPolicy: 'cancel' });
-		const itemsById = new Map(items.map(item => [item.id, item]));
-		const conflicts = result.results.filter(item => item.conflict).map(item => item.id ? itemsById.get(item.id) : undefined).filter((item): item is ITurboFileTrashItem => !!item);
-		if (conflicts.length) {
-			const keepBoth = await this.showDialogConfirm(
-				localize('turbofile.restoreConflictTitle', "还原名称冲突"),
-				localize('turbofile.restoreConflictMessage', "原位置已有 {0} 个同名项目，是否自动添加序号并保留两者？", conflicts.length),
-				undefined,
-				false,
-				localize('turbofile.keepBoth', "保留两者")
-			);
-			if (keepBoth) {
-				const retry = await this.sshService.restoreTrashItems({ device: trashDevice, items: conflicts, conflictPolicy: 'keepBoth' });
-				result = {
-					...result,
-					ok: result.results.filter(item => !item.conflict).every(item => item.ok) && retry.ok,
-					completed: result.results.filter(item => item.ok).length + retry.completed,
-					failed: result.results.filter(item => !item.ok && !item.conflict).length + retry.failed,
-					results: [...result.results.filter(item => !item.conflict), ...retry.results]
-				};
-			}
-		}
-		this.statusMessage = result.ok
-			? localize('turbofile.restoreComplete', "已还原 {0} 个项目。", result.completed)
-			: localize('turbofile.restorePartial', "已还原 {0} 个，失败 {1} 个。", result.completed, result.failed);
-		await this.refreshTrashPane(side);
-		await this.refreshVisibleRestoredDirectories(items);
-	}
-
-	private async refreshVisibleRestoredDirectories(items: readonly ITurboFileTrashItem[]): Promise<void> {
-		for (const side of ['left', 'right'] as const) {
-			const state = this.paneStates[side];
-			if (state.trashMode.active) {
-				continue;
-			}
-			const device = this.getPaneDevice(side);
-			if (!device) {
-				continue;
-			}
-			const windowsPath = this.isWindowsDevice(device);
-			if (items.some(item => this.pathsEqualForDevice(getPaneParentPath(item.originalPath, windowsPath) ?? item.originalPath, state.path, windowsPath))) {
-				await this.refreshPane(side, { force: true, silent: true });
-			}
-		}
-	}
-
 	private async permanentlyDeleteSelectedTrashItems(side: 'left' | 'right'): Promise<boolean> {
 		const device = this.getPaneDevice(side);
 		const items = this.getSelectedTrashItems(side);
 		if (!device || !items.length) {
 			return false;
 		}
-		if (!await this.showDialogConfirm(
+		if (!await this.confirmDelete(
 			localize('turbofile.permanentDeleteTitle', "永久删除"),
 			localize('turbofile.permanentDeleteMessage', "永久删除选中的 {0} 个项目吗？此操作无法撤销。", items.length),
 			undefined,
@@ -13400,7 +13373,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!device) {
 			return;
 		}
-		if (!await this.showDialogConfirm(
+		if (!await this.confirmDelete(
 			localize('turbofile.emptyRecycleBinTitle', "清空回收站"),
 			localize('turbofile.emptyRecycleBinMessage', "永久删除当前设备回收站中的所有项目吗？此操作无法撤销。"),
 			undefined,
@@ -13426,15 +13399,6 @@ export class TurboFileEditor extends EditorPane {
 			this.finishTask(task, 'error', localize('turbofile.recycleBinEmptyFailed', "清空回收站失败：{0}", message), { error: message, durationMs: Date.now() - task.startedAt });
 			await this.refreshTrashPane(side);
 		}
-	}
-
-	private async copySelectedTrashOriginalPath(side: 'left' | 'right'): Promise<void> {
-		const item = this.getSelectedTrashItems(side)[0];
-		if (!item) {
-			return;
-		}
-		await this.clipboardService.writeText(item.originalPath);
-		this.statusMessage = localize('turbofile.originalPathCopied', "已复制原始路径。");
 	}
 
 	private async compressSelected(side: 'left' | 'right'): Promise<void> {

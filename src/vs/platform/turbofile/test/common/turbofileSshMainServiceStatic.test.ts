@@ -464,6 +464,25 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!localMove.includes('getLocalPathSize'));
 	});
 
+	test('hides Windows recycle-bin storage containers without changing their paths', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const localMove = methodBlock(service, 'private async moveLocalPathToTrash', 'private async listLocalTrashItems');
+		const localRoots = methodBlock(service, 'private async getLocalTrashRoots', 'private localPathExists');
+		const windowsMove = methodBlock(service, 'function buildWindowsTrashMoveBatchCommand', 'function parseRemoteTrashMoveResults');
+
+		assert.deepStrictEqual({
+			newLocalContainersAreHidden: localMove.includes('await this.hideLocalTrashContainer(trashRoot)'),
+			existingLocalContainersAreHidden: localRoots.includes('this.hideLocalTrashContainer(trashRoot)'),
+			usesWindowsHiddenAndSystemAttributes: service.includes("runLocalCommand('attrib.exe', ['+H', '+S', container])"),
+			remoteWindowsContainersAreHidden: windowsMove.includes('[System.IO.FileAttributes]::Hidden') && windowsMove.includes('[System.IO.FileAttributes]::System')
+		}, {
+			newLocalContainersAreHidden: true,
+			existingLocalContainersAreHidden: true,
+			usesWindowsHiddenAndSystemAttributes: true,
+			remoteWindowsContainersAreHidden: true
+		});
+	});
+
 	test('moves a remote recycle-bin batch through one native command round trip', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const remoteBatch = methodBlock(service, 'private async moveRemotePathsToTrash', 'private async listRemoteTrashItems');
@@ -1450,7 +1469,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 		const editor = fs.readFileSync(editorPath, 'utf8');
 		const permanentDelete = methodBlock(editor, 'private async permanentlyDeleteSelectedTrashItems', 'private async emptyTrash');
-		const emptyTrash = methodBlock(editor, 'private async emptyTrash', 'private async copySelectedTrashOriginalPath');
+		const emptyTrash = methodBlock(editor, 'private async emptyTrash', 'private async compressSelected');
 
 		assert.ok(permanentDelete.includes('永久删除'));
 		assert.ok(permanentDelete.includes('永久删除选中的 {0} 个项目吗？此操作无法撤销。'));

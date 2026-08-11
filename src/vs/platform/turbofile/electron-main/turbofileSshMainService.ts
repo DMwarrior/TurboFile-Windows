@@ -20,7 +20,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { IDisposable } from '../../../base/common/lifecycle.js';
 import { localize } from '../../../nls.js';
 import { IStateService } from '../../state/node/state.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileCancelableOperationOptions, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileCancelableOperationOptions, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRenameTrashItemRequest, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../common/turbofileBatchTransferFlow.js';
@@ -642,6 +642,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly activeDirectSshControlConnections = new Set<string>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
 	private readonly trashRootsByDeviceIdentity = new Map<string, Set<string>>();
+	private readonly hiddenLocalTrashContainers = new Set<string>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
 	private imageThumbnailCacheTrimPromise: Promise<void> | undefined;
 	private readonly imageResourceDescriptors = new Map<string, ITurboFileImageResourceDescriptor>();
@@ -4965,6 +4966,38 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return this.createTrashOperationResult(results, 'Recycle-bin items restored.');
 	}
 
+	async renameTrashItem(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult> {
+		return this.fileOperationQueue.run(
+			[getFileOperationDeviceKey(request.device)],
+			() => this.renameTrashItemCore(request)
+		);
+	}
+
+	private async renameTrashItemCore(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult> {
+		const device = this.withLocalTrashIdentity(request.device);
+		const name = request.name.trim();
+		if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+			return { ok: false, message: 'Recycle-bin item name is invalid.' };
+		}
+		if (request.item.deviceIdentity !== getTurboFileTrashDeviceIdentity(device) || !this.isSafeTrashItem(request.item)) {
+			return { ok: false, message: 'Recycle-bin item is invalid or belongs to a different device.' };
+		}
+
+		const item: ITurboFileTrashItem = {
+			...request.item,
+			originalName: name,
+			originalPath: replaceTrashItemOriginalName(request.item.originalPath, name)
+		};
+		const metadataPath = joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`);
+		const endpoint: ITurboFileTransferEndpoint = device.kind === 'local'
+			? { kind: 'local', path: metadataPath, label: device.label }
+			: { kind: 'ssh', path: metadataPath, connection: device.connection, label: device.label };
+		if (endpoint.kind === 'ssh' && !endpoint.connection) {
+			return { ok: false, message: 'SSH recycle-bin operations require a connection.' };
+		}
+		return this.writeFileCore(endpoint, JSON.stringify(item), 'utf8');
+	}
+
 	async permanentlyDeleteTrashItems(request: ITurboFileTrashItemsRequest): Promise<ITurboFileTrashOperationResult> {
 		if (request.progressId) {
 			this.transferCancellationRequests.delete(request.progressId);
@@ -5083,6 +5116,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		};
 		await fsp.mkdir(filesDirectory, { recursive: true });
 		await fsp.mkdir(infoDirectory, { recursive: true });
+		await this.hideLocalTrashContainer(trashRoot);
 		await fsp.writeFile(pendingPath, JSON.stringify(item), { encoding: 'utf8', flag: 'wx' });
 		try {
 			await fsp.rename(source.endpoint.path, payloadPath);
@@ -5193,6 +5227,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return { trashRoot: `${drive}:\\.turbofile-trash-${userKey}\\turbofile`, volumeId };
 	}
 
+	private async hideLocalTrashContainer(trashRoot: string): Promise<void> {
+		if (platform() !== 'win32') {
+			return;
+		}
+		const container = dirname(trashRoot);
+		if (!basename(container).toLowerCase().startsWith('.turbofile-trash-')) {
+			return;
+		}
+		const key = container.toLowerCase();
+		if (this.hiddenLocalTrashContainers.has(key)) {
+			return;
+		}
+		this.hiddenLocalTrashContainers.add(key);
+		try {
+			await runLocalCommand('attrib.exe', ['+H', '+S', container]);
+		} catch {
+			this.hiddenLocalTrashContainers.delete(key);
+		}
+	}
+
 	private async getLocalTrashRoots(deviceIdentity: string): Promise<Set<string>> {
 		const roots = new Set(this.trashRootsByDeviceIdentity.get(deviceIdentity));
 		const localAppDataDrive = /^([A-Za-z]):[\\/]/.exec(process.env.LOCALAPPDATA ?? '')?.[1]?.toUpperCase();
@@ -5204,6 +5258,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				roots.add(trashRoot);
 			}
 		}));
+		await Promise.all([...roots].map(trashRoot => this.hideLocalTrashContainer(trashRoot)));
 		return roots;
 	}
 
@@ -12912,6 +12967,18 @@ function getRemoteParentPath(path: string): string {
 	return normalized.substring(0, index);
 }
 
+function replaceTrashItemOriginalName(path: string, name: string): string {
+	const windowsPath = looksLikeWindowsPath(path);
+	const normalized = path.replace(/[\\/]+$/, '');
+	const separatorIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+	if (separatorIndex < 0) {
+		return name;
+	}
+	const parent = normalized.slice(0, separatorIndex);
+	const separator = windowsPath ? '\\' : '/';
+	return parent ? `${parent}${separator}${name}` : `${separator}${name}`;
+}
+
 function buildShellBootstrapCommand(cwd: string): string {
 	const commands = [
 		'stty echo',
@@ -14319,6 +14386,9 @@ function buildWindowsTrashMoveBatchCommand(): string {
 		'    $infoParent=[System.IO.Path]::GetDirectoryName([string]$item.pendingPath)',
 		'    if ($parent -and -not [System.IO.Directory]::Exists($parent)) { [System.IO.Directory]::CreateDirectory($parent) | Out-Null }',
 		'    if ($infoParent -and -not [System.IO.Directory]::Exists($infoParent)) { [System.IO.Directory]::CreateDirectory($infoParent) | Out-Null }',
+		'    $trashRoot=[System.IO.Path]::GetDirectoryName($parent)',
+		'    $trashContainer=[System.IO.Path]::GetDirectoryName($trashRoot)',
+		'    if ($trashContainer -and [System.IO.Path]::GetFileName($trashContainer) -like ".turbofile-trash-*") { try { $attributes=[System.IO.File]::GetAttributes($trashContainer); [System.IO.File]::SetAttributes($trashContainer, $attributes -bor [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System) } catch {} }',
 		'    if (& $pathExists ([string]$item.metadataPath)) { throw [System.IO.IOException]::new("Recycle-bin metadata target already exists.") }',
 		'    $metadataBytes=[System.Text.UTF8Encoding]::new($false).GetBytes([string]$item.metadata)',
 		'    $metadataStream=[System.IO.File]::Open([string]$item.pendingPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)',

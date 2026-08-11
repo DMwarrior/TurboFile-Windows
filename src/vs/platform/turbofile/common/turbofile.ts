@@ -46,6 +46,7 @@ export interface ITurboFileSshService {
 	movePathsToTrash(request: ITurboFileMoveToTrashRequest): Promise<ITurboFileTrashOperationResult>;
 	listTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashListing>;
 	restoreTrashItems(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult>;
+	renameTrashItem(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult>;
 	permanentlyDeleteTrashItems(request: ITurboFileTrashItemsRequest): Promise<ITurboFileTrashOperationResult>;
 	emptyTrash(device: ITurboFileTrashDevice, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileTrashOperationResult>;
 	getTrashState(device: ITurboFileTrashDevice): Promise<ITurboFileTrashState>;
@@ -220,6 +221,12 @@ export interface ITurboFileCancelableOperationOptions {
 
 export interface ITurboFileRestoreTrashRequest extends ITurboFileTrashItemsRequest {
 	readonly conflictPolicy: 'cancel' | 'keepBoth';
+}
+
+export interface ITurboFileRenameTrashItemRequest {
+	readonly device: ITurboFileTrashDevice;
+	readonly item: ITurboFileTrashItem;
+	readonly name: string;
 }
 
 export interface ITurboFileTrashItem {

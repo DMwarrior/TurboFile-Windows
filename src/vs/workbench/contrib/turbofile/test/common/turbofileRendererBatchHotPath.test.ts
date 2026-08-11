@@ -206,14 +206,14 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(helper.includes("operation === 'move' || itemCount > 1"));
 	});
 
-	test('indexes recycle-bin restore conflicts instead of scanning every selected item', () => {
+	test('keeps recycle-bin root rename metadata-aware', () => {
 		const editor = readEditor();
-		const restoreStart = editor.indexOf('private async restoreSelectedTrashItems');
-		const restore = editor.slice(restoreStart, editor.indexOf('private async refreshVisibleRestoredDirectories', restoreStart));
+		const renameStart = editor.indexOf('private async performRename');
+		const rename = editor.slice(renameStart, editor.indexOf('private async previewSelected', renameStart));
 
-		assert.ok(restore.includes('const itemsById = new Map'));
-		assert.ok(restore.includes('itemsById.get(item.id)'));
-		assert.ok(!restore.includes('items.find(candidate => candidate.id === item.id)'));
+		assert.ok(rename.includes('isTurboFileTrashRootView'));
+		assert.ok(rename.includes('this.sshService.renameTrashItem({'));
+		assert.ok(rename.includes('await this.refreshTrashPane(side)'));
 	});
 
 	test('parallelizes SSH endpoint and secret preparation before transfers', () => {
