@@ -50,6 +50,35 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('getTurboFileImageGridPasteTargetSide(state.side, this.internalTransferClipboard?.sourceSide)'));
 	});
 
+	test('resizes both panes with a persisted divider and frame-coalesced image-grid reflow', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+		const renderTransferPage = editor.slice(editor.indexOf('private renderTransferPage(): HTMLElement'), editor.indexOf('private registerTransferPageDragAndDrop('));
+		const resizeDivider = editor.slice(editor.indexOf('private renderPaneSplitDivider('), editor.indexOf('private clampPaneSplitRatio('));
+		const scheduleReflow = editor.slice(editor.indexOf('private schedulePaneSplitImageGridReflow('), editor.indexOf('private clearPaneSplitReflowRaf('));
+
+		assert.ok(editor.includes("const TURBOFILE_PANE_SPLIT_RATIO_STORAGE_KEY = 'turbofile.view.paneSplitRatio';"));
+		assert.ok(renderTransferPage.includes("const leftPane = this.renderPane('left');"));
+		assert.ok(renderTransferPage.includes("const rightPane = this.renderPane('right');"));
+		assert.ok(renderTransferPage.includes("leftPane.classList.contains('turbofile-pane-image-grid') || rightPane.classList.contains('turbofile-pane-image-grid')"));
+		assert.ok(renderTransferPage.includes("main.classList.toggle('has-pane-image-grid', hasPaneImageGrid);"));
+		assert.ok(renderTransferPage.includes('main.appendChild(leftPane);'));
+		assert.ok(renderTransferPage.includes('if (hasPaneImageGrid && !this.maximizedPane)'));
+		assert.ok(renderTransferPage.includes('main.appendChild(this.renderPaneSplitDivider(main));'));
+		assert.ok(renderTransferPage.includes('main.appendChild(rightPane);'));
+		assert.ok(resizeDivider.includes("divider.setPointerCapture(event.pointerId);"));
+		assert.ok(resizeDivider.includes('this.storePaneSplitRatio();'));
+		assert.ok(scheduleReflow.includes('requestAnimationFrame'));
+		assert.ok(scheduleReflow.includes('this.reflowAttachedImageGridBody(body, state, body.scrollTop, shouldLoad);'));
+		assert.ok(css.includes('var(--turbofile-pane-left-width'));
+		assert.ok(css.includes('.turbofile-main.has-pane-image-grid'));
+		assert.ok(css.includes('.turbofile-pane-split-divider'));
+		assert.ok(css.includes('cursor: col-resize'));
+		assert.ok(css.includes('.turbofile-image-page-body::-webkit-scrollbar-track'));
+		assert.ok(css.includes('scrollbar-color: color-mix(in srgb, var(--tf-image-text) 30%'));
+		assert.ok(css.includes('background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));'));
+	});
+
 	test('keeps left and right pane image-grid toolbar actions bound to their own state', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		assert.ok(editor.includes('this.setImageGridColumns(state, option);'));
@@ -72,7 +101,7 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('rowHeight: Math.max(showNames ? 150 : 1'));
 	});
 
-	test('sorts image grid from file-list metadata without scanning image headers', () => {
+	test('keeps default file-size sorting on existing file-list metadata', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const sortOptions = editor.slice(
 			editor.indexOf('const IMAGE_GRID_SORT_OPTIONS'),
@@ -89,7 +118,6 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('sortTurboFileImageGridItems('));
 		assert.ok(editor.includes('rawSize: image.item.rawSize'));
 		assert.ok(editor.includes('sizeKnown: !image.item.attrsPending'));
-		assert.ok(!editor.includes('this.sshService.readImageMetadataBatch(endpoint, paths)'));
 		assert.ok(!editor.includes('private prepareImageGridSortMetadata('));
 		assert.ok(!editor.includes('private resortImageGridAfterSizeUpdate('));
 		assert.ok(editor.includes('state.thumbnailLoadToken++;'));
@@ -97,6 +125,20 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('const currentIndex = state.images.indexOf(target.image);'));
 		assert.ok(editor.includes('state.previewPendingIndex = undefined;'));
 		assert.ok(setSortKey.includes('state.sortKey === key ? state.sortDescending : true'));
+	});
+
+	test('preloads original dimensions in one bounded batch only for dimension-size sorting', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const loadDimensions = editor.slice(editor.indexOf('private async ensureImageGridDimensionMetadata('), editor.indexOf('private updateImageGridAfterSort('));
+		const setSortKey = editor.slice(editor.indexOf('private setImageGridSortKey('), editor.indexOf('private async permanentlyDeleteTrashBrowseItems('));
+
+		assert.ok(editor.includes("const TURBOFILE_IMAGE_GRID_SIZE_SORT_BASIS_STORAGE_KEY = 'turbofile.imageGrid.sizeSortBasis';"));
+		assert.ok(editor.includes("StorageScope.PROFILE, 'file') === 'dimensions'"));
+		assert.ok(loadDimensions.includes('this.sshService.readImageMetadataBatch(endpoint, paths)'));
+		assert.ok(loadDimensions.includes('state.dimensionMetadataLoading || state.dimensionMetadataLoaded'));
+		assert.ok(loadDimensions.includes("state.sortKey === 'size' && this.getImageGridSizeSortBasis() === 'dimensions'"));
+		assert.ok(setSortKey.includes("key === 'size' && this.getImageGridSizeSortBasis() === 'dimensions'"));
+		assert.ok(editor.includes('sortImageGridImages(state.images, state.sortKey, state.sortDescending, this.getImageGridSizeSortBasis());'));
 	});
 
 	test('carries original dimensions beside transformed SSH thumbnail bytes', () => {

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { ITurboFileImageGridSortableItem, sortTurboFileImageGridItems, TurboFileImageGridSortKey } from '../../common/turbofileImageGridSort.js';
+import { ITurboFileImageGridSortableItem, sortTurboFileImageGridItems, TurboFileImageGridSizeSortBasis, TurboFileImageGridSortKey } from '../../common/turbofileImageGridSort.js';
 
 suite('TurboFileImageGridSort', () => {
 	interface TestSortableItem extends ITurboFileImageGridSortableItem {
@@ -27,8 +27,8 @@ suite('TurboFileImageGridSort', () => {
 		...options
 	});
 
-	const names = (items: readonly ITurboFileImageGridSortableItem[], key: TurboFileImageGridSortKey, descending: boolean): string[] =>
-		sortTurboFileImageGridItems(items, key, descending).map(entry => entry.name);
+	const names = (items: readonly ITurboFileImageGridSortableItem[], key: TurboFileImageGridSortKey, descending: boolean, sizeSortBasis: TurboFileImageGridSizeSortBasis = 'file'): string[] =>
+		sortTurboFileImageGridItems(items, key, descending, sizeSortBasis).map(entry => entry.name);
 
 	test('sorts known modified times and keeps unknown values last in both directions', () => {
 		const items = [
@@ -51,6 +51,29 @@ suite('TurboFileImageGridSort', () => {
 
 		assert.deepStrictEqual(names(items, 'size', false), ['small.jpg', 'large.jpg', 'unknown.jpg']);
 		assert.deepStrictEqual(names(items, 'size', true), ['large.jpg', 'small.jpg', 'unknown.jpg']);
+	});
+
+	test('sorts size by original pixel count when image dimensions are selected', () => {
+		const items = [
+			item('unknown.jpg', { rawSize: 50000, sizeKnown: true }),
+			item('wide.jpg', { rawSize: 100, sizeKnown: true, originalWidth: 4000, originalHeight: 1000, dimensionsKnown: true }),
+			item('large.jpg', { rawSize: 200, sizeKnown: true, originalWidth: 3000, originalHeight: 2000, dimensionsKnown: true }),
+			item('small.jpg', { rawSize: 90000, sizeKnown: true, originalWidth: 800, originalHeight: 600, dimensionsKnown: true })
+		];
+
+		assert.deepStrictEqual(names(items, 'size', false, 'dimensions'), ['small.jpg', 'wide.jpg', 'large.jpg', 'unknown.jpg']);
+		assert.deepStrictEqual(names(items, 'size', true, 'dimensions'), ['large.jpg', 'wide.jpg', 'small.jpg', 'unknown.jpg']);
+	});
+
+	test('breaks equal pixel-count ties by width, height and then natural name', () => {
+		const items = [
+			item('square10.jpg', { originalWidth: 1000, originalHeight: 1000, dimensionsKnown: true }),
+			item('wide.jpg', { originalWidth: 2000, originalHeight: 500, dimensionsKnown: true }),
+			item('square2.jpg', { originalWidth: 1000, originalHeight: 1000, dimensionsKnown: true })
+		];
+
+		assert.deepStrictEqual(names(items, 'size', false, 'dimensions'), ['square2.jpg', 'square10.jpg', 'wide.jpg']);
+		assert.deepStrictEqual(names(items, 'size', true, 'dimensions'), ['wide.jpg', 'square2.jpg', 'square10.jpg']);
 	});
 
 	test('uses natural names and case-insensitive extensions', () => {

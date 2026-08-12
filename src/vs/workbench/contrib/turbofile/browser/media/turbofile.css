@@ -1732,8 +1732,48 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	overflow: hidden;
 }
 
+.turbofile-main.has-pane-image-grid {
+	grid-template-columns: minmax(0, var(--turbofile-pane-left-width, calc(50% - 3.5px))) 7px minmax(0, 1fr);
+	gap: 0;
+}
+
 .turbofile-transfer-page.is-pane-maximized .turbofile-main {
 	grid-template-columns: minmax(0, 1fr);
+}
+
+.turbofile-pane-split-divider {
+	position: relative;
+	min-width: 7px;
+	width: 7px;
+	cursor: col-resize;
+	touch-action: none;
+	user-select: none;
+	outline: none;
+	z-index: 5;
+}
+
+.turbofile-pane-split-divider::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 3px;
+	width: 1px;
+	background: var(--turbofile-pane-border);
+	transition: background-color 80ms linear, box-shadow 80ms linear;
+}
+
+.turbofile-pane-split-divider:hover::before,
+.turbofile-pane-split-divider:focus-visible::before,
+.turbofile-pane-split-divider.is-dragging::before {
+	background: var(--tf-brand-blue);
+	box-shadow: -1px 0 0 var(--tf-brand-blue), 1px 0 0 var(--tf-brand-blue);
+}
+
+.turbofile-main.is-resizing-panes,
+.turbofile-main.is-resizing-panes * {
+	cursor: col-resize !important;
+	user-select: none !important;
 }
 
 .turbofile-pane.is-hidden-by-maximize {
@@ -5713,6 +5753,34 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-workbench.is-turbofile-dark .turbofile-image-page-body {
 	padding: 8px 16px 24px;
 	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
+	scrollbar-width: thin;
+	scrollbar-color: color-mix(in srgb, var(--tf-image-text) 30%, var(--tf-preview-backdrop-bg, var(--tf-image-bg))) var(--tf-preview-backdrop-bg, var(--tf-image-bg));
+}
+
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
+}
+
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar-track,
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar-corner,
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar-button {
+	width: 0;
+	height: 0;
+	display: none;
+	background: var(--tf-preview-backdrop-bg, var(--tf-image-bg));
+}
+
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar-thumb {
+	min-height: 28px;
+	border: 1px solid var(--tf-preview-backdrop-bg, var(--tf-image-bg));
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--tf-image-text) 30%, var(--tf-preview-backdrop-bg, var(--tf-image-bg)));
+}
+
+.turbofile-workbench .turbofile-image-page-body::-webkit-scrollbar-thumb:hover {
+	background: color-mix(in srgb, var(--tf-image-text) 42%, var(--tf-preview-backdrop-bg, var(--tf-image-bg)));
 }
 
 .vs .turbofile-workbench .turbofile-image-page-grid,

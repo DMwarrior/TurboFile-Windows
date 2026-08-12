@@ -19,6 +19,7 @@ suite('TurboFileTitlebarMenus', () => {
 			'turbofile.settings.confirmBeforeDelete',
 			'turbofile.settings.imageGridQuality',
 			'turbofile.settings.showImageGridNames',
+			'turbofile.settings.imageGridSizeSortBasis',
 			'turbofile.settings.conflictPolicy',
 			'turbofile.settings.automaticUpdates',
 			'turbofile.settings.showHiddenFiles',
@@ -31,6 +32,8 @@ suite('TurboFileTitlebarMenus', () => {
 		assert.ok(editor.includes("'turbofile.imageGrid.quality'"));
 		assert.ok(editor.includes("StorageScope.PROFILE, 'thumbnail') === 'original'"));
 		assert.ok(editor.includes("'turbofile.imageGrid.showNames'"));
+		assert.ok(editor.includes("'turbofile.imageGrid.sizeSortBasis'"));
+		assert.ok(editor.includes("StorageScope.PROFILE, 'file') === 'dimensions'"));
 		assert.ok(editor.includes('StorageScope.PROFILE, true'));
 		assert.ok(editor.includes("'turbofile.transfer.conflictPolicy'"));
 		assert.ok(editor.includes('IMAGE_GRID_COLUMN_MAX = 24'));
