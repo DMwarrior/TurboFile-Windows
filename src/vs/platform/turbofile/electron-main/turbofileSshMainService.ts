@@ -35,7 +35,7 @@ import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnava
 import { coordinateTurboFileDirectRouteProbe, TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS } from '../common/turbofileDirectRouteProbe.js';
 import { createTurboFileRsyncMappedGroups, createTurboFileRsyncSourceGroups } from '../common/turbofileRsyncBatchPlan.js';
 import { getRemoteDirectoryReadRetryDelay, REMOTE_DIRECTORY_READ_MAX_ATTEMPTS, shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
-import { createPosixNativeBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
+import { createPosixNativeBatchTransferPlan, createPosixPortableBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
 import { buildPosixHeartbeatFunction } from '../common/turbofilePosixHeartbeat.js';
 import { buildPosixStatEntriesCommand as buildRemotePosixStatEntriesCommand } from '../common/turbofileRemoteStat.js';
 import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
@@ -239,6 +239,7 @@ interface ISSHShellStream {
 
 interface ISFTPWrapper {
 	readdir(path: string, callback: (err: Error | undefined, list: ISFTPFileEntry[]) => void): void;
+	realpath(path: string, callback: (err: Error | undefined, resolvedPath: string) => void): void;
 	stat(path: string, callback: (err: Error | undefined, stats: ISFTPStats) => void): void;
 	mkdir(path: string, callback: (err: Error | undefined) => void): void;
 	rmdir(path: string, callback: (err: Error | undefined) => void): void;
@@ -534,6 +535,8 @@ interface IRemoteTrashMetadataRecord {
 	readonly metadata: string;
 }
 
+type RemoteMutationShellCapability = 'move' | 'batch-move' | 'copy' | 'batch-copy' | 'trash-move' | 'trash-list' | 'trash-delete' | 'trash-empty' | 'trash-has-items' | 'compress' | 'extract';
+
 type TurboFileOperationDevice = Pick<ITurboFileTransferEndpoint, 'kind' | 'connection' | 'label'>;
 
 function getFileOperationDeviceKey(device: TurboFileOperationDevice): string {
@@ -641,6 +644,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly directSshControlRetryPending = new Map<string, Promise<void>>();
 	private readonly activeDirectSshControlConnections = new Set<string>();
 	private readonly remoteRsyncSshBinaryCache = new Map<string, string>();
+	private readonly remoteMutationShellCapabilities = new Map<string, Map<RemoteMutationShellCapability, boolean>>();
+	private readonly remotePortableMutationShellCapabilities = new Map<string, Map<RemoteMutationShellCapability, boolean>>();
 	private readonly trashRootsByDeviceIdentity = new Map<string, Set<string>>();
 	private readonly hiddenLocalTrashContainers = new Set<string>();
 	private localWindowsRsyncSourceConnectionPromise: Promise<ITurboFileSshConnectionOptions | undefined> | undefined;
@@ -3865,19 +3870,42 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const sources = items.map(item => item.sourcePath);
 		this.markTransferDataStarted(request.progressId);
-		if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
-			const input = Buffer.from(JSON.stringify(items.map(item => ({
-				sourcePath: item.sourcePath,
-				targetPath: this.joinBatchTargetPath(request.targetDirectory, item.targetName),
-				sourceType: item.sourceType ?? 'unknown'
-			}))), 'utf8');
-			await this.withSshClient(request.source, client => this.execRemoteWithInput(client, buildWindowsMappedBatchFromInputCommand(operation), input, {
-				progressId: request.progressId
-			}));
-		} else {
-			const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
-			await this.withSshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }));
-		}
+		await this.runRemoteMutationWithSftpFallback(
+			request.source,
+			operation === 'move' ? 'batch-move' : 'batch-copy',
+			request.progressId,
+			async () => {
+				if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
+					const input = Buffer.from(JSON.stringify(items.map(item => ({
+						sourcePath: item.sourcePath,
+						targetPath: this.joinBatchTargetPath(request.targetDirectory, item.targetName),
+						sourceType: item.sourceType ?? 'unknown'
+					}))), 'utf8');
+					await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, buildWindowsMappedBatchFromInputCommand(operation), input, {
+						progressId: request.progressId
+					}), request.progressId);
+				} else {
+					const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
+					await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }), request.progressId);
+				}
+			},
+			looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath) ? undefined : async () => {
+				const plan = createPosixPortableBatchTransferPlan(items, request.targetDirectory.path, operation);
+				await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }), request.progressId);
+			},
+			() => this.withDirectorySftp(request.source, async sftp => {
+				await this.ensureRemoteDirectory(sftp, request.targetDirectory.path);
+				for (const item of items) {
+					this.throwIfTransferCanceled(request.progressId);
+					const targetPath = this.joinBatchTargetPath(request.targetDirectory, item.targetName);
+					if (operation === 'move') {
+						await this.moveRemotePathWithSftp(sftp, item.sourcePath, targetPath, request.progressId);
+					} else {
+						await this.copyRemotePathWithSftp(sftp, item.sourcePath, targetPath, undefined, request.progressId);
+					}
+				}
+			}, request.progressId)
+		);
 		this.throwIfTransferCanceled(request.progressId);
 		this.fireTransferProgress(request, expectedBytes, expectedBytes, 'complete', 'Batch remote native transfer completed.', true, {
 			strategy: 'remote-copy',
@@ -5322,23 +5350,36 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		let moveResults: readonly IRemoteTrashMoveResult[];
 		try {
-			const command = windowsPath ? buildWindowsTrashMoveBatchCommand() : buildPosixTrashMoveBatchCommand();
-			const input = windowsPath
-				? Buffer.from(JSON.stringify(preparedItems.map(prepared => ({
-					id: prepared.item.id,
-					sourcePath: prepared.source.endpoint.path,
-					payloadPath: prepared.item.payloadPath,
-					pendingPath: prepared.pendingPath,
-					metadataPath: prepared.metadataPath,
-					metadata: JSON.stringify(prepared.item)
-				}))), 'utf8')
-				: Buffer.from(`${preparedItems.flatMap(prepared => [
-					prepared.item.id, prepared.source.endpoint.path, prepared.item.payloadPath, prepared.pendingPath, prepared.metadataPath, JSON.stringify(prepared.item)
-				]).join('\0')}\0`, 'utf8');
-			const output = await this.withSshClient(first.endpoint, client => this.execRemoteWithInput(client, command, input, windowsPath
-				? { progressId }
-				: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Recycle-bin batch move produced no progress.' }), progressId);
-			moveResults = parseRemoteTrashMoveResults(output, windowsPath);
+			moveResults = await this.runRemoteMutationWithSftpFallback(
+				first.endpoint,
+				'trash-move',
+				progressId,
+				async () => {
+					const command = windowsPath ? buildWindowsTrashMoveBatchCommand() : buildPosixTrashMoveBatchCommand();
+					const input = windowsPath
+						? Buffer.from(JSON.stringify(preparedItems.map(prepared => ({
+							id: prepared.item.id,
+							sourcePath: prepared.source.endpoint.path,
+							payloadPath: prepared.item.payloadPath,
+							pendingPath: prepared.pendingPath,
+							metadataPath: prepared.metadataPath,
+							metadata: JSON.stringify(prepared.item)
+						}))), 'utf8')
+						: Buffer.from(`${preparedItems.flatMap(prepared => [
+							prepared.item.id, prepared.source.endpoint.path, prepared.item.payloadPath, prepared.pendingPath, prepared.metadataPath, JSON.stringify(prepared.item)
+						]).join('\0')}\0`, 'utf8');
+					const output = await this.withSshClient(first.endpoint, client => this.execRemoteWithInput(client, command, input, windowsPath
+						? { progressId }
+						: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Recycle-bin batch move produced no progress.' }), progressId);
+					const parsed = parseRemoteTrashMoveResults(output, windowsPath);
+					if (parsed.length !== preparedItems.length || parsed.some(result => !result.ok)) {
+						throw new Error(parsed.find(result => !result.ok)?.message ?? 'Remote recycle-bin batch move was incomplete.');
+					}
+					return parsed;
+				},
+				undefined,
+				() => this.moveRemoteTrashItemsWithSftp(first.endpoint, preparedItems, progressId)
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			moveResults = preparedItems.map(prepared => ({ id: prepared.item.id, ok: false, message }));
@@ -5357,6 +5398,67 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return results.filter((result): result is ITurboFileTrashItemResult => result !== undefined);
 	}
 
+	private async moveRemoteTrashItemsWithSftp(endpoint: ITurboFileTransferEndpoint, preparedItems: readonly IPreparedRemoteTrashItem[], progressId?: string): Promise<IRemoteTrashMoveResult[]> {
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const results: IRemoteTrashMoveResult[] = [];
+			for (const prepared of preparedItems) {
+				this.throwIfTransferCanceled(progressId);
+				try {
+					const filesDirectory = getRemoteParentPath(prepared.item.payloadPath);
+					const infoDirectory = getRemoteParentPath(prepared.metadataPath);
+					await Promise.all([
+						this.ensureRemoteDirectory(sftp, filesDirectory),
+						this.ensureRemoteDirectory(sftp, infoDirectory)
+					]);
+					let [sourceExists, payloadExists, metadataExists, pendingExists] = await Promise.all([
+						this.remotePathExists(sftp, prepared.source.endpoint.path),
+						this.remotePathExists(sftp, prepared.item.payloadPath),
+						this.remotePathExists(sftp, prepared.metadataPath),
+						this.remotePathExists(sftp, prepared.pendingPath)
+					]);
+					if (!sourceExists && payloadExists && metadataExists) {
+						results.push({ id: prepared.item.id, ok: true });
+						continue;
+					}
+					if (!sourceExists && payloadExists && !metadataExists) {
+						if (!pendingExists) {
+							await this.writeRemoteBuffer(sftp, prepared.pendingPath, Buffer.from(JSON.stringify(prepared.item), 'utf8'));
+							pendingExists = true;
+						}
+						await this.renameRemote(sftp, prepared.pendingPath, prepared.metadataPath);
+						results.push({ id: prepared.item.id, ok: true });
+						continue;
+					}
+					if (!sourceExists) {
+						throw new Error(`Recycle-bin source does not exist: ${prepared.source.endpoint.path}`);
+					}
+					if (payloadExists || metadataExists) {
+						throw new Error(`Recycle-bin target already exists: ${prepared.item.id}`);
+					}
+					if (!pendingExists) {
+						await this.writeRemoteBuffer(sftp, prepared.pendingPath, Buffer.from(JSON.stringify(prepared.item), 'utf8'));
+					}
+					let payloadMoved = false;
+					try {
+						await this.renameRemote(sftp, prepared.source.endpoint.path, prepared.item.payloadPath);
+						payloadMoved = true;
+						await this.renameRemote(sftp, prepared.pendingPath, prepared.metadataPath);
+					} catch (error) {
+						if (payloadMoved) {
+							await this.renameRemote(sftp, prepared.item.payloadPath, prepared.source.endpoint.path).catch(() => undefined);
+						}
+						await this.unlinkRemote(sftp, prepared.pendingPath).catch(() => undefined);
+						throw error;
+					}
+					results.push({ id: prepared.item.id, ok: true });
+				} catch (error) {
+					results.push({ id: prepared.item.id, ok: false, message: error instanceof Error ? error.message : String(error) });
+				}
+			}
+			return results;
+		}, progressId);
+	}
+
 	private async listRemoteTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashItem[]> {
 		const connection = device.connection;
 		if (!connection) {
@@ -5366,14 +5468,23 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const endpoint: ITurboFileTransferEndpoint = { kind: 'ssh', path: device.windows ? 'C:\\' : '/', connection, label: device.label };
 		const rememberedRoots = [...(this.trashRootsByDeviceIdentity.get(deviceIdentity) ?? [])];
 		const windowsPath = !!device.windows;
-		const command = windowsPath
-			? buildWindowsTrashListCommand(deviceIdentity, rememberedRoots)
-			: buildPosixTrashListCommand(rememberedRoots);
-		const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, {
-			inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
-			inactivityMessage: 'Recycle-bin metadata listing produced no output.'
-		}));
-		const records = parseRemoteTrashMetadataRecords(output, windowsPath);
+		const records = await this.runRemoteMutationWithSftpFallback(
+			endpoint,
+			'trash-list',
+			undefined,
+			async () => {
+				const command = windowsPath
+					? buildWindowsTrashListCommand(deviceIdentity, rememberedRoots)
+					: buildPosixTrashListCommand(rememberedRoots);
+				const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, {
+					inactivityTimeoutMs: REMOTE_DIRECTORY_READ_INACTIVITY_TIMEOUT_MS,
+					inactivityMessage: 'Recycle-bin metadata listing produced no output.'
+				}));
+				return parseRemoteTrashMetadataRecords(output, windowsPath);
+			},
+			undefined,
+			() => this.listRemoteTrashMetadataWithSftp(endpoint, rememberedRoots, windowsPath)
+		);
 		const items: ITurboFileTrashItem[] = [];
 		const pending: Array<{ readonly item: ITurboFileTrashItem; readonly metadataPath: string }> = [];
 		const seenIds = new Set<string>();
@@ -5410,6 +5521,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return items;
 	}
 
+	private async listRemoteTrashMetadataWithSftp(endpoint: ITurboFileTransferEndpoint, rememberedRoots: readonly string[], windowsPath: boolean): Promise<IRemoteTrashMetadataRecord[]> {
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const roots = await this.getRemoteTrashRootsForSftp(sftp, rememberedRoots, windowsPath);
+			const records: IRemoteTrashMetadataRecord[] = [];
+			for (const root of roots) {
+				const infoDirectory = joinRemotePath(root, 'info');
+				const entries = await this.readRemoteDirectory(sftp, infoDirectory).catch(() => []);
+				for (const entry of entries) {
+					if (!entry.filename.endsWith('.json') || !entry.attrs.isFile()) {
+						continue;
+					}
+					const metadataPath = joinRemotePath(infoDirectory, entry.filename);
+					const metadata = await this.readRemoteFileWithSftp(sftp, metadataPath, Math.max(0, entry.attrs.size));
+					records.push({ metadataPath, metadata: metadata.toString('utf8') });
+				}
+			}
+			return records;
+		});
+	}
+
 	private async recoverRemotePendingTrashItemsNative(endpoint: ITurboFileTransferEndpoint, pending: readonly { readonly item: ITurboFileTrashItem; readonly metadataPath: string }[], windowsPath: boolean): Promise<Set<string>> {
 		const command = windowsPath ? buildWindowsTrashPendingRecoveryCommand() : buildPosixTrashPendingRecoveryCommand();
 		const input = windowsPath
@@ -5441,7 +5572,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				return { id: item.id, path: item.originalPath, ok: false, conflict: true, message: 'An item with the same name already exists.' };
 			}
 		}
-		await this.moveRemotePathNative(endpoint, targetPath);
+		await this.moveRemotePathWithFallback(endpoint, targetPath);
 		await this.withDirectorySftp(endpoint, sftp => this.unlinkRemote(sftp, joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`)));
 		return { id: item.id, path: item.originalPath, restoredPath: targetPath, ok: true, message: 'Restored.' };
 	}
@@ -5554,14 +5685,40 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const windowsPath = !!device.windows || looksLikeWindowsPath(items[0].payloadPath);
 		const endpoint: ITurboFileTransferEndpoint = { kind: 'ssh', path: items[0].payloadPath, connection: device.connection, label: device.label };
 		try {
-			const command = windowsPath ? buildWindowsTrashDeleteBatchCommand() : buildPosixTrashDeleteBatchCommand();
-			const input = windowsPath
-				? Buffer.from(JSON.stringify(items.map(item => ({ id: item.id, payloadPath: item.payloadPath, metadataPath: joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`) }))), 'utf8')
-				: Buffer.from(`${items.flatMap(item => [item.id, item.payloadPath, joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`)]).join('\0')}\0`, 'utf8');
-			const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteWithInput(client, command, input, windowsPath
-				? { progressId }
-				: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Recycle-bin deletion produced no progress.' }), progressId);
-			const remoteResults = new Map(parseRemoteTrashMoveResults(output, windowsPath).map(result => [result.id, result]));
+			const completedResults = await this.runRemoteMutationWithSftpFallback(
+				endpoint,
+				'trash-delete',
+				progressId,
+				async () => {
+					const command = windowsPath ? buildWindowsTrashDeleteBatchCommand() : buildPosixTrashDeleteBatchCommand();
+					const input = windowsPath
+						? Buffer.from(JSON.stringify(items.map(item => ({ id: item.id, payloadPath: item.payloadPath, metadataPath: joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`) }))), 'utf8')
+						: Buffer.from(`${items.flatMap(item => [item.id, item.payloadPath, joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`)]).join('\0')}\0`, 'utf8');
+					const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteWithInput(client, command, input, windowsPath
+						? { progressId }
+						: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Recycle-bin deletion produced no progress.' }), progressId);
+					const parsed = parseRemoteTrashMoveResults(output, windowsPath);
+					if (parsed.length !== items.length || parsed.some(result => !result.ok)) {
+						throw new Error(parsed.find(result => !result.ok)?.message ?? 'Remote recycle-bin deletion was incomplete.');
+					}
+					return parsed;
+				},
+				undefined,
+				() => this.withDirectorySftp(endpoint, async sftp => {
+					const results: IRemoteTrashMoveResult[] = [];
+					for (const item of items) {
+						try {
+							await this.deleteRemotePathWithSftp(sftp, item.payloadPath, progressId);
+							await this.deleteRemotePathWithSftp(sftp, joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`), progressId);
+							results.push({ id: item.id, ok: true });
+						} catch (error) {
+							results.push({ id: item.id, ok: false, message: error instanceof Error ? error.message : String(error) });
+						}
+					}
+					return results;
+				}, progressId)
+			);
+			const remoteResults = new Map(completedResults.map(result => [result.id, result]));
 			return items.map(item => {
 				const result = remoteResults.get(item.id);
 				return {
@@ -5607,13 +5764,22 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const windowsPath = !!device.windows;
 		const endpoint: ITurboFileTransferEndpoint = { kind: 'ssh', path: windowsPath ? 'C:\\' : '/', connection: device.connection, label: device.label };
 		try {
-			const command = windowsPath
-				? buildWindowsTrashEmptyCommand(deviceIdentity, rememberedRoots)
-				: buildPosixTrashEmptyCommand(rememberedRoots);
-			const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, windowsPath
-				? { progressId }
-				: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Remote recycle-bin emptying produced no progress.' }), progressId);
-			const completed = parseSizeCommandOutput(output.toString());
+			const completed = await this.runRemoteMutationWithSftpFallback(
+				endpoint,
+				'trash-empty',
+				progressId,
+				async () => {
+					const command = windowsPath
+						? buildWindowsTrashEmptyCommand(deviceIdentity, rememberedRoots)
+						: buildPosixTrashEmptyCommand(rememberedRoots);
+					const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, windowsPath
+						? { progressId }
+						: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS, inactivityMessage: 'Remote recycle-bin emptying produced no progress.' }), progressId);
+					return parseSizeCommandOutput(output.toString());
+				},
+				undefined,
+				() => this.emptyRemoteTrashWithSftp(endpoint, rememberedRoots, windowsPath, progressId)
+			);
 			return { ok: true, message: completed ? 'Recycle bin emptied.' : 'Recycle bin is empty.', completed, failed: 0, results: [] };
 		} catch (error) {
 			return { ok: false, message: error instanceof Error ? error.message : String(error), completed: 0, failed: 1, results: [] };
@@ -5633,11 +5799,60 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const rememberedRoots = [...(this.trashRootsByDeviceIdentity.get(deviceIdentity) ?? [])];
 		const windowsPath = !!device.windows;
 		const endpoint: ITurboFileTransferEndpoint = { kind: 'ssh', path: windowsPath ? 'C:\\' : '/', connection: device.connection, label: device.label };
-		const command = windowsPath
-			? buildWindowsTrashHasItemsCommand(deviceIdentity, rememberedRoots)
-			: buildPosixTrashHasItemsCommand(rememberedRoots);
-		const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS }));
-		return output.toString('utf8').trim() === '1';
+		return this.runRemoteMutationWithSftpFallback(
+			endpoint,
+			'trash-has-items',
+			undefined,
+			async () => {
+				const command = windowsPath
+					? buildWindowsTrashHasItemsCommand(deviceIdentity, rememberedRoots)
+					: buildPosixTrashHasItemsCommand(rememberedRoots);
+				const output = await this.withDirectorySshClient(endpoint, client => this.execRemoteBytes(client, command, { timeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS }));
+				return output.toString('utf8').trim() === '1';
+			},
+			undefined,
+			() => this.remoteTrashHasItemsWithSftp(endpoint, rememberedRoots, windowsPath)
+		);
+	}
+
+	private async emptyRemoteTrashWithSftp(endpoint: ITurboFileTransferEndpoint, rememberedRoots: readonly string[], windowsPath: boolean, progressId?: string): Promise<number> {
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const roots = await this.getRemoteTrashRootsForSftp(sftp, rememberedRoots, windowsPath);
+			let completed = 0;
+			for (const root of roots) {
+				this.throwIfTransferCanceled(progressId);
+				const infoDirectory = joinRemotePath(root, 'info');
+				const entries = await this.readRemoteDirectory(sftp, infoDirectory).catch(() => []);
+				completed += entries.filter(entry => entry.filename.endsWith('.json') && entry.attrs.isFile()).length;
+				await this.deleteRemotePathWithSftp(sftp, joinRemotePath(root, 'files'), progressId);
+				await this.deleteRemotePathWithSftp(sftp, infoDirectory, progressId);
+			}
+			return completed;
+		}, progressId);
+	}
+
+	private async remoteTrashHasItemsWithSftp(endpoint: ITurboFileTransferEndpoint, rememberedRoots: readonly string[], windowsPath: boolean): Promise<boolean> {
+		return this.withDirectorySftp(endpoint, async sftp => {
+			const roots = await this.getRemoteTrashRootsForSftp(sftp, rememberedRoots, windowsPath);
+			for (const root of roots) {
+				const entries = await this.readRemoteDirectory(sftp, joinRemotePath(root, 'info')).catch(() => []);
+				if (entries.some(entry => entry.filename.endsWith('.json') && entry.attrs.isFile())) {
+					return true;
+				}
+			}
+			return false;
+		});
+	}
+
+	private async getRemoteTrashRootsForSftp(sftp: ISFTPWrapper, rememberedRoots: readonly string[], windowsPath: boolean): Promise<string[]> {
+		const roots = new Set(rememberedRoots);
+		if (!windowsPath) {
+			const home = await this.realpathRemote(sftp, '.').catch(() => undefined);
+			if (home) {
+				roots.add(joinRemotePath(home, '.local/share/Trash/turbofile'));
+			}
+		}
+		return [...roots];
 	}
 
 	private async remotePathExists(sftp: ISFTPWrapper, path: string): Promise<boolean> {
@@ -5783,7 +5998,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await this.moveLocalPathNative(endpoint.path, targetPath);
 			} else {
-				await this.moveRemotePathNative(endpoint, targetPath);
+				await this.moveRemotePathWithFallback(endpoint, targetPath);
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			this.clearRemoteDirectoryListingCache(endpoint, targetPath);
@@ -5831,7 +6046,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				// Windows remote: move each into the directory. Rare path, kept simple for correctness.
 				for (const endpoint of targets) {
 					this.throwIfTransferCanceled(progressId);
-					await this.moveRemotePathNative(endpoint, joinRemotePath(targetDirectory, getTransferName(endpoint.path)), progressId);
+					await this.moveRemotePathWithFallback(endpoint, joinRemotePath(targetDirectory, getTransferName(endpoint.path)), progressId);
 				}
 			} else {
 				// POSIX remote: a single round trip moves the whole selection. The NUL-delimited sources
@@ -5839,13 +6054,31 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				// to stay under the argument-length limit), so a 1000-file move is one near-instant rename
 				// instead of 1000 separate SSH round trips. `mv` drops each file into <dir> under its own
 				// name, so no per-file target path needs computing.
-				const command = buildPosixMoveManyIntoDirectoryFromInputCommand(targetDirectory);
-				const input = createTarNullListBuffer(targets.map(endpoint => endpoint.path));
-				await this.withSshClient(first, client => this.execRemoteWithInput(client, command, input, {
+				await this.runRemoteMutationWithSftpFallback(
+					first,
+					'batch-move',
 					progressId,
-					inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS,
-					inactivityMessage: 'Remote POSIX batch move produced no progress.'
-				}), progressId);
+					async () => {
+						const command = buildPosixMoveManyIntoDirectoryFromInputCommand(targetDirectory);
+						const input = createTarNullListBuffer(targets.map(endpoint => endpoint.path));
+						await this.withSshClient(first, client => this.execRemoteWithInput(client, command, input, {
+							progressId,
+							inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS,
+							inactivityMessage: 'Remote POSIX batch move produced no progress.'
+						}), progressId);
+					},
+					async () => {
+						const items = targets.map(endpoint => ({ sourcePath: endpoint.path, targetName: getTransferName(endpoint.path), sourceType: 'unknown' as const }));
+						const plan = createPosixPortableBatchTransferPlan(items, targetDirectory, 'move');
+						await this.withDirectorySshClient(first, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId }), progressId);
+					},
+					() => this.withDirectorySftp(first, async sftp => {
+						await this.ensureRemoteDirectory(sftp, targetDirectory);
+						for (const endpoint of targets) {
+							await this.moveRemotePathWithSftp(sftp, endpoint.path, joinRemotePath(targetDirectory, getTransferName(endpoint.path)), progressId);
+						}
+					}, progressId)
+				);
 			}
 			this.clearRemoteDirectoryListingCache(first);
 			this.clearRemoteDirectoryListingCache(first, targetDirectory);
@@ -6597,7 +6830,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await this.runCancelableLocalCommand('tar.exe', [...await this.getLocalTarCharsetArgs(), '-a', '-cf', archivePath, '-C', dirname(endpoint.path), basename(endpoint.path)], {}, progressId);
 			} else {
-				await this.withSshClient(endpoint, client => this.execRemote(client, `mkdir -p ${quotePosixShellArg(getRemoteParentPath(archivePath))} && tar -czf ${quotePosixShellArg(archivePath)} -C ${quotePosixShellArg(getRemoteParentPath(endpoint.path))} ${quotePosixShellArg(getTransferName(endpoint.path))}`, { progressId }), progressId);
+				await this.runRemoteMutationWithSftpFallback(
+					endpoint,
+					'compress',
+					progressId,
+					() => this.withSshClient(endpoint, client => this.execRemote(client, `mkdir -p ${quotePosixShellArg(getRemoteParentPath(archivePath))} && tar -czf ${quotePosixShellArg(archivePath)} -C ${quotePosixShellArg(getRemoteParentPath(endpoint.path))} ${quotePosixShellArg(getTransferName(endpoint.path))}`, { progressId }), progressId),
+					undefined,
+					() => this.compressRemotePathWithSftp(endpoint, archivePath, progressId)
+				);
 			}
 			this.clearRemoteDirectoryListingCache(endpoint, archivePath);
 			return { ok: true, message: `Archive created: ${archivePath}` };
@@ -6644,7 +6884,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const quotedArchive = quotePosixShellArg(endpoint.path);
 				const outputSetup = `out=${quotePosixShellArg(outputDirectory)}; if [ -e "$out" ] && [ ! -d "$out" ]; then out="$out"_extracted; fi; mkdir -p "$out"`;
 				const command = `${outputSetup} && ${buildTurboFileRemoteExtractCommand(endpoint.path, quotedArchive)}`;
-				await this.withSshClient(endpoint, client => this.execRemote(client, command, { progressId }), progressId);
+				outputDirectory = await this.runRemoteMutationWithSftpFallback(
+					endpoint,
+					'extract',
+					progressId,
+					async () => {
+						await this.withSshClient(endpoint, client => this.execRemote(client, command, { progressId }), progressId);
+						return outputDirectory;
+					},
+					undefined,
+					() => this.extractRemotePathWithSftp(endpoint, outputDirectory, progressId)
+				);
 			}
 			this.clearRemoteDirectoryListingCache(endpoint, outputDirectory);
 			return { ok: true, message: `Archive extracted: ${outputDirectory}` };
@@ -6775,7 +7025,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			: buildPosixCopyCommand(request.source.path, request.target.path, reportsNativeProgress);
 
 		this.fireTransferProgress(request, 0, bytes, 'transfer', 'Remote copy in progress.', true, { strategy: 'remote-copy' });
-		const observedBytes = await this.execRemoteCopyWithProgress(request, command, bytes, sourceType, reportsNativeProgress);
+		let sftpTransferredBytes = 0;
+		const observedBytes = await this.runRemoteMutationWithSftpFallback(
+			request.source,
+			'copy',
+			request.progressId,
+			() => this.execRemoteCopyWithProgress(request, command, bytes, sourceType, reportsNativeProgress),
+			undefined,
+			() => this.withDirectorySftp(request.source, sftp => this.copyRemotePathWithSftp(sftp, request.source.path, request.target.path, delta => {
+				sftpTransferredBytes += delta;
+				this.fireTransferProgress(request, bytes > 0 ? Math.min(sftpTransferredBytes, bytes) : sftpTransferredBytes, bytes, 'transfer', 'Copying over SFTP.', false, { strategy: 'remote-copy' });
+			}, request.progressId), request.progressId)
+		);
 		this.throwIfTransferCanceled(request.progressId);
 		return this.createTransferResult(true, 'remote-copy', bytes > 0 ? bytes : observedBytes, 'Remote copy completed.', startedAt, request.progressId);
 	}
@@ -7515,6 +7776,52 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const normalized = normalizePersistedDirectRoute(sourceKey, targetKey, protocol, 'source-push', 0);
 		if (this.persistedDirectRoutes.delete(getPersistedDirectRouteKey(normalized.sourceKey, normalized.targetKey, protocol))) {
 			this.savePersistedDirectRoutes();
+		}
+	}
+
+	private async compressRemotePathWithSftp(endpoint: ITurboFileTransferEndpoint, archivePath: string, progressId?: string): Promise<void> {
+		const tempRoot = join(tmpdir(), `turbofile-remote-compress-${randomUUID()}`);
+		const sourceDirectory = join(tempRoot, 'source');
+		const localSourcePath = join(sourceDirectory, getTransferName(endpoint.path) || 'item');
+		const localArchivePath = join(tempRoot, basename(archivePath) || 'archive.tar.gz');
+		try {
+			await fsp.mkdir(sourceDirectory, { recursive: true });
+			await this.withDirectorySftp(endpoint, async sftp => {
+				await this.downloadRemotePathWithSftp(sftp, endpoint.path, localSourcePath, progressId);
+				this.throwIfTransferCanceled(progressId);
+				await this.runCancelableLocalCommand('tar.exe', [...await this.getLocalTarCharsetArgs(), '-a', '-cf', localArchivePath, '-C', sourceDirectory, basename(localSourcePath)], {}, progressId);
+				this.throwIfTransferCanceled(progressId);
+				await this.ensureRemoteDirectory(sftp, getRemoteParentPath(archivePath));
+				await this.fastPut(sftp, localArchivePath, archivePath, this.createSftpTransferOptions(undefined, progressId));
+			}, progressId);
+		} finally {
+			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}
+
+	private async extractRemotePathWithSftp(endpoint: ITurboFileTransferEndpoint, outputDirectory: string, progressId?: string): Promise<string> {
+		const tempRoot = join(tmpdir(), `turbofile-remote-extract-${randomUUID()}`);
+		const localArchivePath = join(tempRoot, basename(endpoint.path) || 'archive');
+		const localOutputDirectory = join(tempRoot, 'output');
+		try {
+			await fsp.mkdir(localOutputDirectory, { recursive: true });
+			return await this.withDirectorySftp(endpoint, async sftp => {
+				const archiveStats = await this.remoteStat(sftp, endpoint.path);
+				await this.fastGetWithFallback(sftp, endpoint.path, localArchivePath, Math.max(0, archiveStats.size), undefined, progressId);
+				this.throwIfTransferCanceled(progressId);
+				const charsetArgs = isTurboFileTarFamilyArchivePath(endpoint.path) ? await this.getLocalTarCharsetArgs() : [];
+				await this.runCancelableLocalCommand('tar.exe', [...charsetArgs, '-xf', localArchivePath, '-C', localOutputDirectory], {}, progressId);
+				this.throwIfTransferCanceled(progressId);
+				let resolvedOutputDirectory = outputDirectory;
+				const existing = await this.remoteStat(sftp, resolvedOutputDirectory).catch(() => undefined);
+				if (existing && !existing.isDirectory()) {
+					resolvedOutputDirectory = `${resolvedOutputDirectory}_extracted`;
+				}
+				await this.uploadDirectory(sftp, localOutputDirectory, resolvedOutputDirectory, undefined, progressId);
+				return resolvedOutputDirectory;
+			}, progressId);
+		} finally {
+			await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
 		}
 	}
 
@@ -9465,6 +9772,151 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			? buildWindowsMoveCommand(endpoint.path, targetPath)
 			: `mkdir -p ${quotePosixShellArg(getRemoteParentPath(targetPath))} && mv -f ${quotePosixShellArg(endpoint.path)} ${quotePosixShellArg(targetPath)}`;
 		await this.withSshClient(endpoint, client => this.execRemote(client, command, { progressId }), progressId);
+	}
+
+	private async moveRemotePathWithFallback(endpoint: ITurboFileTransferEndpoint, targetPath: string, progressId?: string): Promise<void> {
+		await this.runRemoteMutationWithSftpFallback(
+			endpoint,
+			'move',
+			progressId,
+			() => this.moveRemotePathNative(endpoint, targetPath, progressId),
+			undefined,
+			() => this.withDirectorySftp(endpoint, sftp => this.moveRemotePathWithSftp(sftp, endpoint.path, targetPath, progressId), progressId)
+		);
+	}
+
+	private async moveRemotePathWithSftp(sftp: ISFTPWrapper, sourcePath: string, targetPath: string, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		await this.ensureRemoteDirectory(sftp, getRemoteParentPath(targetPath));
+		try {
+			await this.renameRemote(sftp, sourcePath, targetPath);
+		} catch (error) {
+			const [sourceExists, targetExists] = await Promise.all([
+				this.remotePathExists(sftp, sourcePath),
+				this.remotePathExists(sftp, targetPath)
+			]);
+			if (!sourceExists && targetExists) {
+				return;
+			}
+			throw error;
+		}
+	}
+
+	private async readRemoteFileWithSftp(sftp: ISFTPWrapper, remotePath: string, size: number): Promise<Buffer> {
+		const content = Buffer.alloc(Math.max(0, size));
+		const handle = await this.openRemoteFile(sftp, remotePath, 'r');
+		let readError: Error | undefined;
+		try {
+			if (content.length) {
+				await this.readRemoteFileChunkExact(sftp, handle, content, content.length, 0, remotePath);
+			}
+		} catch (error) {
+			readError = error instanceof Error ? error : new Error(String(error));
+		} finally {
+			try {
+				await this.closeRemoteFile(sftp, handle);
+			} catch (error) {
+				readError ??= error instanceof Error ? error : new Error(String(error));
+			}
+		}
+		if (readError) {
+			throw readError;
+		}
+		return content;
+	}
+
+	private async copyRemotePathWithSftp(sftp: ISFTPWrapper, sourcePath: string, targetPath: string, onDelta?: (delta: number) => void, progressId?: string): Promise<number> {
+		this.throwIfTransferCanceled(progressId);
+		const stats = await this.remoteStat(sftp, sourcePath);
+		if (stats.isDirectory()) {
+			await this.ensureRemoteDirectory(sftp, targetPath);
+			let copiedBytes = 0;
+			const entries = await this.readRemoteDirectory(sftp, sourcePath);
+			for (const entry of entries) {
+				if (entry.filename === '.' || entry.filename === '..') {
+					continue;
+				}
+				copiedBytes += await this.copyRemotePathWithSftp(
+					sftp,
+					joinRemotePath(sourcePath, entry.filename),
+					joinRemotePath(targetPath, entry.filename),
+					onDelta,
+					progressId
+				);
+			}
+			return copiedBytes;
+		}
+
+		await this.ensureRemoteDirectory(sftp, getRemoteParentPath(targetPath));
+		await this.relayRemoteFileInParallel(sftp, sftp, sourcePath, targetPath, Math.max(0, stats.size), onDelta, progressId);
+		return Math.max(0, stats.size);
+	}
+
+	private async runRemoteMutationWithSftpFallback<T>(endpoint: ITurboFileTransferEndpoint, capability: RemoteMutationShellCapability, progressId: string | undefined, nativeOperation: () => Promise<T>, portableOperation: (() => Promise<T>) | undefined, sftpFallback: () => Promise<T>): Promise<T> {
+		const deviceKey = getFileOperationDeviceKey(endpoint);
+		const capabilities = this.remoteMutationShellCapabilities.get(deviceKey);
+		let nativeError: Error | undefined;
+		if (capabilities?.get(capability) !== false) {
+			try {
+				const result = await nativeOperation();
+				this.rememberRemoteMutationShellCapability(deviceKey, capability, true);
+				return result;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+					throw error;
+				}
+				nativeError = error instanceof Error ? error : new Error(String(error));
+			}
+		}
+
+		let portableError: Error | undefined;
+		const portableCapabilities = this.remotePortableMutationShellCapabilities.get(deviceKey);
+		if (portableOperation && portableCapabilities?.get(capability) !== false) {
+			try {
+				const result = await portableOperation();
+				this.rememberRemoteMutationShellCapability(deviceKey, capability, true, true);
+				if (nativeError && isRemoteMutationShellCompatibilityError(nativeError)) {
+					this.rememberRemoteMutationShellCapability(deviceKey, capability, false);
+				}
+				return result;
+			} catch (error) {
+				if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+					throw error;
+				}
+				portableError = error instanceof Error ? error : new Error(String(error));
+				if (isRemoteMutationShellCompatibilityError(portableError)) {
+					this.rememberRemoteMutationShellCapability(deviceKey, capability, false, true);
+				}
+			}
+		}
+
+		try {
+			const result = await sftpFallback();
+			if (nativeError && isRemoteMutationShellCompatibilityError(nativeError)) {
+				this.rememberRemoteMutationShellCapability(deviceKey, capability, false);
+			}
+			return result;
+		} catch (error) {
+			if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+				throw error;
+			}
+			if (!nativeError) {
+				throw error;
+			}
+			const fallbackMessage = error instanceof Error ? error.message : String(error);
+			const portableMessage = portableError ? ` Portable command failed: ${portableError.message}.` : '';
+			throw new Error(`Remote command failed: ${nativeError.message}.${portableMessage} SFTP fallback failed: ${fallbackMessage}`);
+		}
+	}
+
+	private rememberRemoteMutationShellCapability(deviceKey: string, capability: RemoteMutationShellCapability, supported: boolean, portable = false): void {
+		const cache = portable ? this.remotePortableMutationShellCapabilities : this.remoteMutationShellCapabilities;
+		let capabilities = cache.get(deviceKey);
+		if (!capabilities) {
+			capabilities = new Map();
+			cache.set(deviceKey, capabilities);
+		}
+		capabilities.set(capability, supported);
 	}
 
 	private async execRemoteCopyWithProgress(request: ITurboFileTransferRequest, command: string, bytes: number, sourceType: TurboFileFileType, reportsNativeProgress = false): Promise<number> {
@@ -11589,6 +12041,54 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
+	private realpathRemote(sftp: ISFTPWrapper, remotePath: string): Promise<string> {
+		return new Promise((resolve, reject) => {
+			sftp.realpath(remotePath, (error, resolvedPath) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(resolvedPath);
+			});
+		});
+	}
+
+	private async writeRemoteBuffer(sftp: ISFTPWrapper, remotePath: string, content: Buffer): Promise<void> {
+		const handle = await this.openRemoteFile(sftp, remotePath, 'wx');
+		let writeError: Error | undefined;
+		try {
+			let position = 0;
+			while (position < content.length) {
+				const length = Math.min(SFTP_RELAY_CHUNK_SIZE, content.length - position);
+				await this.writeRemoteFileChunk(sftp, handle, content.subarray(position, position + length), length, position);
+				position += length;
+			}
+		} catch (error) {
+			writeError = error instanceof Error ? error : new Error(String(error));
+		} finally {
+			try {
+				await this.closeRemoteFile(sftp, handle);
+			} catch (error) {
+				writeError ??= error instanceof Error ? error : new Error(String(error));
+			}
+		}
+		if (writeError) {
+			throw writeError;
+		}
+	}
+
+	private renameRemote(sftp: ISFTPWrapper, sourcePath: string, targetPath: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			sftp.rename(sourcePath, targetPath, error => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve();
+			});
+		});
+	}
+
 	private fastGet(sftp: ISFTPWrapper, remotePath: string, localPath: string, options?: ISFTPTransferOptions): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const callback = (error: Error | undefined): void => {
@@ -12039,6 +12539,16 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 	}
 
+	private async downloadRemotePathWithSftp(sftp: ISFTPWrapper, remotePath: string, localPath: string, progressId?: string): Promise<void> {
+		const stats = await this.remoteStat(sftp, remotePath);
+		if (stats.isDirectory()) {
+			await this.downloadDirectory(sftp, remotePath, localPath, undefined, progressId);
+			return;
+		}
+		await fsp.mkdir(dirname(localPath), { recursive: true });
+		await this.fastGetWithFallback(sftp, remotePath, localPath, Math.max(0, stats.size), undefined, progressId);
+	}
+
 	private async deleteRemoteDirectory(sftp: ISFTPWrapper, remotePath: string): Promise<void> {
 		const entries = await this.readRemoteDirectory(sftp, remotePath);
 		for (const entry of entries) {
@@ -12053,6 +12563,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		await this.rmdirRemote(sftp, remotePath);
+	}
+
+	private async deleteRemotePathWithSftp(sftp: ISFTPWrapper, remotePath: string, progressId?: string): Promise<void> {
+		this.throwIfTransferCanceled(progressId);
+		let stats: ISFTPStats;
+		try {
+			stats = await this.remoteStat(sftp, remotePath);
+		} catch (error) {
+			if (isRemotePathMissingError(error)) {
+				return;
+			}
+			throw error;
+		}
+		if (stats.isDirectory()) {
+			await this.deleteRemoteDirectory(sftp, remotePath);
+		} else {
+			await this.unlinkRemote(sftp, remotePath);
+		}
 	}
 
 	private toRemoteEntry(parentPath: string, entry: ISFTPFileEntry): ITurboFileFileEntry {
@@ -13051,6 +13579,10 @@ function isRemotePathMissingError(error: unknown): boolean {
 	return candidate?.code === 2
 		|| candidate?.code === 'ENOENT'
 		|| /no such file|not found/i.test(candidate?.message ?? '');
+}
+
+function isRemoteMutationShellCompatibilityError(error: Error): boolean {
+	return /(?:bash|sh|xargs|mkdir|mv|cp|rm|python3|powershell(?:\.exe)?): (?:command )?not found|command not found|not recognized as (?:an internal|the name of)|unknown option|unrecognized option|illegal option|invalid option|bad option|not an applet|syntax error|unexpected operator|read: illegal option/i.test(error.message);
 }
 
 function quotePortablePosixOperand(value: string): string {

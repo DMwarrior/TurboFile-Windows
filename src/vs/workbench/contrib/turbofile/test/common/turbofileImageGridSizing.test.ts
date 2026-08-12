@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns } from '../../common/turbofileImageGridSizing.js';
+import { getTurboFileImageGridBaseCardWidth, getTurboFileImageGridCardSize, getTurboFileImageGridEffectiveColumns } from '../../common/turbofileImageGridSizing.js';
 
 suite('TurboFileImageGridSizing', () => {
 	test('keeps the old 1x grid size for large images', () => {
@@ -50,5 +50,32 @@ suite('TurboFileImageGridSizing', () => {
 			],
 			[12, 6]
 		);
+	});
+
+	test('keeps the legacy 96px card floor for the default 14-column target', () => {
+		const cardWidth = Math.max(96, getTurboFileImageGridBaseCardWidth(14, 980, 10));
+		assert.deepStrictEqual({
+			cardWidth,
+			columns: getTurboFileImageGridEffectiveColumns(14, 980, cardWidth, 10)
+		}, {
+			cardWidth: 96,
+			columns: 9
+		});
+	});
+
+	test('allows explicit Ctrl+wheel zoom-out to reach 24 columns on a full-width surface', () => {
+		const cardWidth = Math.max(64, getTurboFileImageGridBaseCardWidth(24, 1980, 10));
+		assert.deepStrictEqual({
+			cardWidth,
+			columns: getTurboFileImageGridEffectiveColumns(24, 1980, cardWidth, 10)
+		}, {
+			cardWidth: 72,
+			columns: 24
+		});
+	});
+
+	test('reduces a 24-column target automatically when the pane is narrow', () => {
+		const cardWidth = Math.max(64, getTurboFileImageGridBaseCardWidth(24, 980, 10));
+		assert.strictEqual(getTurboFileImageGridEffectiveColumns(24, 980, cardWidth, 10), 13);
 	});
 });

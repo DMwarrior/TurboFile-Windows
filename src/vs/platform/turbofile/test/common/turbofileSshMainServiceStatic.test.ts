@@ -504,8 +504,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(remoteList.includes('buildPosixTrashListCommand'));
 		assert.ok(remoteList.includes('buildWindowsTrashListCommand'));
 		assert.ok(remoteList.includes('execRemoteBytes'));
-		assert.ok(!remoteList.includes('withDirectorySftp'));
-		assert.ok(!remoteList.includes('readRemoteDirectory'));
+		assert.ok(remoteList.includes("'trash-list'"));
+		assert.ok(remoteList.includes('listRemoteTrashMetadataWithSftp'));
 		assert.ok(!remoteList.includes('readRemoteFileBufferDirect'));
 		assert.ok(!remoteList.includes('remotePathExists'));
 	});

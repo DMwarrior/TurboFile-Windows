@@ -15,6 +15,14 @@ export interface ITurboFileImageGridCardSize {
 	readonly rowHeight: number;
 }
 
+export function getTurboFileImageGridBaseCardWidth(columns: number, availableWidth: number, gap: number): number {
+	const normalizedColumns = Math.max(1, Math.round(columns));
+	const width = Math.max(1, Math.floor(availableWidth));
+	const itemGap = Math.max(0, Math.round(gap));
+	const widthWithoutGaps = width - (itemGap * Math.max(0, normalizedColumns - 1));
+	return Math.max(1, Math.floor(widthWithoutGaps / normalizedColumns));
+}
+
 // Clamp the aspect ratio used for laying out a card. Without this, an extreme-aspect image (e.g. a
 // 1024x32 crop) makes its card either freakishly wide — which inflates the grid's column width and
 // leaves big gaps between every other card — or, fitted into the square preview, a ~4px sliver that

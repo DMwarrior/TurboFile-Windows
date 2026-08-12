@@ -177,8 +177,8 @@ suite('TurboFileMutationStabilityStatic', () => {
 
 		assert.ok(cleanup.includes('progressId'));
 		assert.ok(deletePaths.includes('inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS'));
-		assert.ok(trashMove.includes("? { progressId }\n\t\t\t\t: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
-		assert.ok(trashDelete.includes("? { progressId }\n\t\t\t\t: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
+		assert.ok(trashMove.includes("? { progressId }\n\t\t\t\t\t\t: { progressId, inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS"));
+		assert.ok(trashDelete.includes('inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS'));
 		assert.ok(deleteBuilder.includes('[Console]::Out.WriteLine'));
 		assert.ok(trashMoveBuilder.includes('[Console]::Error.WriteLine'));
 		assert.ok(trashDeleteBuilder.includes('[Console]::Error.WriteLine'));
@@ -328,5 +328,52 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(deletePathsCore.includes('return await runTurboFilePosixBatchDelete('));
 		assert.ok(deletePathsCore.includes('endpoint => this.deletePathCore(endpoint, recursive, progressId)'));
 		assert.ok(deletePathsCore.includes('endpoint => this.clearRemoteDirectoryListingCache(endpoint)'));
+	});
+
+	test('keeps fast remote mutations and falls back to standard SFTP operations', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const sameRemoteBatch = block(service, 'private async runSameRemoteNativeBatchTransfer', 'private async tryLocalBatchRsyncTransfer');
+		const trashMove = block(service, 'private async moveRemotePathsToTrash', 'private async listRemoteTrashItems');
+		const rename = block(service, 'private async renamePathCore', 'async movePathsIntoDirectory');
+		const movePaths = block(service, 'private async movePathsIntoDirectoryCore', 'async calculatePathSize');
+		const sameRemoteCopy = block(service, 'private async trySameRemoteCopy', 'private async tryDirectTarTransfer');
+		const trashList = block(service, 'private async listRemoteTrashItems', 'private async listRemoteTrashMetadataWithSftp');
+		const trashEmpty = block(service, 'private async emptyTrashNative', 'private async hasTrashItemsNative');
+		const trashHasItems = block(service, 'private async hasTrashItemsNative', 'private async emptyRemoteTrashWithSftp');
+		const compress = block(service, 'private async compressPathCore', 'async extractPath');
+		const extract = block(service, 'private async extractPathCore', 'private async compressRemotePathWithSftp');
+		const fallback = block(service, 'private async runRemoteMutationWithSftpFallback', 'private rememberRemoteMutationShellCapability');
+
+		assert.deepStrictEqual({
+			batchKeepsNativePlan: sameRemoteBatch.includes('createPosixNativeBatchTransferPlan'),
+			batchUsesPortableShellBeforeSftp: sameRemoteBatch.indexOf('createPosixPortableBatchTransferPlan') < sameRemoteBatch.indexOf('copyRemotePathWithSftp'),
+			batchFallsBackToSftp: sameRemoteBatch.includes('copyRemotePathWithSftp') && sameRemoteBatch.includes('moveRemotePathWithSftp'),
+			trashKeepsNativeBatch: trashMove.includes('buildPosixTrashMoveBatchCommand'),
+			trashFallsBackToSftp: trashMove.includes('moveRemoteTrashItemsWithSftp'),
+			renameFallsBackToSftp: rename.includes('moveRemotePathWithFallback'),
+			moveBatchFallsBackToSftp: movePaths.includes("'batch-move'") && movePaths.includes('moveRemotePathWithSftp'),
+			copyFallsBackToSftp: sameRemoteCopy.includes("'copy'") && sameRemoteCopy.includes('copyRemotePathWithSftp'),
+			trashListFallsBackToSftp: trashList.includes("'trash-list'") && trashList.includes('listRemoteTrashMetadataWithSftp'),
+			trashEmptyFallsBackToSftp: trashEmpty.includes("'trash-empty'") && trashEmpty.includes('emptyRemoteTrashWithSftp'),
+			trashStateFallsBackToSftp: trashHasItems.includes("'trash-has-items'") && trashHasItems.includes('remoteTrashHasItemsWithSftp'),
+			compressFallsBackToSftp: compress.includes("'compress'") && compress.includes('compressRemotePathWithSftp'),
+			extractFallsBackToSftp: extract.includes("'extract'") && extract.includes('extractRemotePathWithSftp'),
+			compatibilityIsCachedByOperation: fallback.includes('remoteMutationShellCapabilities') && fallback.includes('remotePortableMutationShellCapabilities') && fallback.includes('isRemoteMutationShellCompatibilityError')
+		}, {
+			batchKeepsNativePlan: true,
+			batchUsesPortableShellBeforeSftp: true,
+			batchFallsBackToSftp: true,
+			trashKeepsNativeBatch: true,
+			trashFallsBackToSftp: true,
+			renameFallsBackToSftp: true,
+			moveBatchFallsBackToSftp: true,
+			copyFallsBackToSftp: true,
+			trashListFallsBackToSftp: true,
+			trashEmptyFallsBackToSftp: true,
+			trashStateFallsBackToSftp: true,
+			compressFallsBackToSftp: true,
+			extractFallsBackToSftp: true,
+			compatibilityIsCachedByOperation: true
+		});
 	});
 });

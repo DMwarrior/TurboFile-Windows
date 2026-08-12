@@ -11,15 +11,34 @@ export interface ITurboFilePosixNativeBatchTransferPlan {
 	readonly input: Uint8Array;
 }
 
+/**
+ * Builds a POSIX sh/BusyBox compatible same-host transfer plan for devices without Bash.
+ */
+export function createPosixPortableBatchTransferPlan(items: readonly ITurboFileBatchTransferItem[], targetDirectory: string, operation: 'copy' | 'move'): ITurboFilePosixNativeBatchTransferPlan {
+	const validItems = validateBatchTransferItems(items, targetDirectory);
+	const target = quotePosixShellArg(targetDirectory);
+	const script = [
+		'source=$1',
+		'name=$2',
+		'type=$3',
+		'target=$0',
+		'destination=$target/$name',
+		'if [ -e "$destination" ] || [ -L "$destination" ]; then printf \'%s\\n\' "Target already exists: $destination" >&2; exit 73; fi',
+		...(operation === 'move'
+			? ['mv "$source" "$destination"']
+			: [
+				'if [ "$type" = directory ]; then cp -a "$source" "$destination" 2>/dev/null || cp -R "$source" "$destination"; else cp -p "$source" "$destination" 2>/dev/null || cp "$source" "$destination"; fi'
+			]),
+		'if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then exit 74; fi'
+	].join('; ');
+	return {
+		command: `mkdir -p ${target} && LC_ALL=C xargs -0 -r -n 3 sh -c ${quotePosixShellArg(script)} ${target}`,
+		input: createNullDelimitedBuffer(validItems.flatMap(item => [item.sourcePath, item.targetName, item.sourceType ?? 'unknown']))
+	};
+}
+
 export function createPosixNativeBatchTransferPlan(items: readonly ITurboFileBatchTransferItem[], targetDirectory: string, operation: 'copy' | 'move'): ITurboFilePosixNativeBatchTransferPlan {
-	const validItems = items.filter(item => !!item.sourcePath && !!item.targetName);
-	const targetNames = validItems.map(item => item.targetName);
-	if (new Set(targetNames).size !== targetNames.length) {
-		throw new Error('Duplicate target names are not allowed in a native batch transfer.');
-	}
-	if ([targetDirectory, ...validItems.flatMap(item => [item.sourcePath, item.targetName])].some(value => value.includes('\0'))) {
-		throw new Error('Native batch transfer paths cannot contain NUL characters.');
-	}
+	const validItems = validateBatchTransferItems(items, targetDirectory);
 	const target = quotePosixShellArg(targetDirectory);
 	const entries = validItems.flatMap(item => [item.sourcePath, item.targetName, item.sourceType ?? 'unknown']);
 	const script = [
@@ -62,6 +81,18 @@ export function createPosixNativeBatchTransferPlan(items: readonly ITurboFileBat
 		command: `bash -lc ${quotePosixShellArg(script)} _ ${target} ${quotePosixShellArg(operation)}`,
 		input: createNullDelimitedBuffer(entries)
 	};
+}
+
+function validateBatchTransferItems(items: readonly ITurboFileBatchTransferItem[], targetDirectory: string): readonly ITurboFileBatchTransferItem[] {
+	const validItems = items.filter(item => !!item.sourcePath && !!item.targetName);
+	const targetNames = validItems.map(item => item.targetName);
+	if (new Set(targetNames).size !== targetNames.length) {
+		throw new Error('Duplicate target names are not allowed in a native batch transfer.');
+	}
+	if ([targetDirectory, ...validItems.flatMap(item => [item.sourcePath, item.targetName])].some(value => value.includes('\0'))) {
+		throw new Error('Native batch transfer paths cannot contain NUL characters.');
+	}
+	return validItems;
 }
 
 function createNullDelimitedBuffer(entries: readonly string[]): Uint8Array {

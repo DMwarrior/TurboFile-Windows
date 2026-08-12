@@ -61,6 +61,17 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.setImageGridColumns(state, state.columns + 1);'));
 	});
 
+	test('can hide image names without leaving the old caption height behind', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderCard = editor.slice(editor.indexOf('private renderImageGridCard('), editor.indexOf('private registerImageGridDropTarget('));
+
+		assert.ok(editor.includes("const TURBOFILE_IMAGE_GRID_SHOW_NAMES_STORAGE_KEY = 'turbofile.imageGrid.showNames';"));
+		assert.ok(editor.includes('StorageScope.PROFILE, true'));
+		assert.ok(renderCard.includes('if (this.shouldShowImageGridNames())'));
+		assert.ok(editor.includes('IMAGE_GRID_CARD_VERTICAL_CHROME_WITHOUT_NAME'));
+		assert.ok(editor.includes('rowHeight: Math.max(showNames ? 150 : 1'));
+	});
+
 	test('sorts image grid from file-list metadata without scanning image headers', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const sortOptions = editor.slice(

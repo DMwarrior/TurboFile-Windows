@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { createPosixNativeBatchTransferPlan } from '../../common/turbofileRemoteNativeBatchPlan.js';
+import { createPosixNativeBatchTransferPlan, createPosixPortableBatchTransferPlan } from '../../common/turbofileRemoteNativeBatchPlan.js';
 
 suite('TurboFileRemoteNativeBatchPlan', function () {
 
@@ -50,6 +50,28 @@ suite('TurboFileRemoteNativeBatchPlan', function () {
 			'/tmp/source/b.txt',
 			'b.txt',
 			'file',
+			''
+		]);
+	});
+
+	test('builds a BusyBox-compatible same-host copy plan without Bash arrays', () => {
+		const plan = createPosixPortableBatchTransferPlan([
+			{ sourcePath: '/home/test/data/2KManTianXing/a.png', targetName: 'a.png', sourceType: 'file' },
+			{ sourcePath: '/home/test/data/2KManTianXing/folder', targetName: 'folder', sourceType: 'directory' }
+		], '/home/test/data', 'copy');
+
+		assert.ok(plan.command.includes('xargs -0 -r -n 3 sh -c'), plan.command);
+		assert.ok(plan.command.includes('cp -p "$source" "$destination"'), plan.command);
+		assert.ok(plan.command.includes('cp -R "$source" "$destination"'), plan.command);
+		assert.ok(!plan.command.includes('bash'), plan.command);
+		assert.ok(!plan.command.includes('sources=('), plan.command);
+		assert.deepStrictEqual(new TextDecoder().decode(plan.input).split('\0'), [
+			'/home/test/data/2KManTianXing/a.png',
+			'a.png',
+			'file',
+			'/home/test/data/2KManTianXing/folder',
+			'folder',
+			'directory',
 			''
 		]);
 	});
