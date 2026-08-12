@@ -122,23 +122,40 @@ suite('TurboFileDragDrop', () => {
 
 	test('keeps internal drops in Chromium and hands the frozen session to Windows only after leaving the window', () => {
 		const editor = readTurboFileEditor();
+		const windowInterceptor = methodBlock(editor, 'private registerWindowFileDropInterceptor', 'private shouldInterceptExternalFileDrop');
+		const dragEnterCapture = methodBlock(editor, 'private handleTurboFileDragEnterCapture', 'private shouldInterceptExternalFileDrop');
 		const beginSession = methodBlock(editor, 'private beginFileDragSession', 'private handoffFileDragSessionToWindows');
 		const handoff = methodBlock(editor, 'private handoffFileDragSessionToWindows', 'private async runNativeFileDrag');
+		const pageDragLeave = methodBlock(editor, 'private handleTransferPageDragLeave', 'private isTransferPageFileDrag');
 
 		assert.deepStrictEqual({
+			registersContainerDragEnterCapture: windowInterceptor.includes("this.container.addEventListener('dragenter', onDragEnter, true);") && windowInterceptor.includes("removeEventListener('dragenter', onDragEnter, true)"),
+			internalDragEnterStopsAtTurboFile: dragEnterCapture.includes('this.nativeDragSession?.sourceSide ?? this.getTurboFileDragSourceSide(event)') && dragEnterCapture.includes('this.consumeTurboFileDropEvent(event);'),
+			dragEnterDoesNotStealDragOverOrDrop: !windowInterceptor.includes("this.container.addEventListener('dragover'") && !windowInterceptor.includes("this.container.addEventListener('drop'"),
 			keepsChromiumDrag: !beginSession.includes('event.preventDefault();') && !beginSession.includes('runNativeFileDrag'),
 			fileRowsReuseEntry: editor.includes('this.beginFileDragSession(side, event);'),
-			imageGridReusesEntry: editor.includes('this.beginFileDragSession(state.side, event);'),
+			imageGridReusesEntry: editor.includes('this.beginFileDragSession(state.side, event, false);'),
+			imageGridBlocksWindowsHandoff: editor.includes('this.beginFileDragSession(state.side, event, false);'),
 			pageExitHandsOff: editor.includes('private handleTransferPageDragLeave') && editor.includes('this.handoffFileDragSessionToWindows();'),
+			pageExitUsesSharedClassifier: pageDragLeave.includes('shouldHandoffTurboFileDragToWindows(event'),
+			pageExitChecksSessionPolicy: pageDragLeave.includes('this.nativeDragSession?.allowWindowsHandoff'),
 			pointerExitFallback: editor.includes('private maybeHandoffFileDragSessionToWindows'),
+			handoffChecksSessionPolicy: handoff.includes('!session.allowWindowsHandoff'),
 			handoffClearsBeforeNativeStart: handoff.indexOf('this.clearCurrentFileDragState();') < handoff.indexOf('void this.runNativeFileDrag(session);'),
 			noRenderDuringHandoff: !handoff.includes('this.render()')
 		}, {
+			registersContainerDragEnterCapture: true,
+			internalDragEnterStopsAtTurboFile: true,
+			dragEnterDoesNotStealDragOverOrDrop: true,
 			keepsChromiumDrag: true,
 			fileRowsReuseEntry: true,
 			imageGridReusesEntry: true,
+			imageGridBlocksWindowsHandoff: true,
 			pageExitHandsOff: true,
+			pageExitUsesSharedClassifier: true,
+			pageExitChecksSessionPolicy: true,
 			pointerExitFallback: true,
+			handoffChecksSessionPolicy: true,
 			handoffClearsBeforeNativeStart: true,
 			noRenderDuringHandoff: true
 		});

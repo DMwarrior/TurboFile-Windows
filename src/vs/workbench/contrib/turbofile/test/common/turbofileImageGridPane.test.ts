@@ -43,6 +43,25 @@ suite('TurboFileImageGridPane', () => {
 		]);
 	});
 
+	test('preserves a selected image group when pointerdown turns into a drag', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
+		const pointerSelection = editor.slice(
+			editor.indexOf('private selectImageGridItemWithPointer('),
+			editor.indexOf('private selectImageGridItemWithContextMenu(')
+		);
+
+		assert.ok(editor.includes("card.addEventListener('click', event => this.completeImageGridItemPointerSelection(state, index, event));"));
+		assert.ok(pointerSelection.includes('state.selectedIndexes.has(index) && state.selectedIndexes.size > 1'));
+		assert.ok(pointerSelection.includes('state.selectedIndex = index;'));
+		assert.ok(pointerSelection.includes('private completeImageGridItemPointerSelection('));
+		assert.ok(pointerSelection.includes('this.selectImageGridItem(index, event);'));
+		assert.strictEqual(editor.match(/thumb\.draggable = false;/g)?.length, 2);
+		assert.ok(css.includes('.turbofile-image-page-card-preview img'));
+		assert.ok(css.includes('-webkit-user-drag: none;'));
+		assert.ok(css.includes('pointer-events: none;'));
+	});
+
 	test('reflows pane grids after DOM attach and lets local drop targets own image-grid drops', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		assert.ok(editor.includes('this.reflowAttachedImageGridBody(body, state, scrollTop);'));

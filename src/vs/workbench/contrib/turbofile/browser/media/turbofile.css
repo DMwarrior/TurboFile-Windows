@@ -4008,6 +4008,9 @@ body.hc-black .turbofile-live-transfer-panel {
 	   shrinking to a sliver. */
 	object-fit: cover;
 	display: block;
+	user-select: none;
+	-webkit-user-drag: none;
+	pointer-events: none;
 }
 
 .turbofile-image-page-card-placeholder {

@@ -1292,12 +1292,39 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		const ownerWindow = getWindow(this.container);
+		const onDragEnter = (event: DragEvent) => this.handleTurboFileDragEnterCapture(event);
 		const onDragOver = (event: DragEvent) => this.handleWindowFileDragOver(event);
 		const onDrop = (event: DragEvent) => this.handleWindowFileDrop(event);
+		this.container.addEventListener('dragenter', onDragEnter, true);
 		ownerWindow.addEventListener('dragover', onDragOver, true);
 		ownerWindow.addEventListener('drop', onDrop, true);
+		this.renderDisposables.add({ dispose: () => this.container?.removeEventListener('dragenter', onDragEnter, true) });
 		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('dragover', onDragOver, true) });
 		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('drop', onDrop, true) });
+	}
+
+	/**
+	 * Keep TurboFile drags inside TurboFile before VS Code's editor drop target sees dragenter.
+	 * Chromium can otherwise expose an image element as a native `Files` drag for the first event,
+	 * causing the workbench to cover both panes with its editor-drop overlay and steal the drop.
+	 * Only dragenter is intercepted here: dragover/drop must continue to the concrete pane target.
+	 */
+	private handleTurboFileDragEnterCapture(event: DragEvent): void {
+		const sourceSide = this.nativeDragSession?.sourceSide ?? this.getTurboFileDragSourceSide(event);
+		if (sourceSide) {
+			this.consumeTurboFileDropEvent(event);
+			if (event.dataTransfer) {
+				const operation = this.nativeDragSession?.operation ?? this.getDragOperationFromEvent(event, sourceSide);
+				event.dataTransfer.dropEffect = getTurboFileDropEffect(operation);
+			}
+			return;
+		}
+
+		// Prevent the workbench editor overlay from flashing before the existing external-file
+		// dragover/drop interceptor routes the OS drop into the correct TurboFile pane.
+		if (this.shouldInterceptExternalFileDrop(event)) {
+			this.handleWindowFileDragOver(event);
+		}
 	}
 
 	private shouldInterceptExternalFileDrop(event: DragEvent): boolean {
@@ -1706,7 +1733,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
-	private beginFileDragSession(side: 'left' | 'right', event: DragEvent): void {
+	private beginFileDragSession(side: 'left' | 'right', event: DragEvent, allowWindowsHandoff: boolean = true): void {
 		if (!event.dataTransfer || this.nativeDragSession) {
 			return;
 		}
@@ -1719,13 +1746,13 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const operation = this.getCurrentDragOperation(side);
-		const session = startTurboFileNativeDragSession(createTurboFileNativeDragSession(generateUuid(), side, operation, items));
+		const session = startTurboFileNativeDragSession(createTurboFileNativeDragSession(generateUuid(), side, operation, items, allowWindowsHandoff));
 		this.nativeDragSession = session;
 	}
 
 	private handoffFileDragSessionToWindows(): void {
 		const session = this.nativeDragSession;
-		if (!session || session.state !== 'dragging') {
+		if (!session || session.state !== 'dragging' || !session.allowWindowsHandoff) {
 			return;
 		}
 
@@ -1736,7 +1763,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private maybeHandoffFileDragSessionToWindows(event: DragEvent): void {
-		if (!this.nativeDragSession) {
+		if (!this.nativeDragSession?.allowWindowsHandoff) {
 			return;
 		}
 
@@ -2105,16 +2132,15 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private handleTransferPageDragLeave(event: DragEvent): void {
+		if (!this.nativeDragSession?.allowWindowsHandoff) {
+			return;
+		}
 		const relatedTarget = event.relatedTarget;
 		if (relatedTarget instanceof Node && this.container?.ownerDocument.contains(relatedTarget)) {
 			return;
 		}
 		const ownerWindow = getWindow(this.container);
-		const outsideWindow = event.clientX <= 0
-			|| event.clientY <= 0
-			|| event.clientX >= ownerWindow.innerWidth - 1
-			|| event.clientY >= ownerWindow.innerHeight - 1;
-		if (!outsideWindow) {
+		if (!shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
 			return;
 		}
 
@@ -6202,7 +6228,7 @@ export class TurboFileEditor extends EditorPane {
 			if (index === state.selectedIndex) {
 				card.classList.add('is-selected');
 			}
-			card.addEventListener('pointerdown', event => this.selectImageGridItemWithPointer(index, event));
+			card.addEventListener('pointerdown', event => this.selectImageGridItemWithPointer(state, index, event));
 			card.addEventListener('contextmenu', event => this.selectImageGridItemWithContextMenu(index, event));
 			if (image.thumbnailContent) {
 				const thumb = document.createElement('img');
@@ -6686,6 +6712,7 @@ export class TurboFileEditor extends EditorPane {
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 		if (thumbnailSrc) {
 			const thumb = document.createElement('img');
+			thumb.draggable = false;
 			thumb.loading = 'eager';
 			thumb.decoding = 'async';
 			this.applyImageGridCardImageSize(thumb, cardSize);
@@ -6718,8 +6745,9 @@ export class TurboFileEditor extends EditorPane {
 
 		card.addEventListener('pointerdown', event => {
 			this.setActiveImageGridState(state);
-			this.selectImageGridItemWithPointer(index, event);
+			this.selectImageGridItemWithPointer(state, index, event);
 		});
+		card.addEventListener('click', event => this.completeImageGridItemPointerSelection(state, index, event));
 		card.addEventListener('dragstart', event => this.beginImageGridCardDrag(state, index, event));
 		card.addEventListener('drag', event => this.maybeHandoffFileDragSessionToWindows(event));
 		card.addEventListener('dragend', () => this.clearCurrentFileDragState());
@@ -6769,7 +6797,9 @@ export class TurboFileEditor extends EditorPane {
 		event.dataTransfer.setData('application/x-turbofile-side', state.side);
 		event.dataTransfer.setData('application/x-turbofile-operation', operation);
 		event.dataTransfer.setData('text/plain', this.getImageGridTransferItems(state).map(item => item.name).join('\n'));
-		this.beginFileDragSession(state.side, event);
+		// Image-grid drags are an in-app pane operation. Chromium's physical-mouse coordinates are
+		// unreliable on mixed-DPI/multi-monitor Windows setups, so never promote this drag to OLE.
+		this.beginFileDragSession(state.side, event, false);
 	}
 
 	private copyImageGridSelectionToInternalClipboard(state: TurboFileImageGridState, operation: 'copy' | 'move'): void {
@@ -11491,13 +11521,26 @@ export class TurboFileEditor extends EditorPane {
 		this.scheduleImageGridThumbnailsLoaded(this.getImageGridLoadIndexes(index, state.images.length), state);
 	}
 
-	private selectImageGridItemWithPointer(index: number, event: PointerEvent): void {
+	private selectImageGridItemWithPointer(state: TurboFileImageGridState, index: number, event: PointerEvent): void {
 		if (event.button !== 0) {
 			return;
 		}
 		const target = event.currentTarget;
 		if (target instanceof HTMLElement) {
 			target.focus({ preventScroll: true });
+		}
+		if (!event.ctrlKey && !event.metaKey && !event.shiftKey && state.selectedIndexes.has(index) && state.selectedIndexes.size > 1) {
+			// Preserve an existing multi-selection until click. Chromium suppresses click after a drag,
+			// so dragging any selected card keeps the complete selection snapshot.
+			state.selectedIndex = index;
+			return;
+		}
+		this.selectImageGridItem(index, event);
+	}
+
+	private completeImageGridItemPointerSelection(state: TurboFileImageGridState, index: number, event: MouseEvent): void {
+		if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || !state.selectedIndexes.has(index) || state.selectedIndexes.size <= 1) {
+			return;
 		}
 		this.selectImageGridItem(index, event);
 	}
@@ -13132,6 +13175,7 @@ export class TurboFileEditor extends EditorPane {
 		const thumbnailSrc = image.thumbnailUrl || (image.thumbnailContent ? `data:${image.thumbnailMime};base64,${image.thumbnailContent}` : '');
 		if (thumbnailSrc) {
 			const thumb = document.createElement('img');
+			thumb.draggable = false;
 			thumb.loading = 'eager';
 			thumb.decoding = 'async';
 			this.applyImageGridCardImageSize(thumb, cardSize);

@@ -18,6 +18,7 @@ suite('TurboFileNativeDragSession', () => {
 		assert.deepStrictEqual({
 			preparedState: prepared.state,
 			frozenItems: prepared.items,
+			allowWindowsHandoff: prepared.allowWindowsHandoff,
 			draggingState: dragging.state,
 			droppedState: dropped.state,
 			target: dropped.internalTarget,
@@ -25,11 +26,17 @@ suite('TurboFileNativeDragSession', () => {
 		}, {
 			preparedState: 'preparing',
 			frozenItems: [{ path: '/source/a.txt', name: 'a.txt' }],
+			allowWindowsHandoff: true,
 			draggingState: 'dragging',
 			droppedState: 'dropped-internal',
 			target: { kind: 'pane', side: 'right', initiatedAt: 42 },
 			completedState: 'completed'
 		});
+	});
+
+	test('can lock image-grid sessions to internal pane drops', () => {
+		const session = createTurboFileNativeDragSession('grid-session', 'left', 'copy', [{ path: '/source/a.png', name: 'a.png' }], false);
+		assert.strictEqual(session.allowWindowsHandoff, false);
 	});
 
 	test('keeps the first internal target and ignores invalid late transitions', () => {
@@ -67,7 +74,7 @@ suite('TurboFileNativeDragSession', () => {
 		], ['canceled', 'failed', 'completed']);
 	});
 
-	test('hands zero-coordinate and boundary drag events to Windows', () => {
+	test('ignores Chromium zero-coordinate samples but hands real boundary exits to Windows', () => {
 		const bounds = { width: 1920, height: 1080 };
 
 		assert.deepStrictEqual({
@@ -77,7 +84,7 @@ suite('TurboFileNativeDragSession', () => {
 			rightBoundary: shouldHandoffTurboFileDragToWindows({ clientX: 1919, clientY: 540, screenX: 2019, screenY: 540 }, bounds)
 		}, {
 			inside: false,
-			zeroCoordinates: true,
+			zeroCoordinates: false,
 			leftBoundary: true,
 			rightBoundary: true
 		});

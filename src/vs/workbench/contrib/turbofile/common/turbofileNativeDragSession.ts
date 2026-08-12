@@ -24,6 +24,7 @@ export interface TurboFileNativeDragSession<T> {
 	readonly sourceSide: 'left' | 'right';
 	readonly operation: TurboFileDragOperation;
 	readonly items: readonly T[];
+	readonly allowWindowsHandoff: boolean;
 	readonly state: TurboFileNativeDragSessionState;
 	readonly internalTarget?: TurboFileNativeDragTarget;
 }
@@ -42,27 +43,32 @@ export interface TurboFileNativeDragViewportBounds {
 
 /**
  * Returns whether Chromium's file drag has left the workbench and must be handed to Windows OLE.
- * Chromium can report every pointer coordinate as zero when a fast drag exits the native window;
- * that event is an exit signal rather than an unusable sample and must not be ignored.
+ * Chromium can emit an all-zero sample while an HTML drag is still inside the Electron window,
+ * so that ambiguous sample must not be treated as proof that the pointer left the workbench.
  */
 export function shouldHandoffTurboFileDragToWindows(position: TurboFileNativeDragPointerPosition, bounds: TurboFileNativeDragViewportBounds): boolean {
 	const hasZeroCoordinates = position.clientX === 0
 		&& position.clientY === 0
 		&& position.screenX === 0
 		&& position.screenY === 0;
-	return hasZeroCoordinates
-		|| position.clientX <= 0
+	// Chromium periodically emits an all-zero drag sample while the pointer is still inside an
+	// Electron window. Treating it as a window exit steals pane-to-pane drops for image-grid cards.
+	if (hasZeroCoordinates) {
+		return false;
+	}
+	return position.clientX <= 0
 		|| position.clientY <= 0
 		|| position.clientX >= bounds.width - 1
 		|| position.clientY >= bounds.height - 1;
 }
 
-export function createTurboFileNativeDragSession<T>(id: string, sourceSide: 'left' | 'right', operation: TurboFileDragOperation, items: readonly T[]): TurboFileNativeDragSession<T> {
+export function createTurboFileNativeDragSession<T>(id: string, sourceSide: 'left' | 'right', operation: TurboFileDragOperation, items: readonly T[], allowWindowsHandoff: boolean = true): TurboFileNativeDragSession<T> {
 	return {
 		id,
 		sourceSide,
 		operation,
 		items: Object.freeze([...items]),
+		allowWindowsHandoff,
 		state: 'preparing'
 	};
 }
