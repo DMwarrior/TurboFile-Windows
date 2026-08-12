@@ -285,7 +285,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(!listLocalTrash.includes('Promise.all(entries.map'));
 	});
 
-	test('queues every file-system mutation on its device key', () => {
+	test('starts file-system mutations directly without blocking unrelated work', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const createDirectory = block(service, 'async createDirectory', 'private async createDirectoryCore');
 		const writeFile = block(service, 'async writeFile', 'private async writeFileCore');
@@ -293,9 +293,13 @@ suite('TurboFileMutationStabilityStatic', () => {
 		const compress = block(service, 'async compressPath', 'private async compressPathCore');
 		const extract = block(service, 'async extractPath', 'private async extractPathCore');
 
+		assert.ok(createDirectory.includes('return this.createDirectoryCore(endpoint);'));
+		assert.ok(writeFile.includes('return this.writeFileCore(endpoint, content, encoding);'));
+		assert.ok(rename.includes('return this.renamePathCore(endpoint, targetPath);'));
+		assert.ok(compress.includes('await this.compressPathCore(endpoint, targetPath, progressId)'));
+		assert.ok(extract.includes('await this.extractPathCore(endpoint, targetDirectory, progressId)'));
 		for (const mutation of [createDirectory, writeFile, rename, compress, extract]) {
-			assert.ok(mutation.includes('this.fileOperationQueue.run'));
-			assert.ok(mutation.includes('getFileOperationDeviceKeys(endpoint)'));
+			assert.ok(!mutation.includes('fileOperationQueue'));
 		}
 	});
 

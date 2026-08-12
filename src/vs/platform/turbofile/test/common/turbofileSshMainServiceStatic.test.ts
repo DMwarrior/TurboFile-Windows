@@ -41,7 +41,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(block.includes('this.remoteDirectoryListingGenerations.isCurrent'));
 	});
 
-	test('uses path locks and adaptive device capacity without nesting the operation queue', () => {
+	test('starts top-level transfers immediately while retaining adaptive in-batch workers', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const transferFile = methodBlock(service, 'async transferFile', 'private async transferFileCore');
 		const transferBatch = methodBlock(service, 'async transferBatch', 'private async transferBatchCore');
@@ -49,32 +49,25 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const uploadVerification = methodBlock(service, 'private async verifySshUploadSize', 'private async tryLocalToSshTarTransfer');
 		const deletePathsCore = methodBlock(service, 'private async deletePathsCore', 'private async deleteRemotePathNative');
 
-		assert.ok(service.includes("import { TurboFileOperationCanceledError, TurboFileOperationQueue } from '../common/turbofileOperationQueue.js';"));
-		assert.ok(service.includes('private readonly fileOperationQueue = new TurboFileOperationQueue();'));
+		assert.ok(!service.includes("from '../common/turbofileOperationQueue.js'"));
+		assert.ok(!service.includes('fileOperationQueue'));
+		assert.ok(!service.includes('Waiting for device operation queue.'));
+		assert.ok(!service.includes('function getTransferOperationAccess('));
 		assert.ok(service.includes('function getFileOperationDeviceKey('));
 		assert.ok(service.includes("return 'local';"));
 		assert.ok(service.includes('connection.username'));
 		assert.ok(service.includes('connection.host'));
 		assert.ok(service.includes('connection.port'));
-		assert.ok(service.includes("operation === 'move'"));
-		assert.ok(service.includes("getTurboFileTransferPathKey(source, 'path')"));
-		assert.ok(service.includes("getTurboFileTransferPathKey(target, targetIsDirectory ? 'path' : 'parent')"));
-		assert.ok(service.includes("scheduler.getDeviceCapacity(endpoint, sourceType === 'directory' ? 'directory' : 'file')"));
-		assert.ok(service.includes("read: [sourceDeviceKey, targetDeviceKey, ...(operation === 'copy' ? sourcePathKeys : [])]"));
-		assert.ok(service.includes("write: operation === 'move' ? [...sourcePathKeys, targetPathKey] : [targetPathKey]"));
 		assert.ok(service.includes('function getBatchTransferSchedulingSnapshot('));
 		assert.ok(service.includes("initialAttempt?.protocol === 'scp' || initialAttempt?.protocol === 'sftp'"));
 		assert.ok(service.includes('const workerLimit = usesConcurrentWorkers ? maximumWorkers : 1;'));
-		assert.ok(service.includes('this.fileOperationQueue.cancel(progressId)'));
 
-		assert.ok(transferFile.includes('this.fileOperationQueue.runWithAccess'));
-		assert.ok(transferFile.includes("getTransferOperationAccess(request.source, request.target, 'copy', this.transferScheduler, false, request.sourceType)"));
-		assert.ok(transferFile.includes('id: request.progressId'));
-		assert.ok(transferBatch.includes('this.fileOperationQueue.runWithAccess'));
+		assert.ok(transferFile.includes('const result = await this.transferFileCore(request);'));
+		assert.ok(!transferFile.includes('runWithAccess'));
 		assert.ok(transferBatch.includes('const scheduling = getBatchTransferSchedulingSnapshot(request, items, this.transferScheduler);'));
 		assert.ok(transferBatch.includes('schedulerConcurrency: scheduling.workerLimit'));
-		assert.ok(transferBatch.includes("getTransferOperationAccess(request.source, request.targetDirectory, operation, this.transferScheduler, true, items.some(item => item.sourceType === 'directory') ? 'directory' : 'file', scheduling.capacityWeight, items.map(item => item.sourcePath))"));
-		assert.ok(transferBatch.includes('id: request.progressId'));
+		assert.ok(transferBatch.includes('const result = await this.transferBatchCore(scheduledRequest);'));
+		assert.ok(!transferBatch.includes('runWithAccess'));
 
 		assert.ok(concurrentBatch.includes('this.transferFileCore({'));
 		assert.ok(!concurrentBatch.includes('this.transferFile({'));
@@ -83,7 +76,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive, progressId)'));
 	});
 
-	test('queues recycle-bin, delete, and same-device move writes on their device keys', () => {
+	test('starts recycle-bin, delete, and same-device move operations independently', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const moveToTrash = methodBlock(service, 'async movePathsToTrash', 'private async movePathsToTrashCore');
 		const restoreTrash = methodBlock(service, 'async restoreTrashItems', 'private async restoreTrashItemsCore');
@@ -92,15 +85,15 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const deletePaths = methodBlock(service, 'async deletePaths', 'private async deletePathsCore');
 		const movePaths = methodBlock(service, 'async movePathsIntoDirectory', 'private async movePathsIntoDirectoryCore');
 
+		assert.ok(moveToTrash.includes('await this.movePathsToTrashCore(request)'));
+		assert.ok(restoreTrash.includes('return this.restoreTrashItemsCore(request);'));
+		assert.ok(permanentDelete.includes('await this.permanentlyDeleteTrashItemsCore(request)'));
+		assert.ok(emptyTrash.includes('await this.emptyTrashCore(device, progressId)'));
+		assert.ok(deletePaths.includes('await this.deletePathsCore(endpoints, recursive, progressId)'));
+		assert.ok(movePaths.includes('await this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId)'));
 		for (const block of [moveToTrash, restoreTrash, permanentDelete, emptyTrash, deletePaths, movePaths]) {
-			assert.ok(block.includes('this.fileOperationQueue.run'));
+			assert.ok(!block.includes('fileOperationQueue'));
 		}
-		assert.ok(moveToTrash.includes('getFileOperationDeviceKey(request.device)'));
-		assert.ok(restoreTrash.includes('getFileOperationDeviceKey(request.device)'));
-		assert.ok(permanentDelete.includes('getFileOperationDeviceKey(request.device)'));
-		assert.ok(emptyTrash.includes('getFileOperationDeviceKey(device)'));
-		assert.ok(deletePaths.includes('getFileOperationDeviceKeys(...endpoints)'));
-		assert.ok(movePaths.includes('getFileOperationDeviceKeys(...sources)'));
 	});
 
 	test('waits for transport shutdown before acknowledging cancellation', () => {
@@ -147,17 +140,18 @@ suite('TurboFileSshMainServiceStatic', () => {
 
 	test('threads cancellation ids through file mutations', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const operations = [
-			methodBlock(service, 'async movePathsToTrash', 'private async movePathsToTrashCore'),
-			methodBlock(service, 'async deletePaths', 'private async deletePathsCore'),
-			methodBlock(service, 'async compressPath', 'private async compressPathCore'),
-			methodBlock(service, 'async extractPath', 'private async extractPathCore')
-		];
+		const moveToTrash = methodBlock(service, 'async movePathsToTrash', 'private async movePathsToTrashCore');
+		const deletePaths = methodBlock(service, 'async deletePaths', 'private async deletePathsCore');
+		const compressPath = methodBlock(service, 'async compressPath', 'private async compressPathCore');
+		const extractPath = methodBlock(service, 'async extractPath', 'private async extractPathCore');
 
-		for (const operation of operations) {
+		for (const operation of [moveToTrash, deletePaths, compressPath, extractPath]) {
 			assert.ok(operation.includes('progressId'));
-			assert.ok(operation.includes('id:'));
 		}
+		assert.ok(moveToTrash.includes('this.movePathsToTrashCore(request)'));
+		assert.ok(deletePaths.includes('this.deletePathsCore(endpoints, recursive, progressId)'));
+		assert.ok(compressPath.includes('this.compressPathCore(endpoint, targetPath, progressId)'));
+		assert.ok(extractPath.includes('this.extractPathCore(endpoint, targetDirectory, progressId)'));
 		assert.ok(service.includes('this.throwIfTransferCanceled(progressId)'));
 		assert.ok(service.includes('progressId: request.progressId'));
 	});

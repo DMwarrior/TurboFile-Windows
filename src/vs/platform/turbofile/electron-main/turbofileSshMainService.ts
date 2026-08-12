@@ -29,7 +29,6 @@ import { isTurboFileSafeDeletePath, runTurboFilePosixBatchDelete, runTurboFileSi
 import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js';
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
 import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetadataBatch.js';
-import { TurboFileOperationCanceledError, TurboFileOperationQueue } from '../common/turbofileOperationQueue.js';
 import { ITurboFilePreparedDirectRouteSnapshot, TurboFilePreparedDirectRouteCache } from '../common/turbofilePreparedDirectRouteCache.js';
 import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
 import { coordinateTurboFileDirectRouteProbe, TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS } from '../common/turbofileDirectRouteProbe.js';
@@ -42,7 +41,7 @@ import { withTurboFileTimeout } from '../common/turbofileTimeout.js';
 import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { classifyTurboFileTransferFailure, getTurboFileTransferProgressState, getTurboFileTransferProtocolName, ITurboFileTransferFailure, shouldContinueTurboFileTransferPlan } from '../common/turbofileTransferFailure.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
-import { getTurboFileTransferBatchPathKeys, getTurboFileTransferDeviceKey, getTurboFileTransferPathKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
+import { getTurboFileTransferDeviceKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
 import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
@@ -550,35 +549,7 @@ function getFileOperationDeviceKey(device: TurboFileOperationDevice): string {
 	return `ssh:${device.label?.trim().toLowerCase() || 'unknown'}`;
 }
 
-function getFileOperationDeviceKeys(...devices: TurboFileOperationDevice[]): string[] {
-	return [...new Set(devices.map(getFileOperationDeviceKey))];
-}
-
-function getTransferOperationAccess(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, operation: 'copy' | 'move', scheduler: TurboFileTransferScheduler, targetIsDirectory = false, sourceType: TurboFileFileType = 'file', capacityWeight = 1, batchSourcePaths?: readonly string[]): { readonly read: readonly string[]; readonly write: readonly string[]; readonly limited: readonly { key: string; limit: number; weight: number }[] } {
-	const sourceDeviceKey = getFileOperationDeviceKey(source);
-	const targetDeviceKey = getFileOperationDeviceKey(target);
-	const sourcePathKeys = batchSourcePaths
-		? getTurboFileTransferBatchPathKeys(source, batchSourcePaths)
-		: [getTurboFileTransferPathKey(source, 'path')];
-	const targetPathKey = getTurboFileTransferPathKey(target, targetIsDirectory ? 'path' : 'parent');
-	const limitedByDevice = new Map<string, number>();
-	for (const endpoint of [source, target]) {
-		const key = `capacity:${getTurboFileTransferDeviceKey(endpoint)}`;
-		const limit = scheduler.getDeviceCapacity(endpoint, sourceType === 'directory' ? 'directory' : 'file');
-		limitedByDevice.set(key, Math.min(limitedByDevice.get(key) ?? limit, limit));
-	}
-	const effectiveWeight = Math.min(
-		Math.max(1, capacityWeight),
-		...[...limitedByDevice.values()]
-	);
-	return {
-		read: [sourceDeviceKey, targetDeviceKey, ...(operation === 'copy' ? sourcePathKeys : [])],
-		write: operation === 'move' ? [...sourcePathKeys, targetPathKey] : [targetPathKey],
-		limited: [...limitedByDevice].map(([key, limit]) => ({ key, limit, weight: effectiveWeight }))
-	};
-}
-
-function getBatchTransferSchedulingSnapshot(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], scheduler: TurboFileTransferScheduler): { readonly workerLimit: number; readonly capacityWeight: number } {
+function getBatchTransferSchedulingSnapshot(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], scheduler: TurboFileTransferScheduler): { readonly workerLimit: number } {
 	const sourceType: TurboFileFileType = items.some(item => item.sourceType === 'directory') ? 'directory' : 'file';
 	const sourceCapacity = scheduler.getDeviceCapacity(request.source, sourceType);
 	const targetCapacity = scheduler.getDeviceCapacity(request.targetDirectory, sourceType);
@@ -599,7 +570,7 @@ function getBatchTransferSchedulingSnapshot(request: ITurboFileBatchTransferRequ
 	}).attempts[0];
 	const usesConcurrentWorkers = !sameLocal && !sameRemote && (initialAttempt?.protocol === 'scp' || initialAttempt?.protocol === 'sftp');
 	const workerLimit = usesConcurrentWorkers ? maximumWorkers : 1;
-	return { workerLimit, capacityWeight: workerLimit };
+	return { workerLimit };
 }
 
 export class TurboFileSshMainService implements ITurboFileSshService {
@@ -619,7 +590,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly rsyncTimingStates = new Map<string, IRsyncTimingState>();
 	private readonly transferCancellationRequests = new Set<string>();
 	private readonly transferCancelHandlers = new Map<string, Set<() => void | Promise<void>>>();
-	private readonly fileOperationQueue = new TurboFileOperationQueue();
 	private readonly transferScheduler = new TurboFileTransferScheduler();
 	private readonly directorySftpSessions = new Map<string, Promise<IRemoteDirectorySftpSession>>();
 	private readonly readyDirectorySftpSessions = new Map<string, IRemoteDirectorySftpSession>();
@@ -712,7 +682,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		this.transferCancellationRequests.add(progressId);
-		this.fileOperationQueue.cancel(progressId);
 		const handlers = this.transferCancelHandlers.get(progressId);
 		if (handlers) {
 			// Do not acknowledge cancellation until every transport has confirmed that its process,
@@ -1096,21 +1065,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	async transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult> {
 		const strategy = getTransferStrategy(request.source, request.target);
-		const queuedAt = Date.now();
+		const startedAt = Date.now();
 		if (request.progressId) {
 			this.transferCancellationRequests.delete(request.progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.runWithAccess(
-				getTransferOperationAccess(request.source, request.target, 'copy', this.transferScheduler, false, request.sourceType),
-				() => this.transferFileCore(request),
-				{
-					id: request.progressId,
-					onQueued: () => this.fireTransferProgress(request, 0, Math.max(0, request.expectedBytes ?? 0), 'prepare', 'Waiting for device operation queue.', true, {
-						currentName: getTransferName(request.source.path)
-					})
-				}
-			);
+			const result = await this.transferFileCore(request);
 			this.recordTransferSchedulingResult(request.source, request.target, result);
 			if (!result.ok) {
 				this.fireTransferProgress(request, result.bytes, Math.max(result.bytes, request.expectedBytes ?? 0), 'transfer', result.message, true, {
@@ -1121,7 +1081,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return result;
 		} catch (error) {
 			this.recordTransferSchedulingFailure(request.source, request.target, error);
-			const canceled = error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(request.progressId);
+			const canceled = this.isTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, Math.max(0, request.expectedBytes ?? 0), 'transfer', canceled ? TRANSFER_CANCELED_MESSAGE : error instanceof Error ? error.message : String(error), true, {
 				strategy,
 				state: canceled ? 'canceled' : 'failed'
@@ -1137,7 +1097,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				bytes: 0,
 				message: canceled ? TRANSFER_CANCELED_MESSAGE : error instanceof Error ? error.message : String(error),
 				canceled,
-				durationMs: Date.now() - queuedAt
+				durationMs: Date.now() - startedAt
 			};
 		}
 	}
@@ -3498,25 +3458,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const startedAt = Date.now();
 		const strategy = getTransferStrategy(request.source, request.targetDirectory);
 		const items = request.items.filter(item => !!item.sourcePath && !!item.targetName);
-		const operation = request.operation === 'move' ? 'move' : 'copy';
 		if (request.progressId) {
 			this.transferCancellationRequests.delete(request.progressId);
 		}
 		const scheduling = getBatchTransferSchedulingSnapshot(request, items, this.transferScheduler);
 		const scheduledRequest: ITurboFileBatchTransferRequest = { ...request, schedulerConcurrency: scheduling.workerLimit };
 		try {
-			const result = await this.fileOperationQueue.runWithAccess(
-				getTransferOperationAccess(request.source, request.targetDirectory, operation, this.transferScheduler, true, items.some(item => item.sourceType === 'directory') ? 'directory' : 'file', scheduling.capacityWeight, items.map(item => item.sourcePath)),
-				() => this.transferBatchCore(scheduledRequest),
-				{
-					id: request.progressId,
-					onQueued: () => this.fireTransferProgress(request, 0, Math.max(0, request.expectedBytes ?? 0), 'prepare', 'Waiting for device operation queue.', true, {
-						completedItems: 0,
-						totalItems: items.length,
-						currentName: items[0]?.displayName ?? items[0]?.targetName
-					})
-				}
-			);
+			const result = await this.transferBatchCore(scheduledRequest);
 			this.recordTransferSchedulingResult(request.source, request.targetDirectory, result);
 			if (!result.ok) {
 				this.fireTransferProgress(request, result.bytes, Math.max(result.bytes, request.expectedBytes ?? 0), 'transfer', result.message, true, {
@@ -3529,7 +3477,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return result;
 		} catch (error) {
 			this.recordTransferSchedulingFailure(request.source, request.targetDirectory, error);
-			const canceled = error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(request.progressId);
+			const canceled = this.isTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, Math.max(0, request.expectedBytes ?? 0), 'transfer', canceled ? TRANSFER_CANCELED_MESSAGE : error instanceof Error ? error.message : String(error), true, {
 				strategy,
 				completedItems: 0,
@@ -4846,10 +4794,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async createDirectory(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult> {
-		return this.fileOperationQueue.run(
-			getFileOperationDeviceKeys(endpoint),
-			() => this.createDirectoryCore(endpoint)
-		);
+		return this.createDirectoryCore(endpoint);
 	}
 
 	private async createDirectoryCore(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileFileOperationResult> {
@@ -4870,18 +4815,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async movePathsToTrash(request: ITurboFileMoveToTrashRequest): Promise<ITurboFileTrashOperationResult> {
-		const deviceKeys = [
-			getFileOperationDeviceKey(request.device),
-			...request.sources.map(source => getFileOperationDeviceKey(source.endpoint))
-		];
 		if (request.progressId) {
 			this.transferCancellationRequests.delete(request.progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(deviceKeys, () => this.movePathsToTrashCore(request), { id: request.progressId });
+			const result = await this.movePathsToTrashCore(request);
 			return this.isTransferCanceled(request.progressId) ? this.createCanceledTrashOperationResult() : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(request.progressId)) {
+			if (this.isTransferCanceled(request.progressId)) {
 				return this.createCanceledTrashOperationResult();
 			}
 			throw error;
@@ -4968,10 +4909,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async restoreTrashItems(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult> {
-		return this.fileOperationQueue.run(
-			[getFileOperationDeviceKey(request.device)],
-			() => this.restoreTrashItemsCore(request)
-		);
+		return this.restoreTrashItemsCore(request);
 	}
 
 	private async restoreTrashItemsCore(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult> {
@@ -4995,10 +4933,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async renameTrashItem(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult> {
-		return this.fileOperationQueue.run(
-			[getFileOperationDeviceKey(request.device)],
-			() => this.renameTrashItemCore(request)
-		);
+		return this.renameTrashItemCore(request);
 	}
 
 	private async renameTrashItemCore(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult> {
@@ -5031,14 +4966,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(request.progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				[getFileOperationDeviceKey(request.device)],
-				() => this.permanentlyDeleteTrashItemsCore(request),
-				{ id: request.progressId }
-			);
+			const result = await this.permanentlyDeleteTrashItemsCore(request);
 			return this.isTransferCanceled(request.progressId) ? this.createCanceledTrashOperationResult() : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(request.progressId)) {
+			if (this.isTransferCanceled(request.progressId)) {
 				return this.createCanceledTrashOperationResult();
 			}
 			throw error;
@@ -5069,14 +5000,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				[getFileOperationDeviceKey(device)],
-				() => this.emptyTrashCore(device, progressId),
-				{ id: progressId }
-			);
+			const result = await this.emptyTrashCore(device, progressId);
 			return this.isTransferCanceled(progressId) ? this.createCanceledTrashOperationResult() : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+			if (this.isTransferCanceled(progressId)) {
 				return this.createCanceledTrashOperationResult();
 			}
 			throw error;
@@ -5901,14 +5828,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				getFileOperationDeviceKeys(...endpoints),
-				() => this.deletePathsCore(endpoints, recursive, progressId),
-				{ id: progressId }
-			);
+			const result = await this.deletePathsCore(endpoints, recursive, progressId);
 			return this.isTransferCanceled(progressId) ? { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true } : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 				return { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true };
 			}
 			throw error;
@@ -5987,10 +5910,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult> {
-		return this.fileOperationQueue.run(
-			getFileOperationDeviceKeys(endpoint),
-			() => this.renamePathCore(endpoint, targetPath)
-		);
+		return this.renamePathCore(endpoint, targetPath);
 	}
 
 	private async renamePathCore(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult> {
@@ -6014,14 +5934,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				getFileOperationDeviceKeys(...sources),
-				() => this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId),
-				{ id: progressId }
-			);
+			const result = await this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId);
 			return this.isTransferCanceled(progressId) ? { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true } : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+			if (this.isTransferCanceled(progressId)) {
 				return { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true };
 			}
 			throw error;
@@ -6094,18 +6010,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const size = await this.fileOperationQueue.runShared(
-				getFileOperationDeviceKeys(endpoint),
-				() => endpoint.kind === 'local'
-					? this.getCancelableLocalPathSize(endpoint.path, progressId)
-					: this.getRemotePathSizeByCommand(endpoint, progressId),
-				{ id: progressId }
-			);
+			const size = await (endpoint.kind === 'local'
+				? this.getCancelableLocalPathSize(endpoint.path, progressId)
+				: this.getRemotePathSizeByCommand(endpoint, progressId));
 			this.throwIfTransferCanceled(progressId);
 			const humanSize = await this.getPathHumanSize(endpoint, size);
 			return { ok: true, message: 'Path size calculated.', size, humanSize };
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 				return { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true, size: 0 };
 			}
 			return {
@@ -6725,10 +6637,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	async writeFile(endpoint: ITurboFileTransferEndpoint, content: string, encoding: TurboFileContentEncoding = 'utf8'): Promise<ITurboFileFileOperationResult> {
-		return this.fileOperationQueue.run(
-			getFileOperationDeviceKeys(endpoint),
-			() => this.writeFileCore(endpoint, content, encoding)
-		);
+		return this.writeFileCore(endpoint, content, encoding);
 	}
 
 	private async writeFileCore(endpoint: ITurboFileTransferEndpoint, content: string, encoding: TurboFileContentEncoding): Promise<ITurboFileFileOperationResult> {
@@ -6766,14 +6675,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				getFileOperationDeviceKeys(endpoint),
-				() => this.compressPathCore(endpoint, targetPath, progressId),
-				{ id: progressId }
-			);
+			const result = await this.compressPathCore(endpoint, targetPath, progressId);
 			return this.isTransferCanceled(progressId) ? { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true } : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+			if (this.isTransferCanceled(progressId)) {
 				return { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true };
 			}
 			throw error;
@@ -6852,14 +6757,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			this.transferCancellationRequests.delete(progressId);
 		}
 		try {
-			const result = await this.fileOperationQueue.run(
-				getFileOperationDeviceKeys(endpoint),
-				() => this.extractPathCore(endpoint, targetDirectory, progressId),
-				{ id: progressId }
-			);
+			const result = await this.extractPathCore(endpoint, targetDirectory, progressId);
 			return this.isTransferCanceled(progressId) ? { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true } : result;
 		} catch (error) {
-			if (error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+			if (this.isTransferCanceled(progressId)) {
 				return { ok: false, message: TRANSFER_CANCELED_MESSAGE, canceled: true };
 			}
 			throw error;
@@ -9862,7 +9763,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				this.rememberRemoteMutationShellCapability(deviceKey, capability, true);
 				return result;
 			} catch (error) {
-				if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 					throw error;
 				}
 				nativeError = error instanceof Error ? error : new Error(String(error));
@@ -9880,7 +9781,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 				return result;
 			} catch (error) {
-				if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+				if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 					throw error;
 				}
 				portableError = error instanceof Error ? error : new Error(String(error));
@@ -9897,7 +9798,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			return result;
 		} catch (error) {
-			if (error instanceof TurboFileTransferCanceledError || error instanceof TurboFileOperationCanceledError || this.isTransferCanceled(progressId)) {
+			if (error instanceof TurboFileTransferCanceledError || this.isTransferCanceled(progressId)) {
 				throw error;
 			}
 			if (!nativeError) {

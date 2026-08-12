@@ -300,7 +300,7 @@ export interface ITurboFileBatchTransferRequest {
 	readonly strategyHint?: 'auto' | 'direct' | 'relay';
 	/** Restricts child transfers to the protocol selected by the outer batch plan. */
 	readonly attemptProtocol?: TurboFileTransferAttemptProtocol;
-	/** Immutable device-capacity snapshot shared by the queue claim and batch workers. */
+	/** Per-batch worker count selected for protocol-internal file concurrency. */
 	readonly schedulerConcurrency?: number;
 	readonly clientStartedAt?: number;
 }

@@ -273,7 +273,8 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(prewarm.includes('this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_REFRESH_MS)'));
 		assert.ok(prewarm.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS[retryIndex]'));
 		assert.ok(editor.includes('PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000]'));
-		assert.ok(editor.includes("this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')"));
+		assert.ok(!editor.includes('PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS'));
+		assert.ok(editor.includes('private readonly preparedTransferPairScheduler = this._register(new RunOnceScheduler(() => {'));
 		assert.ok(prewarm.includes('if (this.isEditorVisible) {'));
 		assert.ok(prewarm.includes('this.invalidatePreparedTransferPair();'));
 		assert.ok(prewarm.includes('this.preparedTransferPairGeneration === generation'));
@@ -317,6 +318,19 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(contextHelpers.includes('this.paneDeviceSnapshots.delete(snapshotKey);'));
 		assert.ok(batch.includes('this.toTransferEndpoint(targetDevice, transferContext.target.directoryPath)'));
 		assert.ok(!batch.includes('this.toTransferEndpoint(targetDevice, this.paneStates[targetSide].path)'));
+	});
+
+	test('does not pause background maintenance while transfers are running', () => {
+		const editor = readEditor();
+		const preparedSchedulerStart = editor.indexOf('private readonly preparedTransferPairScheduler');
+		const preparedScheduler = editor.slice(preparedSchedulerStart, editor.indexOf('private readonly postTransferReconcileContexts', preparedSchedulerStart));
+		const reconcileSchedulerStart = editor.indexOf('private readonly postTransferReconcileScheduler');
+		const reconcileScheduler = editor.slice(reconcileSchedulerStart, editor.indexOf('\n\tconstructor(', reconcileSchedulerStart));
+
+		assert.ok(preparedScheduler.includes('this.prewarmCurrentTransferPair(true);'));
+		assert.ok(!preparedScheduler.includes("task.kind === 'transfer'"));
+		assert.ok(reconcileScheduler.includes('this.postTransferReconcileContexts.clear();'));
+		assert.ok(!reconcileScheduler.includes("task.kind === 'transfer'"));
 	});
 
 	test('finishes failed or canceled batches before starting non-blocking reconciliation', () => {

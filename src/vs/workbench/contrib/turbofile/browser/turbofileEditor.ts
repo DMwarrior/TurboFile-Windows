@@ -515,7 +515,6 @@ const PANE_DEVICE_SNAPSHOT_TTL_MS = 300000;
 const PANE_FAST_DOUBLE_CLICK_MS = 300;
 const PREPARED_TRANSFER_PAIR_REFRESH_MS = 60 * 1000;
 const PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000] as const;
-const PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS = 5000;
 // Keep the consistency scan out of the next user-initiated transfer's startup window. The target
 // row is already patched synchronously, so waiting for one full idle second has no visible cost.
 const POST_TRANSFER_RECONCILE_DELAY_MS = 1000;
@@ -879,20 +878,12 @@ export class TurboFileEditor extends EditorPane {
 	private preparedTransferPairRetryCount = 0;
 	private readonly preparedTransferPairScheduler = this._register(new RunOnceScheduler(() => {
 		if (this.isEditorVisible) {
-			if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
-				this.preparedTransferPairScheduler.schedule(PREPARED_TRANSFER_PAIR_BUSY_RETRY_MS);
-			} else {
-				this.prewarmCurrentTransferPair(true);
-			}
+			this.prewarmCurrentTransferPair(true);
 		}
 	}, PREPARED_TRANSFER_PAIR_REFRESH_MS));
 	private readonly postTransferReconcileContexts = new Map<'left' | 'right', TurboFileTransferLocation>();
 	private readonly postTransferReconcileGeneration: Record<'left' | 'right', number> = { left: 0, right: 0 };
 	private readonly postTransferReconcileScheduler = this._register(new RunOnceScheduler(() => {
-		if (this.tasks.some(task => task.kind === 'transfer' && task.status === 'running')) {
-			this.postTransferReconcileScheduler.schedule(POST_TRANSFER_RECONCILE_DELAY_MS);
-			return;
-		}
 		const contexts = Array.from(this.postTransferReconcileContexts.entries());
 		this.postTransferReconcileContexts.clear();
 		for (const [side, context] of contexts) {
