@@ -1,78 +1,134 @@
-# Visual Studio Code - Open Source ("Code - OSS")
-[![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-[![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)
-[![Gitter](https://img.shields.io/badge/chat-on%20gitter-yellow.svg)](https://gitter.im/Microsoft/vscode)
-
-## The Repository
-
-This repository ("`Code - OSS`") is where we (Microsoft) develop the [Visual Studio Code](https://code.visualstudio.com) product together with the community. Not only do we work on code and issues here, but we also publish our [roadmap](https://github.com/microsoft/vscode/wiki/Roadmap), [monthly iteration plans](https://github.com/microsoft/vscode/wiki/Iteration-Plans), and our [endgame plans](https://github.com/microsoft/vscode/wiki/Running-the-Endgame). This source code is available to everyone under the standard [MIT license](https://github.com/microsoft/vscode/blob/main/LICENSE.txt).
-
-## Visual Studio Code
+# ⚡ TurboFile (极速传)
 
 <p align="center">
-  <img alt="VS Code in action" src="https://user-images.githubusercontent.com/35271042/118224532-3842c400-b438-11eb-923d-a5f66fa6785a.png">
+  <strong>A high-speed dual-pane file workspace for Windows, SSH servers, NAS devices, and edge systems.</strong>
 </p>
 
-[Visual Studio Code](https://code.visualstudio.com) is a distribution of the `Code - OSS` repository with Microsoft-specific customizations released under a traditional [Microsoft product license](https://code.visualstudio.com/License/).
+<p align="center">
+  Move data directly between devices, preview remote image datasets, edit files, and work in a terminal—without constantly switching tools.
+</p>
 
-[Visual Studio Code](https://code.visualstudio.com) combines the simplicity of a code editor with what developers need for their core edit-build-debug cycle. It provides comprehensive code editing, navigation, and understanding support along with lightweight debugging, a rich extensibility model, and lightweight integration with existing tools.
+<p align="center">
+  <a href="README_CN.md">简体中文</a> · <strong>English</strong>
+</p>
 
-Visual Studio Code is updated monthly with new features and bug fixes. You can download it for Windows, macOS, and Linux on [Visual Studio Code's website](https://code.visualstudio.com/Download). To get the latest releases every day, install the [Insiders build](https://code.visualstudio.com/insiders).
+<p align="center">
+  <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/DMwarrior/TurboFile-Windows?style=flat-square&color=2563eb"></a>
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square">
+  <img alt="Protocols" src="https://img.shields.io/badge/transfer-SCP%20%7C%20SFTP%20%7C%20tar%20%7C%20rsync-14b8a6?style=flat-square">
+</p>
 
-## Contributing
+<p align="center">
+  <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest"><strong>Download the latest Windows installer</strong></a>
+</p>
 
-There are many ways in which you can participate in this project, for example:
+![TurboFile dual-pane workspace](docs/assets/screenshots/turbofile-home.png)
 
-* [Submit bugs and feature requests](https://github.com/microsoft/vscode/issues), and help us verify as they are checked in
-* Review [source code changes](https://github.com/microsoft/vscode/pulls)
-* Review the [documentation](https://github.com/microsoft/vscode-docs) and make pull requests for anything from typos to and new content.
+## Why TurboFile?
 
-If you are interested in fixing issues and contributing directly to the code base,
-please see the document [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute), which covers the following:
+Traditional remote file tools often route a device-to-device copy through Windows: download from device A, then upload to device B. TurboFile probes both directions in the background, caches the viable route, and prefers a direct transfer when the endpoints can reach one another. When direct transfer is unavailable, it falls back to a compatible relay path.
 
-* [How to build and run from source](https://github.com/microsoft/vscode/wiki/How-to-Contribute)
-* [The development workflow, including debugging and running tests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#debugging)
-* [Coding guidelines](https://github.com/microsoft/vscode/wiki/Coding-Guidelines)
-* [Submitting pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests)
-* [Finding an issue to work on](https://github.com/microsoft/vscode/wiki/How-to-Contribute#where-to-contribute)
-* [Contributing to translations](https://aka.ms/vscodeloc)
+The result is one workspace for local disks, Linux servers, NAS storage, and lightweight edge devices—with the transfer protocol selected around the actual workload.
 
-## Feedback
+## Highlights
 
-* Ask a question on [Stack Overflow](https://stackoverflow.com/questions/tagged/vscode)
-* [Request a new feature](CONTRIBUTING.md)
-* Upvote [popular feature requests](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-* [File an issue](https://github.com/microsoft/vscode/issues)
-* Connect with the extension author community on [GitHub Discussions](https://github.com/microsoft/vscode-discussions/discussions) or [Slack](https://aka.ms/vscode-dev-community)
-* Follow [@code](https://x.com/code) and let us know what you think!
+| Capability | What it gives you |
+| --- | --- |
+| **Dual-pane workflow** | Browse any two local or remote locations and move files with drag-and-drop, copy/paste, or toolbar actions. |
+| **Direct device transfer** | Detect reachable directions in advance and avoid a Windows relay when a valid direct route exists. |
+| **Adaptive transfer strategies** | Use SCP/SFTP for compatibility, tar streaming for folders and many small files, and rsync for incremental workloads. |
+| **Remote image workspace** | Open remote folders as an image grid, compare both sides, change grid density, sort by file size or image dimensions, and choose thumbnail-first or original-first quality. |
+| **Integrated editing and terminal** | Edit text files and run terminal commands without leaving the file workspace. |
+| **Broad device compatibility** | Use fast shell-based paths on full systems and compatible fallbacks on NAS and incomplete edge environments. |
+| **Independent tasks** | Keep browsing, previewing, editing, and transferring while other non-conflicting operations continue. |
 
-See our [wiki](https://github.com/microsoft/vscode/wiki/Feedback-Channels) for a description of each of these channels and information on some other available community-driven channels.
+## Measured performance
 
-## Related Projects
+![TurboFile and WinSCP benchmark comparison](docs/assets/performance-comparison-en.svg)
 
-Many of the core components and extensions to VS Code live in their own repositories on GitHub. For example, the [node debug adapter](https://github.com/microsoft/vscode-node-debug) and the [mono debug adapter](https://github.com/microsoft/vscode-mono-debug) repositories are separate from each other. For a complete list, please visit the [Related Projects](https://github.com/microsoft/vscode/wiki/Related-Projects) page on our [wiki](https://github.com/microsoft/vscode/wiki).
+In the recorded test environment:
 
-## Bundled Extensions
+- A 2.32 GB mixed-file workload completed in **24.6 s** with TurboFile and **234 s** with WinSCP.
+- A single 8.2 GB file completed in **81 s** at about **107 MB/s**, versus **91 s** with WinSCP.
+- A direct device 62 → 64 transfer completed in **23.7 s** at about **102.6 MB/s**, versus a **720 s** Windows-relayed workflow.
 
-VS Code includes a set of built-in extensions located in the [extensions](extensions) folder, including grammars and snippets for many languages. Extensions that provide rich language support (inline suggestions, Go to Definition) for a language have the suffix `language-features`. For example, the `json` extension provides coloring for `JSON` and the `json-language-features` extension provides rich language support for `JSON`.
+These figures describe one specific device, network, dataset, and protocol configuration. Real-world performance depends on storage, CPU, network quality, file distribution, endpoint tools, and the selected transfer strategy.
 
-## Development Container
+<p align="center">
+  <img src="docs/assets/screenshots/transfer-speed-114mbps.png" alt="TurboFile status bar showing a measured 114.2 MB/s direct transfer" width="520">
+</p>
 
-This repository includes a Visual Studio Code Dev Containers / GitHub Codespaces development container.
+## Product tour
 
-* For [Dev Containers](https://aka.ms/vscode-remote/download/containers), use the **Dev Containers: Clone Repository in Container Volume...** command which creates a Docker volume for better disk I/O on macOS and Windows.
-  * If you already have VS Code and Docker installed, you can also click [here](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/microsoft/vscode) to get started. This will cause VS Code to automatically install the Dev Containers extension if needed, clone the source code into a container volume, and spin up a dev container for use.
+### Compare image datasets across two devices
 
-* For Codespaces, install the [GitHub Codespaces](https://marketplace.visualstudio.com/items?itemName=GitHub.codespaces) extension in VS Code, and use the **Codespaces: Create New Codespace** command.
+Use both panes as synchronized image workspaces while keeping each device and path independent.
 
-Docker / the Codespace should have at least **4 cores and 6 GB of RAM (8 GB recommended)** to run a full build. See the [development container README](.devcontainer/README.md) for more information.
+![Dual image-grid comparison](docs/assets/screenshots/dual-image-grid.png)
 
-## Code of Conduct
+### Inspect remote images without downloading folders first
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+Open a server directory directly as an image grid. Thumbnail-first mode prioritizes responsiveness; original-first mode prioritizes image quality.
 
-## License
+![Remote image grid](docs/assets/screenshots/remote-image-grid.png)
 
-Copyright (c) Microsoft Corporation. All rights reserved.
+### Manage many endpoints from one place
 
-Licensed under the [MIT](LICENSE.txt) license.
+Keep Windows, SSH, NAS, and edge-device connections together and open any two endpoints in the dual-pane workspace.
+
+![TurboFile device manager](docs/assets/screenshots/device-manager.png)
+
+### Work with files and a terminal together
+
+Keep the current remote paths visible while using the integrated terminal below them.
+
+![Integrated terminal](docs/assets/screenshots/integrated-terminal.png)
+
+## Transfer model
+
+TurboFile separates **reachability**, **protocol capability**, and **transfer strategy**:
+
+1. When both panes are available, background probes learn which direction can reach the other endpoint.
+2. The result is cached so a user action can start without repeating slow route detection.
+3. The selected protocol is checked independently from network reachability.
+4. The transfer uses the valid direct direction when possible; otherwise it uses a compatible relay or fallback path.
+5. Directories and large batches can use a streaming strategy to reduce per-file round trips.
+
+This design keeps fast paths fast without assuming every NAS or edge device exposes a complete Linux userland.
+
+## Get started
+
+1. Download [`TurboFileSetup-win32-x64-1.167.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.167.0/TurboFileSetup-win32-x64-1.167.0.exe).
+2. Install and launch TurboFile on Windows x64.
+3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
+4. Open endpoints in the left and right panes.
+5. Drag, copy/paste, or use the toolbar to transfer files and folders.
+
+The release page also contains a SHA-256 checksum for installer verification.
+
+## Build from source
+
+TurboFile is based on Code - OSS and uses the repository's existing Node.js and VS Code build toolchain.
+
+```powershell
+npm install
+npm run compile
+$env:VSCODE_SKIP_PRELAUNCH='1'
+.\scripts\code.bat
+```
+
+For the full upstream development prerequisites and platform notes, see the build documentation under [`docs/`](docs/).
+
+## Project status
+
+- Current public release: **v1.167.0**
+- Current installer target: **Windows x64**
+- Primary branch: **`main`**
+- Issues and reproducible bug reports are welcome in [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues).
+
+## License and acknowledgements
+
+TurboFile is distributed under the [MIT License](LICENSE.txt). It is built on [Code - OSS](https://github.com/microsoft/vscode) and includes third-party components documented in [ThirdPartyNotices.txt](ThirdPartyNotices.txt).
+
+WinSCP is a trademark of its respective owner. The benchmark above is an environment-specific interoperability comparison and does not imply affiliation or endorsement.

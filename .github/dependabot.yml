@@ -2,9 +2,12 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    # This repository intentionally keeps a single long-lived branch.
+    open-pull-requests-limit: 0
     schedule:
       interval: "weekly"
   - package-ecosystem: "devcontainers" # https://containers.dev/guide/dependabot
     directory: "/"
+    open-pull-requests-limit: 0
     schedule:
       interval: "weekly"
