@@ -3774,20 +3774,29 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 			}
 		} else if (platform() === 'win32' || looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
-			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
-			const mappings = items.map(item => ({
-				sourcePath: item.sourcePath,
-				targetPath: this.joinBatchTargetPath(request.targetDirectory, item.targetName),
-				sourceType: item.sourceType ?? 'unknown'
-			}));
+			await ensureLocalDirectory(request.targetDirectory.path);
 			this.markTransferDataStarted(request.progressId);
-			await this.runCancelableLocalCommand('powershell.exe', [
-				'-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(buildWindowsMappedBatchFromInputScript(operation))
-			], {
-				input: Buffer.from(JSON.stringify(mappings), 'utf8'),
-				inactivityTimeoutMs: REMOTE_DIRECTORY_READ_MAX_TIMEOUT_MS,
-				inactivityMessage: 'Local Windows batch move produced no progress.'
-			}, request.progressId);
+			let movedBytes = 0;
+			const completedMoves: Array<{ readonly sourcePath: string; readonly targetPath: string }> = [];
+			try {
+				for (const [index, item] of items.entries()) {
+					this.throwIfTransferCanceled(request.progressId);
+					const currentName = item.displayName ?? item.targetName;
+					const targetPath = this.joinBatchTargetPath(request.targetDirectory, item.targetName);
+					await this.moveLocalPathNative(item.sourcePath, targetPath, request.progressId);
+					completedMoves.push({ sourcePath: item.sourcePath, targetPath });
+					movedBytes += Math.max(0, item.expectedBytes ?? 0);
+					this.fireTransferProgress(request, totalBytes > 0 ? Math.min(movedBytes, totalBytes) : movedBytes, totalBytes, 'transfer', 'Moving locally.', false, {
+						strategy: 'local-copy',
+						completedItems: index + 1,
+						totalItems: items.length,
+						currentName
+					});
+				}
+			} catch (error) {
+				await this.rollbackLocalMoves(completedMoves);
+				throw error;
+			}
 		} else {
 			await ensureLocalParentDirectory(this.joinBatchTargetPath(request.targetDirectory, items[0].targetName));
 			await ensureLocalDirectory(request.targetDirectory.path);
@@ -9661,11 +9670,39 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(progressId);
 		if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
 			await ensureLocalParentDirectory(targetPath);
-			await this.runCancelableLocalCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(buildLocalWindowsMoveScript(sourcePath, targetPath))], {}, progressId);
+			try {
+				await fsp.rename(sourcePath, targetPath);
+			} catch (error) {
+				if (!isCrossDeviceMoveError(error)) {
+					throw error;
+				}
+				await this.copyLocalPath(sourcePath, targetPath, undefined, progressId);
+				try {
+					this.throwIfTransferCanceled(progressId);
+					await fsp.rm(sourcePath, { force: true, recursive: true });
+				} catch (deleteError) {
+					await fsp.rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
+					throw deleteError;
+				}
+			}
 			return;
 		}
 		await ensureLocalParentDirectory(targetPath);
 		await this.runCancelableLocalCommand('mv', ['-f', sourcePath, targetPath], {}, progressId);
+	}
+
+	private async rollbackLocalMoves(completedMoves: readonly { readonly sourcePath: string; readonly targetPath: string }[]): Promise<void> {
+		const failures: string[] = [];
+		for (const move of [...completedMoves].reverse()) {
+			try {
+				await this.moveLocalPathNative(move.targetPath, move.sourcePath);
+			} catch (error) {
+				failures.push(`${move.targetPath}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		if (failures.length) {
+			throw new Error(`Local move failed and rollback was incomplete: ${failures[0]}`);
+		}
 	}
 
 	private async moveRemotePathNative(endpoint: ITurboFileTransferEndpoint, targetPath: string, progressId?: string): Promise<void> {
@@ -13482,6 +13519,11 @@ function isRemotePathMissingError(error: unknown): boolean {
 		|| /no such file|not found/i.test(candidate?.message ?? '');
 }
 
+function isCrossDeviceMoveError(error: unknown): boolean {
+	const candidate = error as NodeJS.ErrnoException | undefined;
+	return candidate?.code === 'EXDEV';
+}
+
 function isRemoteMutationShellCompatibilityError(error: Error): boolean {
 	return /(?:bash|sh|xargs|mkdir|mv|cp|rm|python3|powershell(?:\.exe)?): (?:command )?not found|command not found|not recognized as (?:an internal|the name of)|unknown option|unrecognized option|illegal option|invalid option|bad option|not an applet|syntax error|unexpected operator|read: illegal option/i.test(error.message);
 }
@@ -13871,10 +13913,29 @@ function formatLocalCommandError(stderr: string | undefined, fallback: string): 
 	if (!message) {
 		return fallback;
 	}
-	if (message.startsWith('#< CLIXML') && message.includes('System.Management.Automation.PSCustomObject')) {
-		return fallback;
+	if (message.startsWith('#< CLIXML')) {
+		return decodePowerShellCliXmlError(message) ?? fallback;
 	}
 	return message;
+}
+
+function decodePowerShellCliXmlError(message: string): string | undefined {
+	const values = [...message.matchAll(/<S\s+S="Error">([\s\S]*?)<\/S>/g)]
+		.map(match => decodePowerShellCliXmlText(match[1]).trim())
+		.filter(Boolean);
+	return values.length ? [...new Set(values)].join('\n') : undefined;
+}
+
+function decodePowerShellCliXmlText(value: string): string {
+	return value
+		.replace(/_x([0-9a-fA-F]{4})_/g, (_match, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
+		.replace(/&#x([0-9a-fA-F]+);/g, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+		.replace(/&#([0-9]+);/g, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&amp;/g, '&');
 }
 
 function runLocalPowerShellScript(script: string): Promise<void> {
@@ -14201,15 +14262,18 @@ function withPowerShellDefaults(script: string): string {
 	return `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; ${script}`;
 }
 
-function buildLocalWindowsMoveScript(sourcePath: string, targetPath: string): string {
-	const source = quotePowerShellLiteral(sourcePath);
-	const target = quotePowerShellLiteral(targetPath);
-	return withPowerShellDefaults(`$src=${source}; $dst=${target}; Move-Item -LiteralPath $src -Destination $dst -Force`);
+function buildPowerShellUtf8JsonInput(variableName: string): string[] {
+	return [
+		'$inputStream=[Console]::OpenStandardInput()',
+		'$inputBuffer=New-Object System.IO.MemoryStream',
+		'$inputStream.CopyTo($inputBuffer)',
+		`$${variableName}=[System.Text.Encoding]::UTF8.GetString($inputBuffer.ToArray()) | ConvertFrom-Json`
+	];
 }
 
 function buildWindowsMappedBatchFromInputScript(operation: 'copy' | 'move'): string {
 	return withPowerShellDefaults([
-		'$items=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+		...buildPowerShellUtf8JsonInput('items'),
 		'$completed=0',
 		'foreach ($item in $items) {',
 		'  $src=[string]$item.sourcePath',
@@ -14578,7 +14642,7 @@ function buildPosixTrashPendingRecoveryCommand(): string {
 
 function buildWindowsTrashPendingRecoveryCommand(): string {
 	const script = withPowerShellDefaults([
-		'$items=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+		...buildPowerShellUtf8JsonInput('items'),
 		'$results=[System.Collections.Generic.List[object]]::new()',
 		'foreach ($item in $items) {',
 		'  try {',
@@ -14615,7 +14679,7 @@ function buildPosixTrashDeleteBatchCommand(): string {
 
 function buildWindowsTrashDeleteBatchCommand(): string {
 	const script = withPowerShellDefaults([
-		'$items=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+		...buildPowerShellUtf8JsonInput('items'),
 		'$results=[System.Collections.Generic.List[object]]::new()',
 		'$completed=0',
 		'foreach ($item in $items) {',
@@ -14808,7 +14872,7 @@ function buildPosixTrashMoveBatchCommand(): string {
 
 function buildWindowsTrashMoveBatchCommand(): string {
 	const script = withPowerShellDefaults([
-		'$items=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+		...buildPowerShellUtf8JsonInput('items'),
 		'$results=[System.Collections.Generic.List[object]]::new()',
 		'$completed=0',
 		'$pathExists={ param([string]$path) try { [void][System.IO.File]::GetAttributes($path); return $true } catch { $errorValue=$_.Exception; while ($errorValue.InnerException) { $errorValue=$errorValue.InnerException }; if ($errorValue -is [System.IO.FileNotFoundException] -or $errorValue -is [System.IO.DirectoryNotFoundException]) { return $false }; throw } }',
@@ -14876,7 +14940,7 @@ function parseRemoteTrashMoveResults(output: Buffer, windowsPath: boolean): IRem
 
 function buildWindowsDeleteManyFromInputCommand(recursive: boolean): string {
 	const script = withPowerShellDefaults([
-		'$paths=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+		...buildPowerShellUtf8JsonInput('paths'),
 		'$completed=0',
 		'foreach ($path in $paths) {',
 		'  $value=[string]$path',

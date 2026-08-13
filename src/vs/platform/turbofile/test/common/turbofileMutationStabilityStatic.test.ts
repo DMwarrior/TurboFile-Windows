@@ -134,25 +134,52 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(deletePaths.includes('JSON.stringify(targets.map(endpoint => endpoint.path))'));
 	});
 
-	test('streams large Windows local and same-device move lists through stdin', () => {
+	test('uses native local moves and UTF-8 stdin for Windows remote batches', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const localBatch = block(service, 'private async runLocalNativeBatchTransfer', 'private async runSameRemoteNativeBatchTransfer');
 		const remoteBatch = block(service, 'private async runSameRemoteNativeBatchTransfer', 'private async tryLocalBatchRsyncTransfer');
 		const cleanup = block(service, 'private async deleteBatchSources', 'private joinBatchTargetPath');
 		const builder = block(service, 'function buildWindowsMappedBatchFromInputScript', 'function buildWindowsCopyCommand');
+		const localMove = block(service, 'private async moveLocalPathNative', 'private async rollbackLocalMoves');
+		const localRollback = block(service, 'private async rollbackLocalMoves', 'private async moveRemotePathNative');
+		const utf8JsonInput = block(service, 'function buildPowerShellUtf8JsonInput', 'function buildWindowsMappedBatchFromInputScript');
 
-		assert.ok(localBatch.includes('buildWindowsMappedBatchFromInputScript'));
-		assert.ok(localBatch.includes('targetPath: this.joinBatchTargetPath'));
-		assert.ok(localBatch.includes('input: Buffer.from(JSON.stringify(mappings)'));
+		assert.ok(localBatch.includes('this.moveLocalPathNative(item.sourcePath'));
+		assert.ok(!localBatch.includes("runCancelableLocalCommand('powershell.exe'"));
+		assert.ok(localMove.includes('await fsp.rename(sourcePath, targetPath)'));
+		assert.ok(localMove.includes('isCrossDeviceMoveError(error)'));
+		assert.ok(localMove.includes('await this.copyLocalPath(sourcePath, targetPath'));
+		assert.ok(localBatch.includes('await this.rollbackLocalMoves(completedMoves)'));
+		assert.ok(localRollback.includes('[...completedMoves].reverse()'));
+		assert.ok(localRollback.includes('await this.moveLocalPathNative(move.targetPath, move.sourcePath)'));
 		assert.ok(remoteBatch.includes('buildWindowsMappedBatchFromInputCommand'));
 		assert.ok(remoteBatch.includes('targetPath: this.joinBatchTargetPath'));
 		assert.ok(remoteBatch.includes('execRemoteWithInput'));
+		assert.ok(utf8JsonInput.includes('[Console]::OpenStandardInput()'));
+		assert.ok(utf8JsonInput.includes('[System.Text.Encoding]::UTF8.GetString'));
+		assert.ok(!builder.includes('[Console]::In.ReadToEnd()'));
 		assert.ok(builder.includes('$item.sourcePath'));
 		assert.ok(builder.includes('$item.targetPath'));
 		assert.ok(!builder.includes('-Force'));
 		assert.ok(cleanup.includes('buildWindowsDeleteManyFromInputCommand(true)'));
 		assert.ok(cleanup.includes('execRemoteWithInput'));
 		assert.ok(!service.includes('function buildWindowsBatchDeleteCommand'));
+	});
+
+	test('uses raw UTF-8 stdin for every Windows JSON mutation batch', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const windowsBuilders = [
+			block(service, 'function buildWindowsMappedBatchFromInputScript', 'function buildWindowsCopyCommand'),
+			block(service, 'function buildWindowsTrashPendingRecoveryCommand', 'function buildPosixTrashDeleteBatchCommand'),
+			block(service, 'function buildWindowsTrashDeleteBatchCommand', 'function buildPosixTrashHasItemsCommand'),
+			block(service, 'function buildWindowsTrashMoveBatchCommand', 'function parseRemoteTrashMoveResults'),
+			block(service, 'function buildWindowsDeleteManyFromInputCommand', 'function buildPosixDeleteManyFromInputCommand')
+		];
+
+		assert.deepStrictEqual(windowsBuilders.map(builder => ({
+			usesUtf8Bytes: builder.includes('buildPowerShellUtf8JsonInput('),
+			usesTextReader: builder.includes('[Console]::In.ReadToEnd()')
+		})), windowsBuilders.map(() => ({ usesUtf8Bytes: true, usesTextReader: false })));
 	});
 
 	test('uses activity-based timeouts for long stdin batch commands', () => {
