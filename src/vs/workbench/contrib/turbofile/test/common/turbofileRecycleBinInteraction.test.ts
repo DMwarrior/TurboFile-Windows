@@ -23,7 +23,7 @@ suite('TurboFileRecycleBinInteraction', () => {
 			normalToolbar: renderPane.indexOf('this.appendPaneSortButton(toolbar, side, toolbarAccent);') < renderPane.indexOf('if (state.trashMode.active)'),
 			normalActions: ['appendDragOperationButton', "'搜索'", "'复制当前路径'", "'展开图片'", "'打开终端'"].every(value => renderPane.includes(value)),
 			hidesDeleteAndRecycleButtons: hiddenTrashToolbarActions.includes("'删除选中项'") && hiddenTrashToolbarActions.includes('appendRecycleBinButton'),
-			onlyBackAndEmptyAreAdded: trashExtras.includes('Codicon.arrowLeft') && trashExtras.includes('Codicon.clearAll') && !trashExtras.includes('Codicon.discard'),
+			backRestoreAndEmptyAreAdded: trashExtras.includes('Codicon.arrowLeft') && trashExtras.includes('Codicon.discard') && trashExtras.includes('Codicon.clearAll'),
 			normalDrag: editor.includes('if (item.path && !item.parent && !renaming) {'),
 			sortedOnLoad: /state\.items = this\.sortPaneItems\(side, mapTurboFileTrashItemsToRows\(listing\.items\)/.test(editor),
 			noTrashPathRow: !css.includes('.turbofile-file-row.is-trash-item') && !editor.includes('turbofile-trash-original-path')
@@ -32,30 +32,35 @@ suite('TurboFileRecycleBinInteraction', () => {
 			normalToolbar: true,
 			normalActions: true,
 			hidesDeleteAndRecycleButtons: true,
-			onlyBackAndEmptyAreAdded: true,
+			backRestoreAndEmptyAreAdded: true,
 			normalDrag: true,
 			sortedOnLoad: true,
 			noTrashPathRow: true
 		});
 	});
 
-	test('keeps only Chinese back and empty actions as recycle-bin additions', () => {
+	test('restores recycle-bin items to their original locations with conflict handling', () => {
 		const editor = readEditor();
+		const restore = editor.slice(editor.indexOf('private async restoreSelectedTrashItems'), editor.indexOf('private async permanentlyDeleteSelectedTrashItems'));
 		const emptyTrash = editor.slice(editor.indexOf('private async emptyTrash'), editor.indexOf('private async compressSelected'));
 
 		assert.deepStrictEqual({
 			title: editor.includes('"{0} - 回收站"'),
 			path: editor.includes('"{0} 回收站"'),
 			back: editor.includes('"返回"'),
+			restoreLabel: editor.includes('"还原选中项"') && editor.includes('"还原"'),
 			empty: editor.includes('"清空回收站"'),
-			noRestoreUi: !editor.includes('restoreSelectedTrashItems') && !editor.includes('copySelectedTrashOriginalPath'),
+			restoreService: restore.includes("conflictPolicy: 'cancel'") && restore.includes("conflictPolicy: 'keepBoth'"),
+			refreshesTrashAndOriginalDirectory: restore.includes('this.refreshTrashPane(side)') && restore.includes('this.refreshVisibleRestoredDirectories(items)'),
 			emptyTask: emptyTrash.includes("this.beginTask('delete'") && emptyTrash.includes('this.updateTask(task') && emptyTrash.includes('this.finishTask(task')
 		}, {
 			title: true,
 			path: true,
 			back: true,
+			restoreLabel: true,
 			empty: true,
-			noRestoreUi: true,
+			restoreService: true,
+			refreshesTrashAndOriginalDirectory: true,
 			emptyTask: true
 		});
 	});
@@ -68,13 +73,13 @@ suite('TurboFileRecycleBinInteraction', () => {
 			browseRefresh: editor.includes('refreshTrashBrowsePane(side'),
 			confinedNavigation: editor.includes('isTurboFileTrashBrowsePathAllowed('),
 			permanentBrowseDelete: editor.includes('permanentlyDeleteTrashBrowseItems(side)'),
-			normalContextMenu: !editor.slice(editor.indexOf('private getFileContextActions('), editor.indexOf('private getPaneContextActions(')).includes("'turbofile.trash.restore'")
+			restoreContextMenu: editor.slice(editor.indexOf('private getFileContextActions('), editor.indexOf('private getPaneContextActions(')).includes("'turbofile.trash.restore'")
 		}, {
 			openTrashItem: true,
 			browseRefresh: true,
 			confinedNavigation: true,
 			permanentBrowseDelete: true,
-			normalContextMenu: true
+			restoreContextMenu: true
 		});
 	});
 

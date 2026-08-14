@@ -36,10 +36,10 @@ suite('TurboFileTitlebarMenus', () => {
 		assert.ok(editor.includes("StorageScope.PROFILE, 'file') === 'dimensions'"));
 		assert.ok(editor.includes('StorageScope.PROFILE, true'));
 		assert.ok(editor.includes("'turbofile.transfer.conflictPolicy'"));
-		assert.ok(editor.includes('IMAGE_GRID_COLUMN_MAX = 24'));
+		assert.ok(editor.includes('IMAGE_GRID_COLUMN_MAX = 32'));
 		assert.ok(editor.includes('IMAGE_GRID_COLUMN_DEFAULT = 14'));
 		assert.ok(editor.includes('return clampNumber(rounded, IMAGE_GRID_COLUMN_MIN, IMAGE_GRID_COLUMN_MAX);'));
-		assert.ok(editor.includes('IMAGE_GRID_THUMB_MIN_AT_MAX_COLUMNS = 64'));
+		assert.ok(editor.includes('IMAGE_GRID_THUMB_MIN_AT_MAX_COLUMNS = 48'));
 		assert.ok(editor.includes('state.columns - IMAGE_GRID_COLUMN_DEFAULT'));
 		assert.ok(editor.includes('StorageScope.PROFILE, StorageTarget.USER'));
 		assert.ok(editor.includes("updateValue('update.mode'"));
@@ -83,6 +83,7 @@ suite('TurboFileTitlebarMenus', () => {
 			'turbofile.view.showFileSize',
 			'turbofile.view.showModified',
 			'turbofile.view.showFileType',
+			'turbofile.view.showImageGridHoverInfo',
 			'turbofile.view.displayMode',
 			'turbofile.view.showTaskbar',
 			'turbofile.view.showTerminal',
@@ -102,6 +103,10 @@ suite('TurboFileTitlebarMenus', () => {
 		assert.ok(editor.includes('if (this.shouldShowFileSize())'));
 		assert.ok(editor.includes('if (this.shouldShowFileModified())'));
 		assert.ok(editor.includes('if (this.shouldShowFileType())'));
+		assert.ok(editor.includes("const TURBOFILE_IMAGE_GRID_SHOW_HOVER_INFO_STORAGE_KEY = 'turbofile.imageGrid.showHoverInfo';"));
+		assert.ok(editor.includes('private shouldShowImageGridHoverInfo(): boolean'));
+		assert.ok(editor.includes('StorageScope.PROFILE, true'));
+		assert.ok(editor.includes('if (!this.shouldShowImageGridHoverInfo())'));
 		assert.ok(editor.includes('if (this.shouldShowTaskbar())'));
 		assert.ok(editor.includes('this.syncPaneNavigationFrom(side, path)'));
 		assert.ok(editor.includes('columns: IMAGE_GRID_COLUMN_DEFAULT'));

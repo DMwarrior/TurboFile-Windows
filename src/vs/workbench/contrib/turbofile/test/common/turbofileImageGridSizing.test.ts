@@ -63,19 +63,19 @@ suite('TurboFileImageGridSizing', () => {
 		});
 	});
 
-	test('allows explicit Ctrl+wheel zoom-out to reach 24 columns on a full-width surface', () => {
-		const cardWidth = Math.max(64, getTurboFileImageGridBaseCardWidth(24, 1980, 10));
+	test('allows explicit Ctrl+wheel zoom-out to reach 32 columns on a full-width surface', () => {
+		const cardWidth = Math.max(48, getTurboFileImageGridBaseCardWidth(32, 1980, 10));
 		assert.deepStrictEqual({
 			cardWidth,
-			columns: getTurboFileImageGridEffectiveColumns(24, 1980, cardWidth, 10)
+			columns: getTurboFileImageGridEffectiveColumns(32, 1980, cardWidth, 10)
 		}, {
-			cardWidth: 72,
-			columns: 24
+			cardWidth: 52,
+			columns: 32
 		});
 	});
 
-	test('reduces a 24-column target automatically when the pane is narrow', () => {
-		const cardWidth = Math.max(64, getTurboFileImageGridBaseCardWidth(24, 980, 10));
-		assert.strictEqual(getTurboFileImageGridEffectiveColumns(24, 980, cardWidth, 10), 13);
+	test('reduces a 32-column target automatically when the pane is narrow', () => {
+		const cardWidth = Math.max(48, getTurboFileImageGridBaseCardWidth(32, 980, 10));
+		assert.strictEqual(getTurboFileImageGridEffectiveColumns(32, 980, cardWidth, 10), 17);
 	});
 });

@@ -101,7 +101,8 @@ suite('TurboFileImageGridPane', () => {
 	test('keeps left and right pane image-grid toolbar actions bound to their own state', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		assert.ok(editor.includes('this.setImageGridColumns(state, option);'));
-		assert.ok(editor.includes('this.setImageGridThumbnailScale(state, scale);'));
+		assert.ok(!editor.includes('renderImageGridScaleControl'));
+		assert.ok(!editor.includes('turbofile-image-page-scale'));
 		assert.ok(editor.includes('this.setImageGridSortKey(state, option.key);'));
 		assert.ok(editor.includes('void this.deleteSelectedImageGridItems(state);'));
 		assert.ok(editor.includes('this.selectAllImageGridItems(state);'));

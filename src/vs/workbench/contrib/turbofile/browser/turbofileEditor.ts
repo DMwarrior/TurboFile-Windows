@@ -531,6 +531,7 @@ const TURBOFILE_LOCAL_WINDOWS_TRANSFER_PROTOCOL_STORAGE_KEY = 'turbofile.localWi
 const TURBOFILE_CONFIRM_BEFORE_DELETE_STORAGE_KEY = 'turbofile.delete.confirmBeforeDelete';
 const TURBOFILE_IMAGE_GRID_QUALITY_STORAGE_KEY = 'turbofile.imageGrid.quality';
 const TURBOFILE_IMAGE_GRID_SHOW_NAMES_STORAGE_KEY = 'turbofile.imageGrid.showNames';
+const TURBOFILE_IMAGE_GRID_SHOW_HOVER_INFO_STORAGE_KEY = 'turbofile.imageGrid.showHoverInfo';
 const TURBOFILE_IMAGE_GRID_SIZE_SORT_BASIS_STORAGE_KEY = 'turbofile.imageGrid.sizeSortBasis';
 const TURBOFILE_TRANSFER_CONFLICT_POLICY_STORAGE_KEY = 'turbofile.transfer.conflictPolicy';
 const TURBOFILE_SHOW_HIDDEN_FILES_STORAGE_KEY = 'turbofile.view.showHiddenFiles';
@@ -575,7 +576,6 @@ const PANE_SORT_DIRECTION_OPTIONS: readonly { readonly direction: TurboFileSortD
 	{ direction: 'ascending', label: '递增' },
 	{ direction: 'descending', label: '递减' }
 ];
-const IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
 const IMAGE_GRID_SORT_OPTIONS: readonly { readonly key: TurboFileImageGridSortKey; readonly label: string }[] = [
 	{ key: 'name', label: '名称' },
 	{ key: 'date', label: '修改日期' },
@@ -590,7 +590,7 @@ const IMAGE_GRID_COLUMN_MIN = 4;
 // Default number of columns when the image grid opens (clamped down only when the body is too narrow
 // to fit that many thumbnails) and the hard upper bound when zooming columns in.
 const IMAGE_GRID_COLUMN_DEFAULT = 14;
-const IMAGE_GRID_COLUMN_MAX = 24;
+const IMAGE_GRID_COLUMN_MAX = 32;
 const IMAGE_GRID_NEIGHBOR_LOAD_COUNT = 2;
 const IMAGE_GRID_OVERSCAN_ROWS = 1;
 const IMAGE_GRID_CARD_GAP = 10;
@@ -599,9 +599,9 @@ const IMAGE_GRID_CARD_VERTICAL_CHROME_WITHOUT_NAME = 18;
 const IMAGE_GRID_CARD_INLINE_CHROME = 16;
 const IMAGE_GRID_THUMB_MIN = 96;
 // The legacy opening density keeps the 96px floor. Extra Ctrl+wheel zoom-out levels may gradually
-// reduce that floor so a full-width surface can reach the new 24-column limit without changing the
+// reduce that floor so a full-width surface can reach the new 32-column limit without changing the
 // default appearance.
-const IMAGE_GRID_THUMB_MIN_AT_MAX_COLUMNS = 64;
+const IMAGE_GRID_THUMB_MIN_AT_MAX_COLUMNS = 48;
 const IMAGE_GRID_THUMB_MAX = 640;
 const IMAGE_GRID_THUMB_STEP = 64;
 const IMAGE_GRID_ORIGINAL_CARD_DIMENSION_THRESHOLD = 100;
@@ -1501,7 +1501,7 @@ export class TurboFileEditor extends EditorPane {
 		if (state.displayMode === 'pane' && !state.previewVisible && !targetElement?.closest('.turbofile-pane-image-grid')) {
 			return false;
 		}
-		if (targetElement?.closest('.turbofile-dialog, .turbofile-device-form, .turbofile-image-page-sort.is-open, .turbofile-image-page-scale.is-open')) {
+		if (targetElement?.closest('.turbofile-dialog, .turbofile-device-form, .turbofile-image-page-sort.is-open')) {
 			return false;
 		}
 
@@ -2279,6 +2279,7 @@ export class TurboFileEditor extends EditorPane {
 			this.createCheckedAction('turbofile.view.showFileSize', localize('turbofile.showFileSize', "显示文件大小"), this.shouldShowFileSize(), () => this.toggleFileListMetadata(TURBOFILE_SHOW_FILE_SIZE_STORAGE_KEY, this.shouldShowFileSize())),
 			this.createCheckedAction('turbofile.view.showModified', localize('turbofile.showModified', "显示修改时间"), this.shouldShowFileModified(), () => this.toggleFileListMetadata(TURBOFILE_SHOW_FILE_MODIFIED_STORAGE_KEY, this.shouldShowFileModified())),
 			this.createCheckedAction('turbofile.view.showFileType', localize('turbofile.showFileType', "显示文件类型"), this.shouldShowFileType(), () => this.toggleFileListMetadata(TURBOFILE_SHOW_FILE_TYPE_STORAGE_KEY, this.shouldShowFileType())),
+			this.createCheckedAction('turbofile.view.showImageGridHoverInfo', localize('turbofile.showImageGridHoverInfo', "图片网格显示尺寸和序号"), this.shouldShowImageGridHoverInfo(), () => this.setShowImageGridHoverInfo(!this.shouldShowImageGridHoverInfo())),
 			new Separator(),
 			new SubmenuAction('turbofile.view.displayMode', localize('turbofile.displayMode', "显示方式"), [
 				this.createCheckedAction('turbofile.view.list', localize('turbofile.listView', "列表视图"), !paneGridVisible, () => this.showPaneListView(side)),
@@ -2344,6 +2345,19 @@ export class TurboFileEditor extends EditorPane {
 		for (const state of this.getVisibleImageGridStates()) {
 			state.renderedRange = undefined;
 			this.clearImageGridLayoutMetrics(state);
+			this.invalidateRetainedPaneImageGrid(state);
+		}
+		this.render();
+	}
+
+	private shouldShowImageGridHoverInfo(): boolean {
+		return this.storageService.getBoolean(TURBOFILE_IMAGE_GRID_SHOW_HOVER_INFO_STORAGE_KEY, StorageScope.PROFILE, true);
+	}
+
+	private setShowImageGridHoverInfo(enabled: boolean): void {
+		this.storageService.store(TURBOFILE_IMAGE_GRID_SHOW_HOVER_INFO_STORAGE_KEY, enabled, StorageScope.PROFILE, StorageTarget.USER);
+		for (const state of this.getVisibleImageGridStates()) {
+			state.renderedRange = undefined;
 			this.invalidateRetainedPaneImageGrid(state);
 		}
 		this.render();
@@ -3826,6 +3840,9 @@ export class TurboFileEditor extends EditorPane {
 		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
 		if (state.trashMode.active) {
 			this.appendToolbarButton(toolbar, Codicon.arrowLeft, state.trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), () => state.trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side));
+			if (isTurboFileTrashRootView(state.trashMode)) {
+				this.appendToolbarButton(toolbar, Codicon.discard, localize('turbofile.recycleBinRestoreSelected', "还原选中项"), () => { void this.restoreSelectedTrashItems(side); });
+			}
 			this.appendToolbarButton(toolbar, Codicon.clearAll, localize('turbofile.recycleBinEmpty', "清空回收站"), () => { void this.emptyTrash(side); });
 		}
 		this.appendToolbarButton(
@@ -6324,7 +6341,6 @@ export class TurboFileEditor extends EditorPane {
 		});
 		actions.appendChild(deleteButton);
 		actions.appendChild(this.renderImageGridSortControl(state));
-		actions.appendChild(this.renderImageGridScaleControl(state));
 		const closeIcon = $('button.turbofile-image-page-action.is-close') as HTMLButtonElement;
 		closeIcon.type = 'button';
 		closeIcon.title = '关闭';
@@ -6344,7 +6360,7 @@ export class TurboFileEditor extends EditorPane {
 		body.addEventListener('pointerdown', event => {
 			this.setActiveImageGridState(state);
 			const target = event.target instanceof HTMLElement ? event.target : undefined;
-			if (!target?.closest('.turbofile-image-page-card, button, .turbofile-image-page-sort, .turbofile-image-page-scale')) {
+			if (!target?.closest('.turbofile-image-page-card, button, .turbofile-image-page-sort')) {
 				body.focus({ preventScroll: true });
 			}
 		});
@@ -6424,93 +6440,6 @@ export class TurboFileEditor extends EditorPane {
 			this.updateImagePreviewOverlay(state);
 		}
 		this.refreshTaskbar();
-	}
-
-	private renderImageGridScaleControl(state: TurboFileImageGridState): HTMLElement {
-		const select = $('.turbofile-image-page-scale');
-		const button = $('button.turbofile-image-page-scale-button') as HTMLButtonElement;
-		const menu = $('.turbofile-image-page-scale-menu');
-		button.type = 'button';
-		button.title = '图片放大倍率';
-		button.setAttribute('aria-haspopup', 'listbox');
-		button.setAttribute('aria-expanded', 'false');
-		button.setAttribute('aria-label', '图片放大倍率');
-		button.appendChild(renderIcon(Codicon.zoomIn));
-		button.appendChild($('span.turbofile-image-page-scale-label', undefined, this.getImageGridScaleLabel(state.thumbnailScale)));
-		button.appendChild(renderIcon(Codicon.chevronDown));
-
-		menu.setAttribute('role', 'menu');
-		menu.setAttribute('aria-label', '图片放大倍率');
-		for (const scale of IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS) {
-			const isActive = state.thumbnailScale === scale;
-			const item = $('button.turbofile-image-page-scale-option') as HTMLButtonElement;
-			item.type = 'button';
-			item.dataset.scale = String(scale);
-			item.setAttribute('role', 'option');
-			item.setAttribute('aria-selected', isActive ? 'true' : 'false');
-			if (isActive) {
-				item.classList.add('is-active');
-			}
-			const check = $('span.turbofile-image-page-scale-check');
-			if (isActive) {
-				check.appendChild(renderIcon(Codicon.check));
-			}
-			item.appendChild(check);
-			item.appendChild($('span.turbofile-image-page-scale-option-label', undefined, this.getImageGridScaleLabel(scale)));
-			item.addEventListener('click', event => {
-				event.preventDefault();
-				event.stopPropagation();
-				select.classList.remove('is-open');
-				button.setAttribute('aria-expanded', 'false');
-				this.setActiveImageGridState(state);
-				this.setImageGridThumbnailScale(state, scale);
-			});
-			menu.appendChild(item);
-		}
-
-		const closeMenu = () => {
-			select.classList.remove('is-open');
-			button.setAttribute('aria-expanded', 'false');
-		};
-		const toggleMenu = (event: MouseEvent | KeyboardEvent) => {
-			event.preventDefault();
-			event.stopPropagation();
-			const nextOpen = !select.classList.contains('is-open');
-			select.classList.toggle('is-open', nextOpen);
-			button.setAttribute('aria-expanded', String(nextOpen));
-			if (nextOpen) {
-				const active = menu.querySelector<HTMLElement>('.turbofile-image-page-scale-option.is-active') ?? menu.querySelector<HTMLElement>('.turbofile-image-page-scale-option');
-				active?.focus();
-			}
-		};
-		button.addEventListener('click', toggleMenu);
-		button.addEventListener('keydown', event => {
-			if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
-				toggleMenu(event);
-			}
-		});
-		const ownerWindow = getWindow(select);
-		const handleWindowClick = (event: MouseEvent) => {
-			if (!select.contains(event.target as Node | null)) {
-				closeMenu();
-			}
-		};
-		const handleWindowKeydown = (event: KeyboardEvent) => {
-			if (event.key === 'Escape' && select.classList.contains('is-open')) {
-				event.preventDefault();
-				closeMenu();
-				button.focus();
-			}
-		};
-		ownerWindow.addEventListener('click', handleWindowClick);
-		ownerWindow.addEventListener('keydown', handleWindowKeydown);
-		const disposables = state.paneDomDisposables ?? this.renderDisposables;
-		disposables.add({ dispose: () => ownerWindow.removeEventListener('click', handleWindowClick) });
-		disposables.add({ dispose: () => ownerWindow.removeEventListener('keydown', handleWindowKeydown) });
-
-		select.appendChild(button);
-		select.appendChild(menu);
-		return select;
 	}
 
 	private renderImageGridSortControl(state: TurboFileImageGridState): HTMLElement {
@@ -6916,6 +6845,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private appendImageGridCardChrome(preview: HTMLElement, image: TurboFileImageGridImage, index: number): void {
+		if (!this.shouldShowImageGridHoverInfo()) {
+			return;
+		}
 		const info = $('.turbofile-image-page-card-info');
 
 		const indexLabel = $('span.turbofile-image-page-card-index');
@@ -8439,17 +8371,23 @@ export class TurboFileEditor extends EditorPane {
 			return this.getPaneContextActions(side);
 		}
 
-		return [
+		const actions: IAction[] = [
 			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
 			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side)),
 			this.menuAction('turbofile.rename', '重命名', Codicon.edit, () => this.renameSelected(side), canOperate),
 			this.menuAction('turbofile.copyPath', '复制路径', Codicon.copy, () => this.copySelectedPath(side), canOperate),
-			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate),
+			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate)
+		];
+		if (isTurboFileTrashRootView(this.paneStates[side].trashMode) && item.trashItem) {
+			actions.push(this.menuAction('turbofile.trash.restore', localize('turbofile.recycleBinRestore', "还原"), Codicon.discard, () => { void this.restoreSelectedTrashItems(side); }, canOperate));
+		}
+		actions.push(
 			this.menuAction('turbofile.extract', '解压', Codicon.unarchive, () => this.extractSelected(side), canExtract),
 			this.menuAction('turbofile.compress', '压缩', Codicon.archive, () => this.compressSelected(side), canOperate),
 			this.menuAction('turbofile.delete', '删除', Codicon.trash, () => this.deleteSelected(side), canOperate),
 			this.menuAction('turbofile.deletePermanently', localize('turbofile.deletePermanently', "永久删除"), Codicon.trash, () => { void this.permanentlyDeleteSelected(side); }, canOperate)
-		];
+		);
+		return actions;
 	}
 
 	private confirmDelete(title: string, message: string, detail?: string, danger = false, confirmLabel?: string): Promise<boolean> {
@@ -12099,40 +12037,6 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
-	private setImageGridThumbnailScale(state: TurboFileImageGridState | undefined, scale: number): void {
-		if (!state) {
-			return;
-		}
-		const nextScale = this.normalizeImageGridThumbnailScale(scale);
-		if (state.thumbnailScale === nextScale) {
-			return;
-		}
-		state.thumbnailScale = nextScale;
-		this.clearImageGridLayoutMetrics(state);
-		state.renderedRange = undefined;
-		this.clearImageGridThumbnailQueue();
-		this.clearImageGridLoadedImageIndexes(state);
-		for (const image of state.images) {
-			this.releaseImageBlobUrl(image.thumbnailUrl);
-			image.thumbnailUrl = undefined;
-			image.thumbnailContent = '';
-			image.thumbnailLoading = false;
-			image.thumbnailError = undefined;
-		}
-		this.invalidateRetainedPaneImageGrid(state);
-		this.render();
-	}
-
-	private normalizeImageGridThumbnailScale(scale: number): number {
-		const rounded = Math.round(scale);
-		return IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS.includes(rounded as typeof IMAGE_GRID_THUMBNAIL_SCALE_OPTIONS[number]) ? rounded : 1;
-	}
-
-	private getImageGridScaleLabel(scale: number): string {
-		const normalized = this.normalizeImageGridThumbnailScale(scale);
-		return normalized === 1 ? '1x' : `${normalized}x`;
-	}
-
 	private normalizeImageGridStateColumns(state: TurboFileImageGridState): void {
 		const nextColumns = this.normalizeImageGridColumns(state.columns);
 		if (state.columns !== nextColumns) {
@@ -13232,8 +13136,8 @@ export class TurboFileEditor extends EditorPane {
 	private getImageGridBaseCardWidth(state: TurboFileImageGridState): number {
 		// `state.columns` is the user's Ctrl+wheel target. At the default 14 columns the legacy 96px
 		// minimum is preserved. Only explicit zoom-out beyond the default progressively unlocks smaller
-		// cards, reaching the 64px floor at 24 columns. Effective columns still reduce automatically in a
-		// narrow pane, so split view never blindly forces all 24 columns into the available width.
+		// cards, reaching the 48px floor at 32 columns. Effective columns still reduce automatically in a
+		// narrow pane, so split view never blindly forces all 32 columns into the available width.
 		const extraColumnProgress = clampNumber(
 			(state.columns - IMAGE_GRID_COLUMN_DEFAULT) / (IMAGE_GRID_COLUMN_MAX - IMAGE_GRID_COLUMN_DEFAULT),
 			0,
@@ -14030,6 +13934,67 @@ export class TurboFileEditor extends EditorPane {
 		return this.getSelectedTransferItems(side)
 			.map(item => item.trashItem)
 			.filter((item): item is ITurboFileTrashItem => !!item);
+	}
+
+	private async restoreSelectedTrashItems(side: 'left' | 'right'): Promise<void> {
+		const device = this.getPaneDevice(side);
+		const items = this.getSelectedTrashItems(side);
+		if (!device || !items.length) {
+			return;
+		}
+		try {
+			const trashDevice = await this.toTrashDevice(device);
+			let result = await this.sshService.restoreTrashItems({ device: trashDevice, items, conflictPolicy: 'cancel' });
+			const itemsById = new Map(items.map(item => [item.id, item]));
+			const conflicts = result.results
+				.filter(item => item.conflict)
+				.map(item => item.id ? itemsById.get(item.id) : undefined)
+				.filter((item): item is ITurboFileTrashItem => !!item);
+			if (conflicts.length) {
+				const keepBoth = await this.showDialogConfirm(
+					localize('turbofile.restoreConflictTitle', "还原名称冲突"),
+					localize('turbofile.restoreConflictMessage', "原位置已有 {0} 个同名项目，是否自动添加序号并保留两者？", conflicts.length),
+					undefined,
+					false,
+					localize('turbofile.keepBoth', "保留两者")
+				);
+				if (keepBoth) {
+					const retry = await this.sshService.restoreTrashItems({ device: trashDevice, items: conflicts, conflictPolicy: 'keepBoth' });
+					result = {
+						...result,
+						ok: result.results.filter(item => !item.conflict).every(item => item.ok) && retry.ok,
+						completed: result.results.filter(item => item.ok).length + retry.completed,
+						failed: result.results.filter(item => !item.ok && !item.conflict).length + retry.failed,
+						results: [...result.results.filter(item => !item.conflict), ...retry.results]
+					};
+				}
+			}
+			this.statusMessage = result.ok
+				? localize('turbofile.restoreComplete', "已还原 {0} 个项目。", result.completed)
+				: localize('turbofile.restorePartial', "已还原 {0} 个，失败 {1} 个。", result.completed, result.failed);
+			await this.refreshTrashPane(side);
+			await this.refreshVisibleRestoredDirectories(items);
+		} catch (error) {
+			this.statusMessage = localize('turbofile.restoreFailed', "还原失败：{0}", error instanceof Error ? error.message : String(error));
+			await this.refreshTrashPane(side);
+		}
+	}
+
+	private async refreshVisibleRestoredDirectories(items: readonly ITurboFileTrashItem[]): Promise<void> {
+		for (const side of ['left', 'right'] as const) {
+			const state = this.paneStates[side];
+			if (state.trashMode.active) {
+				continue;
+			}
+			const device = this.getPaneDevice(side);
+			if (!device) {
+				continue;
+			}
+			const windowsPath = this.isWindowsDevice(device);
+			if (items.some(item => this.pathsEqualForDevice(getPaneParentPath(item.originalPath, windowsPath) ?? item.originalPath, state.path, windowsPath))) {
+				await this.refreshPane(side, { force: true, silent: true });
+			}
+		}
 	}
 
 	private async permanentlyDeleteSelectedTrashItems(side: 'left' | 'right'): Promise<boolean> {
