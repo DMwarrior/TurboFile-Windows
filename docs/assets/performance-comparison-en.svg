@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">TurboFile and WinSCP benchmark comparison</title>
+  <desc id="desc">Transfer time comparison for mixed files, one large file, and direct device-to-device transfer, plus the TurboFile direct-path model.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="1" stop-color="#101c32"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#28d7a1"/><stop offset="1" stop-color="#3b82f6"/></linearGradient>
+    <linearGradient id="fastBar" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#020617" flood-opacity=".45"/></filter>
+    <style>
+      text { font-family: "Segoe UI", Inter, Arial, sans-serif; }
+      .muted { fill: #94a3b8; }
+      .label { fill: #cbd5e1; font-size: 22px; }
+      .value { fill: #f8fafc; font-size: 27px; font-weight: 700; }
+    </style>
+  </defs>
+  <rect width="1600" height="900" rx="28" fill="url(#background)"/>
+  <circle cx="1435" cy="-70" r="310" fill="#2563eb" opacity=".09"/><circle cx="-80" cy="850" r="330" fill="#14b8a6" opacity=".08"/>
+  <g transform="translate(70 60)">
+    <rect width="10" height="74" rx="5" fill="url(#accent)"/>
+    <text x="34" y="34" fill="#f8fafc" font-size="43" font-weight="750">Built for many small files and device-to-device paths</text>
+    <text x="34" y="70" class="muted" font-size="21">Same test environment · Three measured workloads · Lower time is better</text>
+  </g>
+  <g transform="translate(1165 60)">
+    <rect width="365" height="72" rx="18" fill="#0b2942" stroke="#1d4ed8" stroke-opacity=".55"/>
+    <text x="24" y="28" fill="#93c5fd" font-size="17">Measured throughput</text>
+    <text x="24" y="57" fill="#f8fafc" font-size="29" font-weight="750">102.6–118 MB/s</text>
+  </g>
+  <g transform="translate(70 170)" filter="url(#shadow)">
+    <rect width="545" height="645" rx="24" fill="#0d1a2c" stroke="#26364d"/>
+    <text x="34" y="54" fill="#f8fafc" font-size="27" font-weight="700">Transfer path</text>
+    <text x="34" y="86" class="muted" font-size="18">Probe both directions, then use the viable direct route</text>
+    <g transform="translate(34 125)">
+      <text fill="#94a3b8" font-size="18" font-weight="600">Traditional relay</text>
+      <g transform="translate(0 25)">
+        <rect width="132" height="70" rx="16" fill="#172338" stroke="#475569"/><text x="66" y="43" fill="#e2e8f0" font-size="20" text-anchor="middle">Device A</text>
+        <path d="M140 35 H190" stroke="#64748b" stroke-width="5" stroke-linecap="round"/><path d="M182 27 L194 35 L182 43" fill="none" stroke="#64748b" stroke-width="4"/>
+        <rect x="200" width="132" height="70" rx="16" fill="#1e293b" stroke="#64748b"/><text x="266" y="43" fill="#e2e8f0" font-size="20" text-anchor="middle">Windows</text>
+        <path d="M340 35 H390" stroke="#64748b" stroke-width="5" stroke-linecap="round"/><path d="M382 27 L394 35 L382 43" fill="none" stroke="#64748b" stroke-width="4"/>
+        <rect x="400" width="76" height="70" rx="16" fill="#172338" stroke="#475569"/><text x="438" y="43" fill="#e2e8f0" font-size="20" text-anchor="middle">B</text>
+      </g>
+      <text y="130" fill="#f8fafc" font-size="18" font-weight="650">TurboFile direct</text>
+      <g transform="translate(0 155)">
+        <rect width="132" height="70" rx="16" fill="#0e3b3b" stroke="#2dd4bf"/><text x="66" y="43" fill="#ccfbf1" font-size="20" text-anchor="middle">Device A</text>
+        <path d="M145 35 H385" stroke="url(#accent)" stroke-width="8" stroke-linecap="round"/><path d="M374 23 L392 35 L374 47" fill="none" stroke="#60a5fa" stroke-width="6"/>
+        <rect x="400" width="76" height="70" rx="16" fill="#102f4c" stroke="#60a5fa"/><text x="438" y="43" fill="#dbeafe" font-size="20" text-anchor="middle">B</text>
+        <text x="266" y="24" fill="#bfdbfe" font-size="16" font-weight="650" text-anchor="middle">Bypass the Windows relay</text>
+        <text x="266" y="58" fill="#93c5fd" font-size="15" text-anchor="middle">Bidirectional probe · viable direction</text>
+      </g>
+    </g>
+    <line x1="34" y1="412" x2="511" y2="412" stroke="#26364d"/>
+    <text x="34" y="458" fill="#f8fafc" font-size="22" font-weight="700">Match strategy to workload</text>
+    <g transform="translate(34 482)">
+      <rect width="222" height="105" rx="17" fill="#10243a" stroke="#1e4f78"/><text x="20" y="34" fill="#60a5fa" font-size="23" font-weight="750">tar</text><text x="20" y="64" fill="#cbd5e1" font-size="16">Folders and small files</text><text x="20" y="87" class="muted" font-size="14">Stream once, reduce round trips</text>
+      <rect x="240" width="237" height="105" rx="17" fill="#102f36" stroke="#1d665e"/><text x="260" y="34" fill="#2dd4bf" font-size="23" font-weight="750">rsync</text><text x="260" y="64" fill="#cbd5e1" font-size="16">Incremental transfers</text><text x="260" y="87" class="muted" font-size="14">Avoid moving unchanged data</text>
+    </g>
+  </g>
+  <g transform="translate(650 170)" filter="url(#shadow)">
+    <rect width="880" height="645" rx="24" fill="#0d1a2c" stroke="#26364d"/>
+    <text x="34" y="54" fill="#f8fafc" font-size="27" font-weight="700">Completion time</text>
+    <g transform="translate(595 25)"><circle cx="8" cy="8" r="7" fill="#64748b"/><text x="24" y="15" class="muted" font-size="16">WinSCP</text><circle cx="112" cy="8" r="7" fill="#2dd4bf"/><text x="128" y="15" fill="#cbd5e1" font-size="16">TurboFile</text></g>
+    <g transform="translate(34 98)">
+      <text class="label">Mixed files · 2.32 GB</text><text x="815" class="value" text-anchor="end">9.5×</text><text y="42" class="muted" font-size="16">Many files with mixed sizes</text>
+      <rect y="66" width="680" height="17" rx="8.5" fill="#64748b"/><rect y="96" width="71" height="17" rx="8.5" fill="url(#fastBar)"/>
+      <text x="700" y="81" fill="#cbd5e1" font-size="17">234 s</text><text x="91" y="111" fill="#5eead4" font-size="17" font-weight="700">24.6 s</text>
+    </g>
+    <line x1="34" y1="250" x2="846" y2="250" stroke="#26364d"/>
+    <g transform="translate(34 292)">
+      <text class="label">Single large file · 8.2 GB</text><text x="815" class="value" text-anchor="end">1.12×</text><text y="42" class="muted" font-size="16">Throughput approaches the link limit</text>
+      <rect y="66" width="680" height="17" rx="8.5" fill="#64748b"/><rect y="96" width="605" height="17" rx="8.5" fill="url(#fastBar)"/>
+      <text x="700" y="81" fill="#cbd5e1" font-size="17">91 s</text><text x="625" y="111" fill="#5eead4" font-size="17" font-weight="700">81 s · 107 MB/s</text>
+    </g>
+    <line x1="34" y1="444" x2="846" y2="444" stroke="#26364d"/>
+    <g transform="translate(34 486)">
+      <text class="label">Device 62 → 64 direct</text><text x="815" class="value" text-anchor="end">30.4×</text><text y="42" class="muted" font-size="16">No Windows download-and-upload relay</text>
+      <rect y="66" width="680" height="17" rx="8.5" fill="#64748b"/><rect y="96" width="22" height="17" rx="8.5" fill="url(#fastBar)"/>
+      <text x="700" y="81" fill="#cbd5e1" font-size="17">720 s</text><text x="42" y="111" fill="#5eead4" font-size="17" font-weight="700">23.7 s · 102.6 MB/s</text>
+    </g>
+  </g>
+  <text x="800" y="862" class="muted" font-size="16" text-anchor="middle">Measured on a specific device, network, dataset and protocol setup. Real-world performance varies by environment.</text>
+</svg>
