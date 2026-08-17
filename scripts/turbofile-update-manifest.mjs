@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 
-const repoSlug = process.env.GITHUB_REPOSITORY ?? 'DMwarrior/TurboFile-Windows';
+const repoSlug = process.env.TURBOFILE_UPDATE_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? 'DMwarrior/TurboFile-Windows';
 const [owner, repo] = repoSlug.split('/');
 const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
 const apiBase = process.env.GITHUB_API_URL ?? 'https://api.github.com';

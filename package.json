@@ -17,6 +17,7 @@
     "test-extension": "vscode-test",
     "test-build-scripts": "cd build && npm run test",
     "turbofile:update-manifest": "node scripts/turbofile-update-manifest.mjs",
+    "turbofile:publish-update": "node scripts/turbofile-publish-update.mjs",
     "check-cyclic-dependencies": "node build/lib/checkCyclicDependencies.ts out",
     "preinstall": "node build/npm/preinstall.ts",
     "postinstall": "node build/npm/postinstall.ts",
