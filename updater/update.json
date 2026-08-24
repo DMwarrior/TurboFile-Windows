@@ -1,0 +1,24 @@
+{
+  "version": "1.168.0",
+  "name": "极速传 1.168.0",
+  "notes": "极速传 1.168.0 Windows x64 正式版本。\n\n安装包：TurboFileSetup-win32-x64-1.168.0.exe\n\nSHA-256：e3e4f03cbbf7a3a8888ac506bbdd69a3c1419ce09e0ca58a1c35f68937fedef1",
+  "pub_date": "2026-08-24T08:26:12.606Z",
+  "platforms": {
+    "windows-x64": {
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe",
+      "sha256": "e3e4f03cbbf7a3a8888ac506bbdd69a3c1419ce09e0ca58a1c35f68937fedef1",
+      "parts": [
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe.part001",
+          "size": 94371840,
+          "sha256": "338ff9d48c42600b0a6196afd12f813ad3973e916e9a349dc2c14dc11d7af1e4"
+        },
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe.part002",
+          "size": 19243954,
+          "sha256": "039b119cea7ad1f303c3d1037a24144da5b588a13d2cd75bbf3a84b334df2df0"
+        }
+      ]
+    }
+  }
+}
