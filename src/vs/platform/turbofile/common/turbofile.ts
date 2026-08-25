@@ -46,6 +46,7 @@ export interface ITurboFileSshService {
 	movePathsToTrash(request: ITurboFileMoveToTrashRequest): Promise<ITurboFileTrashOperationResult>;
 	listTrashItems(device: ITurboFileTrashDevice): Promise<ITurboFileTrashListing>;
 	restoreTrashItems(request: ITurboFileRestoreTrashRequest): Promise<ITurboFileTrashOperationResult>;
+	restoreTrashPaths(request: ITurboFileRestoreTrashPathsRequest): Promise<ITurboFileTrashOperationResult>;
 	renameTrashItem(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult>;
 	permanentlyDeleteTrashItems(request: ITurboFileTrashItemsRequest): Promise<ITurboFileTrashOperationResult>;
 	emptyTrash(device: ITurboFileTrashDevice, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileTrashOperationResult>;
@@ -223,6 +224,18 @@ export interface ITurboFileRestoreTrashRequest extends ITurboFileTrashItemsReque
 	readonly conflictPolicy: 'cancel' | 'keepBoth';
 }
 
+export interface ITurboFileRestoreTrashPath {
+	readonly relativePath: string;
+	readonly type: TurboFileFileType;
+}
+
+export interface ITurboFileRestoreTrashPathsRequest {
+	readonly device: ITurboFileTrashDevice;
+	readonly item: ITurboFileTrashItem;
+	readonly paths: readonly ITurboFileRestoreTrashPath[];
+	readonly conflictPolicy: 'cancel' | 'keepBoth';
+}
+
 export interface ITurboFileRenameTrashItemRequest {
 	readonly device: ITurboFileTrashDevice;
 	readonly item: ITurboFileTrashItem;
@@ -246,6 +259,7 @@ export interface ITurboFileTrashItem {
 
 export interface ITurboFileTrashItemResult {
 	readonly id?: string;
+	readonly relativePath?: string;
 	readonly path: string;
 	readonly ok: boolean;
 	readonly message: string;

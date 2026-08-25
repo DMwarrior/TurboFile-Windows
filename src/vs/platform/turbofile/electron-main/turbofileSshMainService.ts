@@ -20,7 +20,7 @@ import { Emitter, Event } from '../../../base/common/event.js';
 import { IDisposable } from '../../../base/common/lifecycle.js';
 import { localize } from '../../../nls.js';
 import { IStateService } from '../../state/node/state.js';
-import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileCancelableOperationOptions, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRenameTrashItemRequest, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
+import { ITurboFileBatchTransferFailure, ITurboFileBatchTransferItem, ITurboFileBatchTransferRequest, ITurboFileBatchTransferResult, ITurboFileCancelableOperationOptions, ITurboFileDependencyInstallResult, ITurboFileDirectoryListing, ITurboFileEntryStat, ITurboFileFileEntry, ITurboFileFileOperationResult, ITurboFileImageBatchEntry, ITurboFileImageMetadataEntry, ITurboFileImageResourceOptions, ITurboFileImageResourceResult, ITurboFileMoveToTrashRequest, ITurboFilePathSizeResult, ITurboFileReadFileOptions, ITurboFileReadFileResult, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileRemoteCapabilitiesResult, ITurboFileRenameTrashItemRequest, ITurboFileRestoreTrashPathsRequest, ITurboFileRestoreTrashRequest, ITurboFileSshConnectionOptions, ITurboFileSshConnectionResult, ITurboFileSshService, ITurboFileSshTerminalSession, ITurboFileStartWindowsDragRequest, ITurboFileStartWindowsDragResult, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferRequest, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashItemResult, ITurboFileTrashItemsRequest, ITurboFileTrashListing, ITurboFileTrashOperationResult, ITurboFileTrashSource, ITurboFileTrashState, ITurboFileWindowsClipboardFilesResult, TurboFileContentEncoding, TurboFileFileType, TurboFileTransferAttemptProtocol, TurboFileTransferDependency, TurboFileTransferProtocol } from '../common/turbofile.js';
 import { resolveTerminalEncoding } from '../../../base/node/terminalEncoding.js';
 import { buildTurboFileRemoteExtractCommand, isTurboFileTarFamilyArchivePath } from '../common/turbofileArchiveExtract.js';
 import { runTurboFileBatchTransferFlow, runTurboFileConcurrentBatchAttempt } from '../common/turbofileBatchTransferFlow.js';
@@ -42,7 +42,7 @@ import { parseDirectTarProgressBytes } from '../common/turbofileTarProgress.js';
 import { classifyTurboFileTransferFailure, getTurboFileTransferProgressState, getTurboFileTransferProtocolName, ITurboFileTransferFailure, shouldContinueTurboFileTransferPlan } from '../common/turbofileTransferFailure.js';
 import { resolveTransferPlan } from '../common/turbofileTransferPlan.js';
 import { getTurboFileTransferDeviceKey, TurboFileTransferScheduler } from '../common/turbofileTransferScheduler.js';
-import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashItemId, getTurboFileTrashDeviceIdentity, isTurboFileProtectedTrashSource, isTurboFileTrashMetadata, resolveTurboFileTrashChildPaths, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../common/turbofileTrash.js';
 import { createWindowsDragFakeDirectoryName, createWindowsShellAssociationChangedScript, isValidWindowsDragToken, normalizeWindowsCopyHookDestination, TURBOFILE_WINDOWS_DRAG_ACTIVE_DIR, TURBOFILE_WINDOWS_DRAG_APP_DIR, TURBOFILE_WINDOWS_DRAG_ROOT_DIR, TURBOFILE_WINDOWS_DRAG_TARGETS_DIR } from '../common/turbofileWindowsDrag.js';
 import { normalizeWindowsTransferPaths } from '../common/turbofileWindowsPath.js';
 
@@ -4939,6 +4939,141 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 		}
 		return this.createTrashOperationResult(results, 'Recycle-bin items restored.');
+	}
+
+	async restoreTrashPaths(request: ITurboFileRestoreTrashPathsRequest): Promise<ITurboFileTrashOperationResult> {
+		const device = this.withLocalTrashIdentity(request.device);
+		const item = request.item;
+		if (item.type !== 'directory' || item.deviceIdentity !== getTurboFileTrashDeviceIdentity(device) || !this.isSafeTrashItem(item)) {
+			return this.createTrashOperationResult(request.paths.map(path => ({
+				relativePath: path.relativePath,
+				path: path.relativePath,
+				ok: false,
+				message: 'Recycle-bin directory is invalid or belongs to a different device.'
+			})), 'No recycle-bin files were restored.');
+		}
+
+		const windowsPath = device.kind === 'local' || !!device.windows || looksLikeWindowsPath(item.payloadPath);
+		const seen = new Set<string>();
+		const results: ITurboFileTrashItemResult[] = [];
+		for (const requestedPath of request.paths) {
+			try {
+				const child = resolveTurboFileTrashChildPaths(item, requestedPath.relativePath, windowsPath);
+				const key = windowsPath ? child.relativePath.toLocaleLowerCase() : child.relativePath;
+				if (seen.has(key)) {
+					throw new Error('Duplicate recycle-bin child path.');
+				}
+				seen.add(key);
+				const result = device.kind === 'local'
+					? await this.restoreLocalTrashPath(item, child.relativePath, child.payloadPath, child.originalPath, request.conflictPolicy)
+					: await this.restoreRemoteTrashPath(device, item, child.relativePath, child.payloadPath, child.originalPath, request.conflictPolicy);
+				results.push(result);
+			} catch (error) {
+				results.push({
+					relativePath: requestedPath.relativePath,
+					path: requestedPath.relativePath,
+					ok: false,
+					message: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+		return this.createTrashOperationResult(results, 'Recycle-bin files restored.');
+	}
+
+	private async restoreLocalTrashPath(item: ITurboFileTrashItem, relativePath: string, payloadPath: string, originalPath: string, conflictPolicy: ITurboFileRestoreTrashPathsRequest['conflictPolicy']): Promise<ITurboFileTrashItemResult> {
+		let targetPath = originalPath;
+		if (await this.localPathExists(targetPath)) {
+			if (conflictPolicy === 'cancel') {
+				return { relativePath, path: originalPath, ok: false, conflict: true, message: 'An item with the same name already exists.' };
+			}
+			targetPath = await this.findLocalKeepBothPath(targetPath);
+		}
+		if (!await this.localPathExists(payloadPath)) {
+			throw new Error('Recycle-bin file no longer exists.');
+		}
+		await fsp.mkdir(dirname(targetPath), { recursive: true });
+		await fsp.rename(payloadPath, targetPath);
+		await this.cleanupLocalTrashPathAfterRestore(item, payloadPath);
+		return { relativePath, path: originalPath, restoredPath: targetPath, ok: true, message: 'Restored.' };
+	}
+
+	private async cleanupLocalTrashPathAfterRestore(item: ITurboFileTrashItem, payloadPath: string): Promise<void> {
+		let parent = dirname(payloadPath);
+		while (!trashPathsEqual(parent, item.payloadPath, true)) {
+			if (!parent || !parent.toLocaleLowerCase().startsWith(`${item.payloadPath.replace(/[\\/]+$/, '').toLocaleLowerCase()}\\`)) {
+				break;
+			}
+			try {
+				await fsp.rmdir(parent);
+			} catch {
+				break;
+			}
+			parent = dirname(parent);
+		}
+		const remaining = await fsp.readdir(item.payloadPath).catch(error => {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				return [];
+			}
+			throw error;
+		});
+		if (!remaining.length) {
+			try {
+				await fsp.rmdir(item.payloadPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+					throw error;
+				}
+			}
+			await fsp.rm(join(item.trashRoot, 'info', `${item.id}.json`), { force: true });
+		}
+	}
+
+	private async restoreRemoteTrashPath(device: ITurboFileTrashDevice, item: ITurboFileTrashItem, relativePath: string, payloadPath: string, originalPath: string, conflictPolicy: ITurboFileRestoreTrashPathsRequest['conflictPolicy']): Promise<ITurboFileTrashItemResult> {
+		if (!device.connection) {
+			throw new Error('SSH recycle-bin operations require a connection.');
+		}
+		const endpoint: ITurboFileTransferEndpoint = { kind: 'ssh', path: payloadPath, connection: device.connection, label: device.label };
+		let targetPath = originalPath;
+		let conflict = false;
+		await this.withDirectorySftp(endpoint, async sftp => {
+			if (!await this.remotePathExists(sftp, payloadPath)) {
+				throw new Error('Recycle-bin file no longer exists.');
+			}
+			if (await this.remotePathExists(sftp, targetPath)) {
+				if (conflictPolicy === 'cancel') {
+					conflict = true;
+					return;
+				}
+				targetPath = await this.findRemoteKeepBothPath(sftp, targetPath);
+			}
+			await this.ensureRemoteDirectory(sftp, getRemoteParentPath(targetPath));
+		});
+		if (conflict) {
+			return { relativePath, path: originalPath, ok: false, conflict: true, message: 'An item with the same name already exists.' };
+		}
+		await this.moveRemotePathWithFallback(endpoint, targetPath);
+		await this.cleanupRemoteTrashPathAfterRestore(endpoint, item, payloadPath);
+		return { relativePath, path: originalPath, restoredPath: targetPath, ok: true, message: 'Restored.' };
+	}
+
+	private async cleanupRemoteTrashPathAfterRestore(endpoint: ITurboFileTransferEndpoint, item: ITurboFileTrashItem, payloadPath: string): Promise<void> {
+		const windowsPath = looksLikeWindowsPath(item.payloadPath);
+		await this.withDirectorySftp(endpoint, async sftp => {
+			let parent = getRemoteParentPath(payloadPath);
+			while (!trashPathsEqual(parent, item.payloadPath, windowsPath) && isTrashChildPath(item.payloadPath, parent, windowsPath)) {
+				try {
+					await this.rmdirRemote(sftp, parent);
+				} catch {
+					break;
+				}
+				parent = getRemoteParentPath(parent);
+			}
+			const remaining = await this.readRemoteDirectory(sftp, item.payloadPath).catch(() => undefined);
+			if (remaining?.length === 0) {
+				await this.rmdirRemote(sftp, item.payloadPath).catch(() => undefined);
+				await this.unlinkRemote(sftp, joinRemotePath(joinRemotePath(item.trashRoot, 'info'), `${item.id}.json`));
+			}
+		});
 	}
 
 	async renameTrashItem(request: ITurboFileRenameTrashItemRequest): Promise<ITurboFileFileOperationResult> {
@@ -14544,6 +14679,17 @@ function trashPathsEqual(left: string, right: string, windowsPath: boolean): boo
 		return windowsPath ? withoutTrailingSeparators.toLowerCase() : withoutTrailingSeparators;
 	};
 	return normalize(left) === normalize(right);
+}
+
+function isTrashChildPath(rootPath: string, candidatePath: string, windowsPath: boolean): boolean {
+	const separator = windowsPath ? '\\' : '/';
+	const normalize = (value: string) => {
+		const normalized = windowsPath ? value.replace(/\//g, '\\') : value.replace(/\\/g, '/');
+		const withoutTrailingSeparators = normalized.replace(windowsPath ? /\\+$/ : /\/+$/, '');
+		return windowsPath ? withoutTrailingSeparators.toLocaleLowerCase() : withoutTrailingSeparators;
+	};
+	const root = normalize(rootPath);
+	return normalize(candidatePath).startsWith(`${root}${separator}`);
 }
 
 function buildPosixTrashRootInvocations(functionName: string, rememberedRoots: readonly string[]): string {

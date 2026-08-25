@@ -80,6 +80,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const moveToTrash = methodBlock(service, 'async movePathsToTrash', 'private async movePathsToTrashCore');
 		const restoreTrash = methodBlock(service, 'async restoreTrashItems', 'private async restoreTrashItemsCore');
+		const restoreTrashPaths = methodBlock(service, 'async restoreTrashPaths', 'private async restoreLocalTrashPath');
+		const cleanupLocalTrashPath = methodBlock(service, 'private async cleanupLocalTrashPathAfterRestore', 'private async restoreRemoteTrashPath');
 		const permanentDelete = methodBlock(service, 'async permanentlyDeleteTrashItems', 'private async permanentlyDeleteTrashItemsCore');
 		const emptyTrash = methodBlock(service, 'async emptyTrash', 'private async emptyTrashCore');
 		const deletePaths = methodBlock(service, 'async deletePaths', 'private async deletePathsCore');
@@ -87,11 +89,15 @@ suite('TurboFileSshMainServiceStatic', () => {
 
 		assert.ok(moveToTrash.includes('await this.movePathsToTrashCore(request)'));
 		assert.ok(restoreTrash.includes('return this.restoreTrashItemsCore(request);'));
+		assert.ok(restoreTrashPaths.includes('resolveTurboFileTrashChildPaths'));
+		assert.ok(restoreTrashPaths.includes('this.isSafeTrashItem(item)'));
+		assert.ok(cleanupLocalTrashPath.includes('await fsp.rmdir(item.payloadPath)'));
+		assert.ok(!cleanupLocalTrashPath.includes("fsp.rm(item.payloadPath, { recursive: false"));
 		assert.ok(permanentDelete.includes('await this.permanentlyDeleteTrashItemsCore(request)'));
 		assert.ok(emptyTrash.includes('await this.emptyTrashCore(device, progressId)'));
 		assert.ok(deletePaths.includes('await this.deletePathsCore(endpoints, recursive, progressId)'));
 		assert.ok(movePaths.includes('await this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId)'));
-		for (const block of [moveToTrash, restoreTrash, permanentDelete, emptyTrash, deletePaths, movePaths]) {
+		for (const block of [moveToTrash, restoreTrash, restoreTrashPaths, permanentDelete, emptyTrash, deletePaths, movePaths]) {
 			assert.ok(!block.includes('fileOperationQueue'));
 		}
 	});

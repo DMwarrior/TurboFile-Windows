@@ -3683,6 +3683,23 @@ body.hc-black .turbofile-live-transfer-panel {
 	font-size: 14px;
 }
 
+.turbofile-image-page-count {
+	min-width: 48px;
+	height: 28px;
+	padding: 0 8px;
+	border-radius: 7px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	background: var(--tf-image-control-bg);
+	color: var(--tf-image-control-text);
+	box-shadow: var(--tf-image-control-shadow);
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
 .turbofile-image-page-sort {
 	position: relative;
 	display: inline-flex;

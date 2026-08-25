@@ -99,7 +99,7 @@
 
 ## 快速开始
 
-1. 下载 [`TurboFileSetup-win32-x64-1.167.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.167.0/TurboFileSetup-win32-x64-1.167.0.exe)。
+1. 下载 [`TurboFileSetup-win32-x64-1.168.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe)。
 2. 在 Windows x64 上安装并启动极速传。
 3. 添加 SSH/NAS/边缘设备，或选择 Windows 本地磁盘。
 4. 在左右面板分别打开源端和目标端。
@@ -122,7 +122,7 @@ $env:VSCODE_SKIP_PRELAUNCH='1'
 
 ## 项目状态
 
-- 当前公开版本：**v1.167.0**
+- 当前公开版本：**v1.168.0**
 - 当前安装包平台：**Windows x64**
 - 唯一主分支：**`main`**
 - 欢迎通过 [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues) 提交可复现的问题和建议。

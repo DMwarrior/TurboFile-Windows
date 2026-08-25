@@ -99,7 +99,7 @@ This design keeps fast paths fast without assuming every NAS or edge device expo
 
 ## Get started
 
-1. Download [`TurboFileSetup-win32-x64-1.167.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.167.0/TurboFileSetup-win32-x64-1.167.0.exe).
+1. Download [`TurboFileSetup-win32-x64-1.168.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe).
 2. Install and launch TurboFile on Windows x64.
 3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
 4. Open endpoints in the left and right panes.
@@ -122,7 +122,7 @@ For the full upstream development prerequisites and platform notes, see the buil
 
 ## Project status
 
-- Current public release: **v1.167.0**
+- Current public release: **v1.168.0**
 - Current installer target: **Windows x64**
 - Primary branch: **`main`**
 - Issues and reproducible bug reports are welcome in [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues).

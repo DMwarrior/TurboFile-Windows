@@ -225,6 +225,22 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(editor.includes('this.updateImageGridAfterLocalMutation(state);'));
 	});
 
+	test('shows recycle-bin-only image restore and updates the selected-image counter in place', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const renderImageGrid = editor.slice(editor.indexOf('private renderImageGridPage('), editor.indexOf('private reflowAttachedImageGridBody('));
+		const restoreImages = editor.slice(editor.indexOf('private async restoreSelectedImageGridItems('), editor.indexOf('private async confirmImageGridRestoreConflicts('));
+		const updateSelection = editor.slice(editor.indexOf('private updateImageGridSelection('), editor.indexOf('private updateImageGridSelectionStatus('));
+
+		assert.ok(renderImageGrid.includes('if (state.trashContext)'));
+		assert.ok(renderImageGrid.includes('turbofile-image-page-action.is-restore'));
+		assert.ok(renderImageGrid.indexOf('turbofile-image-page-action.is-restore') < renderImageGrid.indexOf('turbofile-image-page-action.is-delete'));
+		assert.ok(renderImageGrid.includes('turbofile-image-page-count'));
+		assert.ok(restoreImages.includes('this.sshService.restoreTrashPaths({'));
+		assert.ok(restoreImages.includes('this.sshService.restoreTrashItems({'));
+		assert.ok(restoreImages.includes('this.removeRestoredImageGridItems('));
+		assert.ok(updateSelection.includes('imageCount.textContent = `${selectedIndexes.size} / ${state.images.length}`'));
+	});
+
 	test('routes explicit pane and image deletion through the recycle-bin service', () => {
 		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const deleteSelected = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async moveUserItemsToTrash('));
@@ -248,9 +264,26 @@ suite('TurboFileImageGridPane', () => {
 		assert.ok(permanentDelete.includes('deletePaths(endpoints, true, { progressId: task.progressId })'));
 		assert.ok(!permanentDelete.includes('deletePaths(endpoints, true, true)'));
 		assert.ok(!permanentDelete.includes('permanentDeleteSudoFailed'));
-		assert.ok(permanentDelete.includes('refreshPane(side, { force: true })'));
+		assert.ok(permanentDelete.includes('refreshPanesAfterDelete(mutationContext)'));
 		assert.ok(ordinaryDelete.includes('moveUserItemsToTrash'));
 		assert.ok(!ordinaryDelete.includes('deletePaths('));
+	});
+
+	test('invalidates stale directory reads and refreshes every pane showing a deleted path', () => {
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
+		const removePaneItems = editor.slice(editor.indexOf('private removePaneItems('), editor.indexOf('private applyOptimisticRename('));
+		const deleteSelected = editor.slice(editor.indexOf('private async deleteSelected('), editor.indexOf('private async permanentlyDeleteSelected('));
+		const deleteGrid = editor.slice(editor.indexOf('private async deleteSelectedImageGridItems('), editor.indexOf('private async permanentlyDeleteSelectedImageGridItems('));
+
+		assert.ok(removePaneItems.includes('this.getPanesShowingMutationContext(context)'));
+		assert.ok(removePaneItems.includes('this.paneRequestSeq[side]++'));
+		assert.ok(removePaneItems.includes('this.paneDirectoryCache.delete(cacheKey)'));
+		assert.ok(removePaneItems.includes('this.paneDirectoryInflight.delete(cacheKey)'));
+		assert.ok(removePaneItems.includes('this.postTransferReconcileContexts.delete(side)'));
+		assert.ok(removePaneItems.includes("await this.refreshPane(side, { force: true, silent: true })"));
+		assert.ok(deleteSelected.includes('this.removePaneItems(side, items)'));
+		assert.ok(deleteSelected.includes('await this.refreshPanesAfterDelete(mutationContext)'));
+		assert.ok(deleteGrid.includes('await this.refreshPanesAfterDelete(mutationContext)'));
 	});
 
 	test('shows ordinary and permanent deletion in the image grid context menu', () => {

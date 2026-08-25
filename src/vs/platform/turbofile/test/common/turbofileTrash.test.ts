@@ -7,7 +7,7 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ITurboFileTrashItem, ITurboFileTrashSource } from '../../common/turbofile.js';
 import { isTurboFileSafeDeletePath, runTurboFileBatchDeleteFallback, runTurboFilePosixBatchDelete, runTurboFileSingleRemoteDelete } from '../../common/turbofileDelete.js';
-import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
+import { combineTurboFileTrashOperationResults, createTurboFileKeepBothName, createTurboFileTrashFallbackResult, getTurboFileTrashDeviceIdentity, getTurboFileTrashFallbackEntries, getTurboFileTrashFallbackSources, isTurboFileProtectedTrashSource, resolveTurboFileTrashChildPaths, runTurboFileTrashFallback, sortTurboFileTrashItems } from '../../common/turbofileTrash.js';
 
 suite('TurboFileTrash', function () {
 
@@ -48,6 +48,28 @@ suite('TurboFileTrash', function () {
 			'folder (3)',
 			'.env (4)'
 		]);
+	});
+
+	test('resolves recycle-bin directory children inside payload and original roots', () => {
+		const item = {
+			payloadPath: '/home/a/.local/share/Trash/turbofile/files/id',
+			originalPath: '/data/photos',
+		} as ITurboFileTrashItem;
+		assert.deepStrictEqual(resolveTurboFileTrashChildPaths(item, 'nested\\photo.jpg', false), {
+			relativePath: 'nested/photo.jpg',
+			payloadPath: '/home/a/.local/share/Trash/turbofile/files/id/nested/photo.jpg',
+			originalPath: '/data/photos/nested/photo.jpg'
+		});
+	});
+
+	test('rejects recycle-bin directory child path escapes', () => {
+		const item = {
+			payloadPath: 'D:\\.turbofile-trash-user\\turbofile\\files\\id',
+			originalPath: 'D:\\photos'
+		} as ITurboFileTrashItem;
+		for (const candidate of ['', '..\\photo.jpg', 'nested\\..\\photo.jpg', 'D:\\photo.jpg', '\\\\server\\share\\photo.jpg', '/photo.jpg']) {
+			assert.throws(() => resolveTurboFileTrashChildPaths(item, candidate, true));
+		}
 	});
 
 	test('sorts newest deletion first without mutating the source array', () => {

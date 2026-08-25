@@ -42,6 +42,14 @@ export interface ITurboFileUpdateManifestPlatform {
 	readonly sha256?: string;
 	readonly sha256hash?: string;
 	readonly signature?: string;
+	readonly parts?: readonly ITurboFileUpdateManifestPart[];
+}
+
+export interface ITurboFileUpdateManifestPart {
+	readonly url?: string;
+	readonly size?: number;
+	readonly sha256?: string;
+	readonly sha256hash?: string;
 }
 
 export interface ITurboFileUpdateManifest {
@@ -160,7 +168,20 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 	}
 
 	const platform = pickManifestPlatform(manifest.platforms, options.arch);
-	if (!platform?.url) {
+	if (!platform) {
+		return undefined;
+	}
+	const parts = (platform.parts ?? []).flatMap(part => {
+		if (!part.url) {
+			return [];
+		}
+		return [{
+			url: part.url,
+			size: typeof part.size === 'number' && part.size >= 0 ? part.size : undefined,
+			sha256hash: normalizeTurboFileSha256Hash(part.sha256hash ?? part.sha256)
+		}];
+	});
+	if (!platform.url && !parts.length) {
 		return undefined;
 	}
 
@@ -169,6 +190,9 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 		productVersion: version,
 		url: platform.url,
 	};
+	if (parts.length) {
+		update.parts = parts;
+	}
 	const sha256hash = normalizeTurboFileSha256Hash(platform.sha256hash ?? platform.sha256);
 	if (sha256hash) {
 		update.sha256hash = sha256hash;
@@ -273,7 +297,7 @@ function pickManifestPlatform(platforms: Record<string, ITurboFileUpdateManifest
 	const keys = getManifestPlatformKeys(arch);
 	for (const key of keys) {
 		const platform = platforms[key];
-		if (platform?.url) {
+		if (platform?.url || platform?.parts?.some(part => !!part.url)) {
 			return platform;
 		}
 	}

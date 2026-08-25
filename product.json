@@ -16,6 +16,7 @@
 		"initialCheckDelayMs": 10000,
 		"checkIntervalMs": 60000,
 		"manifestUrls": [
+			"https://gitee.com/fkwarrior/TurboFile-Windows/raw/main/updater/update.json",
 			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update-proxy.json",
 			"https://github.com/DMwarrior/TurboFile-Windows/releases/download/updater/update.json"
 		]

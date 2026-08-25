@@ -61,6 +61,36 @@ export function createTurboFileKeepBothName(name: string, ordinal: number): stri
 	return `${name.slice(0, extensionIndex)} (${ordinal})${name.slice(extensionIndex)}`;
 }
 
+export interface ITurboFileTrashChildPaths {
+	readonly relativePath: string;
+	readonly payloadPath: string;
+	readonly originalPath: string;
+}
+
+/**
+ * Resolves a child of a deleted directory without allowing the request to escape either the
+ * recycle-bin payload or its original destination. The renderer performs the same check for early
+ * feedback, but this platform-layer validation is the security boundary.
+ */
+export function resolveTurboFileTrashChildPaths(item: ITurboFileTrashItem, candidatePath: string, windowsPath: boolean): ITurboFileTrashChildPaths {
+	const value = candidatePath.trim();
+	if (!value || value.includes('\0') || /^[\\/]/.test(value) || /^[a-zA-Z]:/.test(value)) {
+		throw new Error('Recycle-bin child path must be relative.');
+	}
+	const segments = value.split(/[\\/]+/);
+	if (!segments.length || segments.some(segment => !segment || segment === '.' || segment === '..')) {
+		throw new Error('Recycle-bin child path is invalid.');
+	}
+	const separator = windowsPath ? '\\' : '/';
+	const relativePath = segments.join(separator);
+	const joinChild = (root: string): string => `${root.replace(/[\\/]+$/, '')}${separator}${relativePath}`;
+	return {
+		relativePath,
+		payloadPath: joinChild(item.payloadPath),
+		originalPath: joinChild(item.originalPath)
+	};
+}
+
 export function sortTurboFileTrashItems(items: readonly ITurboFileTrashItem[]): ITurboFileTrashItem[] {
 	return [...items].sort((left, right) => right.deletedAt - left.deletedAt || left.originalName.localeCompare(right.originalName));
 }

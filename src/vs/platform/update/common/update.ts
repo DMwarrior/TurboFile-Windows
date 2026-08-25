@@ -13,6 +13,13 @@ export interface IUpdate {
 	timestamp?: number;
 	url?: string;
 	sha256hash?: string;
+	parts?: readonly IUpdatePart[];
+}
+
+export interface IUpdatePart {
+	url: string;
+	size?: number;
+	sha256hash?: string;
 }
 
 /**

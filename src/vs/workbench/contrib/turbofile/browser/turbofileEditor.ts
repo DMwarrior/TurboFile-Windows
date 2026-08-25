@@ -122,6 +122,14 @@ interface TurboFileRefreshPaneOptions {
 	readonly path?: string;
 }
 
+interface TurboFilePaneMutationContext {
+	readonly deviceId: string;
+	readonly path: string;
+	readonly windowsPath: boolean;
+	readonly trashRoot: boolean;
+	readonly trashBrowseItemId?: string;
+}
+
 interface TurboFileDirectoryCacheEntry {
 	readonly expiresAt: number;
 	readonly path: string;
@@ -205,6 +213,10 @@ interface TurboFileImageGridState {
 	readonly side: 'left' | 'right';
 	readonly path: string;
 	readonly displayMode: TurboFileImageGridDisplayMode;
+	readonly trashContext?: {
+		readonly browseItem?: ITurboFileTrashItem;
+		readonly windowsPath: boolean;
+	};
 	readonly images: TurboFileImageGridImage[];
 	selectedIndex: number;
 	selectedIndexes: Set<number>;
@@ -6328,6 +6340,20 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(headerLeft);
 
 		const actions = $('.turbofile-image-page-actions');
+		if (state.trashContext) {
+			const restoreButton = $('button.turbofile-image-page-action.is-restore') as HTMLButtonElement;
+			const restoreCount = this.getImageGridDeleteTargets(state).length;
+			restoreButton.type = 'button';
+			restoreButton.title = restoreCount ? '还原选中图片' : '请先选择要还原的图片';
+			restoreButton.disabled = restoreCount === 0;
+			restoreButton.setAttribute('aria-label', '还原选中图片');
+			restoreButton.appendChild(renderIcon(Codicon.discard));
+			restoreButton.addEventListener('click', () => {
+				this.setActiveImageGridState(state);
+				void this.restoreSelectedImageGridItems(state);
+			});
+			actions.appendChild(restoreButton);
+		}
 		const deleteButton = $('button.turbofile-image-page-action.is-delete.is-danger') as HTMLButtonElement;
 		const selectedCount = this.getImageGridDeleteTargets(state).length;
 		deleteButton.type = 'button';
@@ -6340,6 +6366,11 @@ export class TurboFileEditor extends EditorPane {
 			void this.deleteSelectedImageGridItems(state);
 		});
 		actions.appendChild(deleteButton);
+		const imageCount = $('span.turbofile-image-page-count');
+		imageCount.textContent = `${this.getImageGridSelectedIndexes(state).length} / ${state.images.length}`;
+		imageCount.title = '已选图片 / 图片总数';
+		imageCount.setAttribute('aria-label', '已选图片 / 图片总数');
+		actions.appendChild(imageCount);
 		actions.appendChild(this.renderImageGridSortControl(state));
 		const closeIcon = $('button.turbofile-image-page-action.is-close') as HTMLButtonElement;
 		closeIcon.type = 'button';
@@ -11000,6 +11031,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const mutationContext = this.capturePaneMutationContext(side);
 		this.removePaneItems(side, items);
 		const task = this.beginTask('delete', batch ? `删除 ${items.length} 项` : `删除 ${items[0].name}`, device.name);
 		try {
@@ -11009,7 +11041,7 @@ export class TurboFileEditor extends EditorPane {
 				this.paneStates[side].trashHasItems = true;
 			}
 			this.updateTask(task, `正在刷新目录：${device.name}`, 90);
-			await this.refreshPane(side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 			if (!result.ok) {
 				this.finishTask(task, 'error', `删除失败：${result.message}`, { error: result.message });
 				return;
@@ -11018,7 +11050,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `删除失败：${message}`, { error: message });
-			await this.refreshPane(side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 	}
 
@@ -11049,6 +11081,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		const mutationContext = this.capturePaneMutationContext(side);
 		const task = this.beginTask('delete', localize('turbofile.permanentDeleteTask', "永久删除 {0} 项", items.length), device.name);
 		this.removePaneItems(side, items);
 		try {
@@ -11057,7 +11090,7 @@ export class TurboFileEditor extends EditorPane {
 			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
 			const result = await this.sshService.deletePaths(endpoints, true, { progressId: task.progressId });
 			this.updateTask(task, localize('turbofile.refreshingDirectoryAfterPermanentDelete', "正在刷新目录：{0}", device.name), 90);
-			await this.refreshPane(side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 			if (!result.ok) {
 				this.finishTask(task, 'error', this.formatPermanentDeleteError(result.message), { error: result.message, durationMs: Date.now() - task.startedAt });
 				return false;
@@ -11067,7 +11100,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', this.formatPermanentDeleteError(message), { error: message, durationMs: Date.now() - task.startedAt });
-			await this.refreshPane(side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 			return false;
 		}
 	}
@@ -11077,7 +11110,13 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private removePaneItems(side: 'left' | 'right', items: TurboFileFileItem[]): void {
-		if (this.removePaneItemsFromState(side, items)) {
+		const context = this.capturePaneMutationContext(side);
+		const sides = context ? this.getPanesShowingMutationContext(context) : [side];
+		let changed = false;
+		for (const visibleSide of sides) {
+			changed = this.removePaneItemsFromState(visibleSide, items) || changed;
+		}
+		if (changed) {
 			this.render();
 		}
 	}
@@ -11088,14 +11127,75 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 		const state = this.paneStates[side];
-		state.items = state.items.filter(item => !item.path || !paths.has(item.path));
+		const remainingItems = state.items.filter(item => !item.path || !paths.has(item.path));
+		if (remainingItems.length === state.items.length) {
+			return false;
+		}
+		state.items = remainingItems;
 		this.clearPaneSelection(side);
 		this.fileListRenderedRange[side] = undefined;
+		// A directory request that started before this mutation can contain the deleted rows. Make the
+		// request stale immediately so it can never overwrite the optimistic state while deletion runs.
+		this.paneRequestSeq[side]++;
+		state.loading = false;
+		this.postTransferReconcileContexts.delete(side);
+		this.postTransferReconcileGeneration[side]++;
 		const device = this.getPaneDevice(side);
 		if (device) {
-			this.paneDirectoryCache.delete(this.getPaneDirectoryCacheKey(device, state.path));
+			const cacheKey = this.getPaneDirectoryCacheKey(device, state.path);
+			this.paneDirectoryCache.delete(cacheKey);
+			this.paneDirectoryInflight.delete(cacheKey);
 		}
+		this.rememberPaneDeviceSnapshot(side);
 		return true;
+	}
+
+	private capturePaneMutationContext(side: 'left' | 'right'): TurboFilePaneMutationContext | undefined {
+		const device = this.getPaneDevice(side);
+		if (!device) {
+			return undefined;
+		}
+		const state = this.paneStates[side];
+		return {
+			deviceId: device.id,
+			path: state.path,
+			windowsPath: this.isWindowsDevice(device),
+			trashRoot: isTurboFileTrashRootView(state.trashMode),
+			trashBrowseItemId: state.trashMode.browseItem?.id
+		};
+	}
+
+	private getPanesShowingMutationContext(context: TurboFilePaneMutationContext): ('left' | 'right')[] {
+		return (['left', 'right'] as const).filter(side => {
+			if (this.getPaneDevice(side)?.id !== context.deviceId) {
+				return false;
+			}
+			const state = this.paneStates[side];
+			if (context.trashRoot) {
+				return isTurboFileTrashRootView(state.trashMode);
+			}
+			if (context.trashBrowseItemId) {
+				return state.trashMode.browseItem?.id === context.trashBrowseItemId
+					&& this.pathsEqualForDevice(state.path, context.path, context.windowsPath);
+			}
+			return !state.trashMode.active && this.pathsEqualForDevice(state.path, context.path, context.windowsPath);
+		});
+	}
+
+	private async refreshPanesAfterDelete(context: TurboFilePaneMutationContext | undefined): Promise<void> {
+		if (!context) {
+			return;
+		}
+		await Promise.all(this.getPanesShowingMutationContext(context).map(async side => {
+			const state = this.paneStates[side];
+			if (isTurboFileTrashRootView(state.trashMode)) {
+				await this.refreshTrashPane(side);
+			} else if (state.trashMode.browseItem) {
+				await this.refreshTrashBrowsePane(side, true);
+			} else {
+				await this.refreshPane(side, { force: true, silent: true });
+			}
+		}));
 	}
 
 	private applyOptimisticRename(side: 'left' | 'right', item: TurboFileFileItem, targetName: string, targetPath: string): TurboFileOptimisticRenameSnapshot | undefined {
@@ -11350,6 +11450,10 @@ export class TurboFileEditor extends EditorPane {
 			side,
 			path: state.path,
 			displayMode,
+			trashContext: state.trashMode.active ? {
+				browseItem: state.trashMode.browseItem,
+				windowsPath: this.isWindowsDevice(this.getPaneDevice(side)!)
+			} : undefined,
 			images,
 			selectedIndex,
 			selectedIndexes,
@@ -11839,6 +11943,176 @@ export class TurboFileEditor extends EditorPane {
 		this.statusMessage = `已复制图片：${name}`;
 	}
 
+	private getImageGridTrashRelativePath(state: TurboFileImageGridState, path: string): string | undefined {
+		const item = state.trashContext?.browseItem;
+		if (!item || !isTurboFileTrashBrowsePathAllowed(item.payloadPath, path, state.trashContext!.windowsPath)) {
+			return undefined;
+		}
+		const windowsPath = state.trashContext!.windowsPath;
+		const root = windowsPath ? item.payloadPath.replace(/\//g, '\\').replace(/\\+$/, '') : item.payloadPath.replace(/\\/g, '/').replace(/\/+$/, '');
+		const candidate = windowsPath ? path.replace(/\//g, '\\') : path.replace(/\\/g, '/');
+		const relativePath = candidate.slice(root.length).replace(/^[\\/]+/, '');
+		return relativePath || undefined;
+	}
+
+	private async restoreSelectedImageGridItems(state: TurboFileImageGridState): Promise<void> {
+		const device = this.getPaneDevice(state.side);
+		const context = state.trashContext;
+		const targets = this.getImageGridDeleteTargets(state).filter(({ image }) => !!image.item.path);
+		if (!device || !context || !targets.length) {
+			return;
+		}
+
+		try {
+			const trashDevice = await this.toTrashDevice(device);
+			let result: ITurboFileTrashOperationResult;
+			if (context.browseItem) {
+				const paths = targets.map(({ image }) => ({
+					relativePath: this.getImageGridTrashRelativePath(state, image.item.path!) ?? '',
+					type: image.item.type
+				}));
+				result = await this.sshService.restoreTrashPaths({ device: trashDevice, item: context.browseItem, paths, conflictPolicy: 'cancel' });
+				const conflicts = result.results.filter(item => item.conflict && item.relativePath).map(item => item.relativePath!);
+				if (conflicts.length && await this.confirmImageGridRestoreConflicts(conflicts.length)) {
+					const retry = await this.sshService.restoreTrashPaths({
+						device: trashDevice,
+						item: context.browseItem,
+						paths: paths.filter(path => conflicts.includes(path.relativePath)),
+						conflictPolicy: 'keepBoth'
+					});
+					result = this.mergeTrashRestoreResults(result, retry);
+				}
+			} else {
+				const items = targets.map(({ image }) => image.item.trashItem).filter((item): item is ITurboFileTrashItem => !!item);
+				result = await this.sshService.restoreTrashItems({ device: trashDevice, items, conflictPolicy: 'cancel' });
+				const itemsById = new Map(items.map(item => [item.id, item]));
+				const conflicts = result.results.filter(item => item.conflict && item.id).map(item => itemsById.get(item.id!)).filter((item): item is ITurboFileTrashItem => !!item);
+				if (conflicts.length && await this.confirmImageGridRestoreConflicts(conflicts.length)) {
+					const retry = await this.sshService.restoreTrashItems({ device: trashDevice, items: conflicts, conflictPolicy: 'keepBoth' });
+					result = this.mergeTrashRestoreResults(result, retry);
+				}
+			}
+
+			const successfulImages = new Set<TurboFileImageGridImage>();
+			if (context.browseItem) {
+				const successfulPaths = new Set(result.results.filter(item => item.ok && item.relativePath).map(item => context.windowsPath ? item.relativePath!.toLocaleLowerCase() : item.relativePath!));
+				for (const target of targets) {
+					const relativePath = this.getImageGridTrashRelativePath(state, target.image.item.path!);
+					if (relativePath && successfulPaths.has(context.windowsPath ? relativePath.toLocaleLowerCase() : relativePath)) {
+						successfulImages.add(target.image);
+					}
+				}
+			} else {
+				const successfulIds = new Set(result.results.filter(item => item.ok && item.id).map(item => item.id));
+				for (const target of targets) {
+					if (target.image.item.trashItem && successfulIds.has(target.image.item.trashItem.id)) {
+						successfulImages.add(target.image);
+					}
+				}
+			}
+
+			this.removeRestoredImageGridItems(state, successfulImages, new Set(targets.map(target => target.image)));
+			this.statusMessage = result.failed
+				? localize('turbofile.imageGridRestorePartial', "已还原 {0} 张图片，失败 {1} 张。", result.completed, result.failed)
+				: localize('turbofile.imageGridRestoreComplete', "已还原 {0} 张图片。", result.completed);
+			const restoredPaths = result.results.filter(item => item.ok).map(item => item.restoredPath ?? item.path);
+			if (!state.images.length) {
+				this.closeImageGridPage(state);
+				if (context.browseItem) {
+					// Restoring the final child removes the trash payload directory and its metadata.
+					// Leave that now-invalid directory before refreshing so the pane returns to the
+					// recycle-bin root instead of surfacing an ENOENT listing error.
+					await this.leaveTrashDirectory(state.side);
+				} else {
+					await this.refreshTrashPane(state.side);
+				}
+			} else {
+				this.updateImageGridAfterLocalMutation(state);
+				await this.refreshTrashPane(state.side);
+			}
+			await this.refreshVisibleRestoredPaths(restoredPaths);
+		} catch (error) {
+			this.statusMessage = localize('turbofile.imageGridRestoreFailed', "还原图片失败：{0}", error instanceof Error ? error.message : String(error));
+			this.updateImageGridSelection(state);
+		}
+	}
+
+	private async confirmImageGridRestoreConflicts(conflictCount: number): Promise<boolean> {
+		return this.showDialogConfirm(
+			localize('turbofile.restoreConflictTitle', "还原名称冲突"),
+			localize('turbofile.restoreImageConflictMessage', "原位置已有 {0} 张同名图片，是否自动添加序号并保留两者？", conflictCount),
+			undefined,
+			false,
+			localize('turbofile.keepBoth', "保留两者")
+		);
+	}
+
+	private mergeTrashRestoreResults(first: ITurboFileTrashOperationResult, retry: ITurboFileTrashOperationResult): ITurboFileTrashOperationResult {
+		const results = [...first.results.filter(item => !item.conflict), ...retry.results];
+		const completed = results.filter(item => item.ok).length;
+		return {
+			ok: results.every(item => item.ok),
+			message: retry.message,
+			completed,
+			failed: results.length - completed,
+			results
+		};
+	}
+
+	private removeRestoredImageGridItems(state: TurboFileImageGridState, successfulImages: Set<TurboFileImageGridImage>, attemptedImages: Set<TurboFileImageGridImage>): void {
+		const firstRemovedIndex = state.images.findIndex(image => successfulImages.has(image));
+		const loadedThumbnailImages = new Set(Array.from(state.loadedThumbnailIndexes, index => state.images[index]).filter((image): image is TurboFileImageGridImage => !!image));
+		const loadedPreviewImages = new Set(Array.from(state.loadedPreviewIndexes, index => state.images[index]).filter((image): image is TurboFileImageGridImage => !!image));
+		const pendingPreviewImage = state.previewPendingIndex === undefined ? undefined : state.images[state.previewPendingIndex];
+		state.thumbnailLoadToken++;
+		for (let index = state.images.length - 1; index >= 0; index--) {
+			const image = state.images[index];
+			if (!successfulImages.has(image)) {
+				continue;
+			}
+			this.releaseImageGridImage(image);
+			state.images.splice(index, 1);
+			this.removePaneItemsFromState(state.side, [image.item]);
+		}
+		state.selectedIndexes.clear();
+		for (const [index, image] of state.images.entries()) {
+			if (attemptedImages.has(image)) {
+				state.selectedIndexes.add(index);
+			}
+		}
+		if (state.images.length) {
+			state.selectedIndex = state.selectedIndexes.values().next().value ?? Math.max(0, Math.min(firstRemovedIndex, state.images.length - 1));
+			if (!state.selectedIndexes.size) {
+				state.selectedIndexes.add(state.selectedIndex);
+			}
+			state.selectionAnchorIndex = state.selectedIndex;
+		} else {
+			state.selectedIndex = 0;
+			state.selectionAnchorIndex = undefined;
+		}
+		state.renderedRange = undefined;
+		this.clearImageGridThumbnailQueue();
+		this.clearImageGridPreviewPrefetchTimer();
+		state.loadedThumbnailIndexes.clear();
+		state.loadedPreviewIndexes.clear();
+		for (const [index, image] of state.images.entries()) {
+			if (loadedThumbnailImages.has(image)) {
+				state.loadedThumbnailIndexes.add(index);
+			}
+			if (loadedPreviewImages.has(image)) {
+				state.loadedPreviewIndexes.add(index);
+			}
+		}
+		const nextPendingPreviewIndex = pendingPreviewImage ? state.images.indexOf(pendingPreviewImage) : -1;
+		if (nextPendingPreviewIndex >= 0) {
+			state.previewPendingIndex = nextPendingPreviewIndex;
+		} else if (state.previewPendingIndex !== undefined) {
+			this.imageGridPreviewRequestSeq++;
+			state.previewPendingIndex = undefined;
+			state.previewPendingRequestSeq = undefined;
+		}
+	}
+
 	private async deleteSelectedImageGridItems(state: TurboFileImageGridState | undefined = this.imageGridState): Promise<void> {
 		const device = state ? this.getPaneDevice(state.side) : undefined;
 		if (!state || !device) {
@@ -11876,6 +12150,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const mutationContext = this.capturePaneMutationContext(state.side);
 		const firstDeletedIndex = targets[0].index;
 		const keepPreviewVisible = state.previewVisible;
 		const scrollTop = this.getImageGridBodyElement(state)?.scrollTop ?? state.scrollTop;
@@ -11925,14 +12200,15 @@ export class TurboFileEditor extends EditorPane {
 			}
 			if (!result.ok) {
 				this.finishTask(task, 'error', `删除失败：${result.message}`, { error: result.message }, false);
-				await this.refreshPane(state.side, { force: true });
+				await this.refreshPanesAfterDelete(mutationContext);
 				return;
 			}
 			this.finishTask(task, 'success', batch ? `已删除：${items.length} 张图片` : `已删除：${items[0].name}`, {}, false);
+			await this.refreshPanesAfterDelete(mutationContext);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `\u5220\u9664\u5931\u8d25\uff1a${message}`, { error: message }, false);
-			await this.refreshPane(state.side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 	}
 
@@ -11976,6 +12252,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
+		const mutationContext = this.capturePaneMutationContext(state.side);
 		const deleteIndex = state.selectedIndex;
 		this.releaseImageGridImage(image);
 		state.images.splice(deleteIndex, 1);
@@ -12018,7 +12295,7 @@ export class TurboFileEditor extends EditorPane {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `Delete failed: ${message}`, { error: message });
 		} finally {
-			await this.refreshPane(state.side, { force: true });
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 	}
 
@@ -12074,6 +12351,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
+		const mutationContext = this.capturePaneMutationContext(side);
 		const task = this.beginTask('delete', items.length > 1 ? `永久删除 ${items.length} 项` : `永久删除 ${items[0].name}`, device.name);
 		this.removePaneItems(side, items);
 		try {
@@ -12082,7 +12360,7 @@ export class TurboFileEditor extends EditorPane {
 			const endpoints = await Promise.all(items.filter(item => !!item.path).map(item => this.toTransferEndpoint(device, item.path!, connection)));
 			const result = await this.sshService.deletePaths(endpoints, true, { progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站目录：${device.name}`, 90);
-			await this.refreshTrashBrowsePane(side, true);
+			await this.refreshPanesAfterDelete(mutationContext);
 			if (!result.ok) {
 				this.finishTask(task, 'error', `永久删除失败：${result.message}`, { error: result.message, durationMs: Date.now() - task.startedAt });
 				return true;
@@ -12091,7 +12369,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', `永久删除失败：${message}`, { error: message, durationMs: Date.now() - task.startedAt });
-			await this.refreshTrashBrowsePane(side, true);
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 		return true;
 	}
@@ -13578,6 +13856,16 @@ export class TurboFileEditor extends EditorPane {
 			deleteButton.disabled = deleteTargetCount === 0;
 			deleteButton.title = deleteTargetCount ? '\u5220\u9664\u9009\u4e2d\u56fe\u7247' : '\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684\u56fe\u7247';
 		}
+		const restoreButton = root.querySelector<HTMLButtonElement>('.turbofile-image-page-action.is-restore');
+		if (restoreButton) {
+			const restoreTargetCount = this.getImageGridDeleteTargets(state).length;
+			restoreButton.disabled = restoreTargetCount === 0;
+			restoreButton.title = restoreTargetCount ? '还原选中图片' : '请先选择要还原的图片';
+		}
+		const imageCount = root.querySelector<HTMLElement>('.turbofile-image-page-count');
+		if (imageCount) {
+			imageCount.textContent = `${selectedIndexes.size} / ${state.images.length}`;
+		}
 		const meta = this.container.querySelector<HTMLElement>('.turbofile-task-meta');
 		if (meta && !this.tasks[0]) {
 			meta.textContent = this.statusMessage;
@@ -13751,7 +14039,7 @@ export class TurboFileEditor extends EditorPane {
 		await this.refreshTrashBrowsePane(side, true);
 	}
 
-	private leaveTrashDirectory(side: 'left' | 'right'): void {
+	private async leaveTrashDirectory(side: 'left' | 'right'): Promise<void> {
 		const state = this.paneStates[side];
 		if (!state.trashMode.browseItem) {
 			return;
@@ -13763,7 +14051,7 @@ export class TurboFileEditor extends EditorPane {
 		this.resetPaneScroll(side);
 		this.clearPaneSelection(side);
 		this.render();
-		void this.refreshTrashPane(side);
+		await this.refreshTrashPane(side);
 	}
 
 	private getTrashBrowseRelativePath(mode: TurboFileTrashPaneMode): string {
@@ -13981,6 +14269,10 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async refreshVisibleRestoredDirectories(items: readonly ITurboFileTrashItem[]): Promise<void> {
+		return this.refreshVisibleRestoredPaths(items.map(item => item.originalPath));
+	}
+
+	private async refreshVisibleRestoredPaths(paths: readonly string[]): Promise<void> {
 		for (const side of ['left', 'right'] as const) {
 			const state = this.paneStates[side];
 			if (state.trashMode.active) {
@@ -13991,7 +14283,7 @@ export class TurboFileEditor extends EditorPane {
 				continue;
 			}
 			const windowsPath = this.isWindowsDevice(device);
-			if (items.some(item => this.pathsEqualForDevice(getPaneParentPath(item.originalPath, windowsPath) ?? item.originalPath, state.path, windowsPath))) {
+			if (paths.some(path => this.pathsEqualForDevice(getPaneParentPath(path, windowsPath) ?? path, state.path, windowsPath))) {
 				await this.refreshPane(side, { force: true, silent: true });
 			}
 		}
@@ -13999,7 +14291,8 @@ export class TurboFileEditor extends EditorPane {
 
 	private async permanentlyDeleteSelectedTrashItems(side: 'left' | 'right'): Promise<boolean> {
 		const device = this.getPaneDevice(side);
-		const items = this.getSelectedTrashItems(side);
+		const selectedItems = this.getSelectedTransferItems(side);
+		const items = selectedItems.map(item => item.trashItem).filter((item): item is ITurboFileTrashItem => !!item);
 		if (!device || !items.length) {
 			return false;
 		}
@@ -14012,12 +14305,14 @@ export class TurboFileEditor extends EditorPane {
 		)) {
 			return false;
 		}
+		const mutationContext = this.capturePaneMutationContext(side);
+		this.removePaneItems(side, selectedItems);
 		const task = this.beginTask('delete', items.length > 1 ? `永久删除 ${items.length} 项` : `永久删除 ${items[0].originalName}`, device.name);
 		try {
 			this.updateTask(task, items.length > 1 ? `正在永久删除 ${items.length} 项…` : `正在永久删除：${items[0].originalName}`, 40);
 			const result = await this.sshService.permanentlyDeleteTrashItems({ device: await this.toTrashDevice(device), items, progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站：${device.name}`, 90);
-			await this.refreshTrashPane(side);
+			await this.refreshPanesAfterDelete(mutationContext);
 			if (result.ok) {
 				this.finishTask(task, 'success', localize('turbofile.permanentDeleteComplete', "已永久删除 {0} 个项目。", result.completed), { durationMs: Date.now() - task.startedAt });
 			} else {
@@ -14027,7 +14322,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', localize('turbofile.permanentDeleteFailed', "永久删除失败：{0}", message), { error: message, durationMs: Date.now() - task.startedAt });
-			await this.refreshTrashPane(side);
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 		return true;
 	}
@@ -14046,12 +14341,14 @@ export class TurboFileEditor extends EditorPane {
 		)) {
 			return;
 		}
+		const mutationContext = this.capturePaneMutationContext(side);
+		this.removePaneItems(side, this.paneStates[side].items.filter(item => !item.parent));
 		const task = this.beginTask('delete', '清空回收站', device.name);
 		try {
 			this.updateTask(task, `正在清空回收站：${device.name}`, 40);
 			const result = await this.sshService.emptyTrash(await this.toTrashDevice(device), { progressId: task.progressId });
 			this.updateTask(task, `正在刷新回收站：${device.name}`, 90);
-			await this.refreshTrashPane(side);
+			await this.refreshPanesAfterDelete(mutationContext);
 			if (result.ok) {
 				this.finishTask(task, 'success', localize('turbofile.recycleBinEmptied', "回收站已清空。"), { durationMs: Date.now() - task.startedAt });
 			} else {
@@ -14061,7 +14358,7 @@ export class TurboFileEditor extends EditorPane {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.finishTask(task, 'error', localize('turbofile.recycleBinEmptyFailed', "清空回收站失败：{0}", message), { error: message, durationMs: Date.now() - task.startedAt });
-			await this.refreshTrashPane(side);
+			await this.refreshPanesAfterDelete(mutationContext);
 		}
 	}
 

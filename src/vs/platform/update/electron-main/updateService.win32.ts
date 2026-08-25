@@ -5,7 +5,7 @@
 
 import { ChildProcess, spawn } from 'child_process';
 import { app } from 'electron';
-import { existsSync, unlinkSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, unlinkSync } from 'fs';
 import { mkdir, readFile, unlink } from 'fs/promises';
 import { release, tmpdir } from 'os';
 import { Delayer, ProcessTimeRunOnceScheduler, timeout } from '../../../base/common/async.js';
@@ -19,6 +19,7 @@ import { INodeProcess } from '../../../base/common/platform.js';
 import { transform } from '../../../base/common/stream.js';
 import { URI } from '../../../base/common/uri.js';
 import { checksum } from '../../../base/node/crypto.js';
+import { pipeline } from 'node:stream/promises';
 import * as pfs from '../../../base/node/pfs.js';
 import { killTree } from '../../../base/node/processes.js';
 import { getWindowsRelease } from '../../../base/node/windowsVersion.js';
@@ -424,17 +425,13 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 	private async resolveTurboFileUpdate(currentVersion: string, token: CancellationToken): Promise<IUpdate | undefined> {
 		const manifestResult = await this.resolveTurboFileUpdateFromManifestUrls(currentVersion, token);
-		if (manifestResult.checked && manifestResult.update) {
+		if (manifestResult.checked) {
 			return manifestResult.update;
 		}
 
-		// Fall back to the latest GitHub release whenever the manifest is missing OR reports no update.
-		// Previously a readable-but-stale update.json short-circuited the whole check (checked === true),
-		// so publishing a new release without also refreshing the manifest meant only some clients ever
-		// saw the update. Checking the release here makes "just publish a versioned release with the
-		// installer asset" reliably reach every client, while a manifest that DOES carry an update still
-		// wins above (for controlled rollout / sha256 verification). Guarded so a transient GitHub API
-		// failure (e.g. rate limiting) never breaks the check — it simply retries on the next cycle.
+		// A readable first-party manifest is authoritative, including when it reports that no newer
+		// version exists. GitHub is contacted only when every configured manifest source is unreachable
+		// or invalid, so users on a Gitee-capable network do not depend on GitHub for routine checks.
 		try {
 			const releaseUpdate = await this.resolveTurboFileUpdateFromGitHubReleaseUrl(currentVersion, token);
 			if (releaseUpdate) {
@@ -503,7 +500,7 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	protected override async doDownloadUpdate(state: AvailableForDownload): Promise<void> {
-		if (this.isTurboFileGitHubUpdatesEnabled() && state.update.url) {
+		if (this.isTurboFileGitHubUpdatesEnabled() && (state.update.url || state.update.parts?.length)) {
 			try {
 				await this.downloadAndPrepareUpdate(state.update, true);
 			} catch (err) {
@@ -523,7 +520,7 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	private async downloadAndPrepareUpdate(update: IUpdate, explicit: boolean): Promise<void> {
-		if (!update.url) {
+		if (!update.url && !update.parts?.length) {
 			throw new Error('Missing update download URL');
 		}
 
@@ -563,12 +560,30 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	private async downloadUpdatePackage(update: IUpdate, updatePackagePath: string, explicit: boolean, startTime: number): Promise<string> {
+		if (update.parts?.length) {
+			try {
+				return await this.downloadUpdateParts(update, updatePackagePath, explicit, startTime);
+			} catch (error) {
+				this.logService.warn('update#downloadUpdatePackage(): Gitee multipart download failed; falling back to the complete package.', error);
+				await this.unlink(`${updatePackagePath}.tmp`);
+				if (!update.url) {
+					throw error;
+				}
+			}
+		}
+		return this.downloadSingleUpdatePackage(update, updatePackagePath, explicit, startTime);
+	}
+
+	private async downloadSingleUpdatePackage(update: IUpdate, updatePackagePath: string, explicit: boolean, startTime: number): Promise<string> {
 		if (!update.url) {
-			throw new Error('Missing update download URL');
+			throw new Error('Missing complete update download URL');
 		}
 
 		const downloadPath = `${updatePackagePath}.tmp`;
 		const context = await this.requestService.request({ url: update.url, callSite: 'updateService.win32.downloadTurboFileGitHubUpdate' }, CancellationToken.None);
+		if (context.res.statusCode && context.res.statusCode >= 400) {
+			throw new Error(`Complete update download returned HTTP ${context.res.statusCode}.`);
+		}
 
 		const contentLengthHeader = context.res.headers['content-length'];
 		const contentLength = typeof contentLengthHeader === 'string' ? contentLengthHeader : undefined;
@@ -599,6 +614,64 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 
 		await pfs.Promises.rename(downloadPath, updatePackagePath, false /* no retry */);
 		return updatePackagePath;
+	}
+
+	private async downloadUpdateParts(update: IUpdate, updatePackagePath: string, explicit: boolean, startTime: number): Promise<string> {
+		const parts = update.parts;
+		if (!parts?.length) {
+			throw new Error('Missing multipart update download URLs');
+		}
+		const downloadPath = `${updatePackagePath}.tmp`;
+		const partPaths = parts.map((_, index) => `${downloadPath}.part-${String(index + 1).padStart(3, '0')}`);
+		const totalBytes = parts.every(part => typeof part.size === 'number')
+			? parts.reduce((total, part) => total + (part.size ?? 0), 0)
+			: undefined;
+		let completedBytes = 0;
+
+		try {
+			for (const [index, part] of parts.entries()) {
+				const context = await this.requestService.request({ url: part.url, callSite: 'updateService.win32.downloadTurboFileGiteeUpdatePart' }, CancellationToken.None);
+				if (context.res.statusCode && context.res.statusCode >= 400) {
+					throw new Error(`Update part ${index + 1} returned HTTP ${context.res.statusCode}.`);
+				}
+				const declaredSize = (part.size ?? Number(context.res.headers['content-length'] ?? 0)) || undefined;
+				let partBytes = 0;
+				const progressDelayer = new Delayer<void>(500);
+				const progressStream = transform<VSBuffer, VSBuffer>(
+					context.stream,
+					{
+						data: data => {
+							partBytes += data.byteLength;
+							progressDelayer.trigger(() => {
+								this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes + partBytes, totalBytes ?? (completedBytes + (declaredSize ?? 0)), startTime));
+							});
+							return data;
+						}
+					},
+					chunks => VSBuffer.concat(chunks)
+				);
+				await this.fileService.writeFile(URI.file(partPaths[index]), progressStream).finally(() => progressDelayer.dispose());
+				if (part.size !== undefined && partBytes !== part.size) {
+					throw new Error(`Update part ${index + 1} size mismatch (expected ${part.size}, actual ${partBytes}).`);
+				}
+				if (part.sha256hash) {
+					await checksum(partPaths[index], part.sha256hash);
+				}
+				completedBytes += partBytes;
+				this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes, totalBytes, startTime));
+			}
+
+			for (const [index, partPath] of partPaths.entries()) {
+				await pipeline(createReadStream(partPath), createWriteStream(downloadPath, { flags: index === 0 ? 'w' : 'a' }));
+			}
+			if (update.sha256hash) {
+				await checksum(downloadPath, update.sha256hash);
+			}
+			await pfs.Promises.rename(downloadPath, updatePackagePath, false /* no retry */);
+			return updatePackagePath;
+		} finally {
+			await Promise.all(partPaths.map(partPath => this.unlink(partPath)));
+		}
 	}
 
 	private async getUpdatePackagePath(version: string): Promise<string> {
