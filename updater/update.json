@@ -1,22 +1,22 @@
 {
-  "version": "1.168.0",
-  "name": "极速传 1.168.0",
-  "notes": "极速传 1.168.0 Windows x64 正式版本。\n\n安装包：TurboFileSetup-win32-x64-1.168.0.exe\n\nSHA-256：e3e4f03cbbf7a3a8888ac506bbdd69a3c1419ce09e0ca58a1c35f68937fedef1",
-  "pub_date": "2026-08-24T08:26:12.606Z",
+  "version": "1.169.0",
+  "name": "极速传 1.169.0",
+  "notes": "极速传 1.169.0 Windows x64 正式版本。\n\n修复从极速传拖出文件到 Windows 文件资源管理器或桌面时偶发无法识别的问题；自动更新和手动安装会迁移另一安装范围中的旧版本，避免同一电脑出现两套极速传；升级后修复桌面与开始菜单快捷方式；关于界面更新为大号黄色闪电 Logo。\n\nSHA-256：17b2cc24647dc834d54f47960664b92704de695e83bb657907b4a483a5bb9244",
+  "pub_date": "2026-08-28T05:17:36.175Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe",
-      "sha256": "e3e4f03cbbf7a3a8888ac506bbdd69a3c1419ce09e0ca58a1c35f68937fedef1",
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.169.0/TurboFileSetup-win32-x64-1.169.0.exe",
+      "sha256": "17b2cc24647dc834d54f47960664b92704de695e83bb657907b4a483a5bb9244",
       "parts": [
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe.part001",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.169.0/TurboFileSetup-win32-x64-1.169.0.exe.part001",
           "size": 94371840,
-          "sha256": "338ff9d48c42600b0a6196afd12f813ad3973e916e9a349dc2c14dc11d7af1e4"
+          "sha256": "fc472c76b050021a93457e903df8c61a42d9176b3a2f086b185eaf3dd5577015"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.168.0/TurboFileSetup-win32-x64-1.168.0.exe.part002",
-          "size": 19243954,
-          "sha256": "039b119cea7ad1f303c3d1037a24144da5b588a13d2cd75bbf3a84b334df2df0"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.169.0/TurboFileSetup-win32-x64-1.169.0.exe.part002",
+          "size": 20125239,
+          "sha256": "a1b31e810f03cc65139c67afb4315fff2293025a1feec8b1af5d0d1a5424b107"
         }
       ]
     }

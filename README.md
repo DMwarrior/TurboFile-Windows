@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases"><img alt="Latest release" src="https://img.shields.io/badge/version-1.168.0-2563eb?style=flat-square"></a>
+  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases"><img alt="Latest release" src="https://img.shields.io/badge/version-1.169.0-2563eb?style=flat-square"></a>
   <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square">
   <img alt="Protocols" src="https://img.shields.io/badge/transfer-SCP%20%7C%20SFTP%20%7C%20tar%20%7C%20rsync-14b8a6?style=flat-square">
@@ -99,7 +99,7 @@ This design keeps fast paths fast without assuming every NAS or edge device expo
 
 ## Get started
 
-1. Download [`TurboFileSetup-win32-x64-1.168.0.exe`](https://gitee.com/fkwarrior/TurboFile-Windows/releases).
+1. Download [`TurboFileSetup-win32-x64-1.169.0.exe`](https://gitee.com/fkwarrior/TurboFile-Windows/releases).
 2. Install and launch TurboFile on Windows x64.
 3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
 4. Open endpoints in the left and right panes.
@@ -109,7 +109,7 @@ The release page also contains a SHA-256 checksum for installer verification.
 
 ## Project status
 
-- Current public release: **v1.168.0**
+- Current public release: **v1.169.0**
 - Current installer target: **Windows x64**
 - Primary branch: **`main`**
 - Issues and reproducible bug reports are welcome in [GitHub Issues](https://gitee.com/fkwarrior/TurboFile-Windows/issues).

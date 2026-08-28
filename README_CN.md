@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases"><img alt="最新版本" src="https://img.shields.io/badge/version-1.168.0-2563eb?style=flat-square"></a>
+  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases"><img alt="最新版本" src="https://img.shields.io/badge/version-1.169.0-2563eb?style=flat-square"></a>
   <a href="LICENSE.txt"><img alt="开源协议" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square"></a>
   <img alt="系统平台" src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square">
   <img alt="传输协议" src="https://img.shields.io/badge/transfer-SCP%20%7C%20SFTP%20%7C%20tar%20%7C%20rsync-14b8a6?style=flat-square">
@@ -99,7 +99,7 @@
 
 ## 快速开始
 
-1. 下载 [`TurboFileSetup-win32-x64-1.168.0.exe`](https://gitee.com/fkwarrior/TurboFile-Windows/releases)。
+1. 下载 [`TurboFileSetup-win32-x64-1.169.0.exe`](https://gitee.com/fkwarrior/TurboFile-Windows/releases)。
 2. 在 Windows x64 上安装并启动极速传。
 3. 添加 SSH/NAS/边缘设备，或选择 Windows 本地磁盘。
 4. 在左右面板分别打开源端和目标端。
@@ -109,7 +109,7 @@ Release 页面同时提供安装包 SHA-256 校验文件。
 
 ## 项目状态
 
-- 当前公开版本：**v1.168.0**
+- 当前公开版本：**v1.169.0**
 - 当前安装包平台：**Windows x64**
 - 唯一主分支：**`main`**
 - 欢迎通过 [GitHub Issues](https://gitee.com/fkwarrior/TurboFile-Windows/issues) 提交可复现的问题和建议。
