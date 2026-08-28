@@ -4949,20 +4949,18 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .turbofile-about-app-icon {
-	width: 92px;
-	height: 92px;
+	width: 112px;
+	height: 112px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	border-radius: 28px;
-	color: #ffffff;
-	background: linear-gradient(135deg, #36a3ff, #7d5cff 72%);
-	box-shadow: 0 10px 26px color-mix(in srgb, #2f80ff 34%, transparent);
+	color: #ffc107;
+	background: transparent;
 }
 
 .turbofile-about-app-icon .turbofile-bi-icon {
-	width: 46px;
-	height: 46px;
+	width: 96px;
+	height: 96px;
 }
 
 .turbofile-about-name {

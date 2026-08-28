@@ -67,6 +67,8 @@ function buildWin32Setup(arch: string, target: string): task.CallbackTask {
 	return (cb) => {
 		const x64AppId = target === 'system' ? product.win32x64AppId : product.win32x64UserAppId;
 		const arm64AppId = target === 'system' ? product.win32arm64AppId : product.win32arm64UserAppId;
+		const incompatibleX64AppId = target === 'system' ? product.win32x64UserAppId : product.win32x64AppId;
+		const incompatibleArm64AppId = target === 'system' ? product.win32arm64UserAppId : product.win32arm64AppId;
 
 		const sourcePath = buildPath(arch);
 		const outputPath = setupDir(arch, target);
@@ -99,7 +101,7 @@ function buildWin32Setup(arch: string, target: string): task.CallbackTask {
 			ApplicationName: product.applicationName,
 			Arch: arch,
 			AppId: { 'x64': x64AppId, 'arm64': arm64AppId }[arch],
-			IncompatibleTargetAppId: { 'x64': product.win32x64AppId, 'arm64': product.win32arm64AppId }[arch],
+			IncompatibleTargetAppId: { 'x64': incompatibleX64AppId, 'arm64': incompatibleArm64AppId }[arch],
 			AppUserId: product.win32AppUserModelId,
 			ArchitecturesAllowed: { 'x64': 'x64', 'arm64': 'arm64' }[arch],
 			ArchitecturesInstallIn64BitMode: { 'x64': 'x64', 'arm64': 'arm64' }[arch],

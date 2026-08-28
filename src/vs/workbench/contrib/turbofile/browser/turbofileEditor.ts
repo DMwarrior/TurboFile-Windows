@@ -2151,8 +2151,17 @@ export class TurboFileEditor extends EditorPane {
 		if (relatedTarget instanceof Node && this.container?.ownerDocument.contains(relatedTarget)) {
 			return;
 		}
+
+		// Chromium commonly reports every coordinate as zero after a drag leaves the Electron window.
+		// That sample is ambiguous for ordinary `drag` events, but a page `dragleave` whose related
+		// target is outside the owner document confirms the exit. Preserve the boundary classifier for
+		// non-zero samples so a transient null relatedTarget inside the page cannot steal internal drops.
+		const hasChromiumZeroExitSample = event.clientX === 0
+			&& event.clientY === 0
+			&& event.screenX === 0
+			&& event.screenY === 0;
 		const ownerWindow = getWindow(this.container);
-		if (!shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
+		if (!hasChromiumZeroExitSample && !shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
 			return;
 		}
 

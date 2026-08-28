@@ -1359,6 +1359,120 @@ begin
   Result := '{#VersionedResourcesFolder}' <> '';
 end;
 
+#if "user" == InstallTarget
+  #if "arm64" == Arch
+    #define IncompatibleTargetRootKey "HKLM32"
+  #else
+    #define IncompatibleTargetRootKey "HKLM64"
+  #endif
+#else
+  #if "arm64" == Arch
+    #define IncompatibleTargetRootKey "HKCU32"
+  #else
+    #define IncompatibleTargetRootKey "HKCU64"
+  #endif
+#endif
+
+var
+  IncompatibleInstallLocation: String;
+  IncompatibleUninstallerPath: String;
+  HadIncompatibleDesktopShortcut: Boolean;
+  HadIncompatibleStartMenuShortcut: Boolean;
+  MigratedIncompatibleInstallation: Boolean;
+
+function GetIncompatibleUninstallRegKey(): String;
+begin
+  Result := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\'
+    + copy('{#IncompatibleTargetAppId}', 2, 38) + '_is1';
+end;
+
+procedure LoadIncompatibleInstallation();
+var
+  RegKey: String;
+begin
+  IncompatibleInstallLocation := '';
+  IncompatibleUninstallerPath := '';
+  RegKey := GetIncompatibleUninstallRegKey();
+  if not RegQueryStringValue({#IncompatibleTargetRootKey}, RegKey, 'InstallLocation', IncompatibleInstallLocation) then
+    Exit;
+
+  IncompatibleInstallLocation := RemoveBackslashUnlessRoot(IncompatibleInstallLocation);
+  IncompatibleUninstallerPath := AddBackslash(IncompatibleInstallLocation) + 'unins000.exe';
+  if not FileExists(IncompatibleUninstallerPath) then begin
+    Log('Ignoring incompatible installation without a valid uninstaller: ' + IncompatibleInstallLocation);
+    IncompatibleInstallLocation := '';
+    IncompatibleUninstallerPath := '';
+    Exit;
+  end;
+
+  HadIncompatibleDesktopShortcut :=
+    FileExists(ExpandConstant('{userdesktop}\{#NameLong}.lnk')) or
+    FileExists(ExpandConstant('{commondesktop}\{#NameLong}.lnk'));
+  HadIncompatibleStartMenuShortcut :=
+    FileExists(ExpandConstant('{userprograms}\{#NameLong}\{#NameLong}.lnk')) or
+    FileExists(ExpandConstant('{commonprograms}\{#NameLong}\{#NameLong}.lnk'));
+  Log('Found incompatible installation to migrate: ' + IncompatibleInstallLocation);
+end;
+
+procedure RepairMigratedShortcuts();
+var
+  ShortcutPath: String;
+begin
+  if not MigratedIncompatibleInstallation then
+    Exit;
+
+  if HadIncompatibleDesktopShortcut then begin
+#if "user" == InstallTarget
+    ShortcutPath := ExpandConstant('{userdesktop}\{#NameLong}.lnk');
+#else
+    ShortcutPath := ExpandConstant('{commondesktop}\{#NameLong}.lnk');
+#endif
+    CreateShellLink(ShortcutPath, '{#NameLong}', ExpandConstant('{app}\{#ExeBasename}.exe'), '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
+    Log('Repaired migrated desktop shortcut: ' + ShortcutPath);
+  end;
+
+  if HadIncompatibleStartMenuShortcut then begin
+#if "user" == InstallTarget
+    ShortcutPath := ExpandConstant('{userprograms}\{#NameLong}\{#NameLong}.lnk');
+#else
+    ShortcutPath := ExpandConstant('{commonprograms}\{#NameLong}\{#NameLong}.lnk');
+#endif
+    ForceDirectories(ExtractFileDir(ShortcutPath));
+    CreateShellLink(ShortcutPath, '{#NameLong}', ExpandConstant('{app}\{#ExeBasename}.exe'), '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
+    Log('Repaired migrated Start Menu shortcut: ' + ShortcutPath);
+  end;
+end;
+
+function MigrateIncompatibleInstallation(): Boolean;
+var
+  ResultCode: Integer;
+  UninstallParameters: String;
+  Started: Boolean;
+begin
+  Result := True;
+  if IncompatibleUninstallerPath = '' then
+    Exit;
+
+  UninstallParameters := '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART';
+#if "user" == InstallTarget
+  Log('Requesting elevation to remove the previous system installation.');
+  Started := ShellExec('runas', IncompatibleUninstallerPath, UninstallParameters, IncompatibleInstallLocation, SW_SHOW, ewWaitUntilTerminated, ResultCode);
+#else
+  Started := Exec(IncompatibleUninstallerPath, UninstallParameters, IncompatibleInstallLocation, SW_SHOW, ewWaitUntilTerminated, ResultCode);
+#endif
+  if Started and (ResultCode = 0) then begin
+    Log('Removed incompatible installation successfully.');
+    MigratedIncompatibleInstallation := True;
+    IncompatibleUninstallerPath := '';
+  end
+  else if Started then
+    Log('Incompatible installation uninstaller exited with code ' + IntToStr(ResultCode) + '.')
+  else
+    Log('Unable to start incompatible installation uninstaller: ' + SysErrorMessage(ResultCode));
+
+  Result := MigratedIncompatibleInstallation;
+end;
+
 function IsLegacyVersionedDirectoryName(DirectoryName: String): Boolean;
 var
   Index: Integer;
@@ -1418,6 +1532,7 @@ var
   AltArch: String;
 begin
   Result := True;
+  LoadIncompatibleInstallation();
 
   #if "user" == InstallTarget
     if not WizardSilent() and IsAdmin() then begin
@@ -1438,9 +1553,7 @@ begin
       RegKey := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\' + copy('{#IncompatibleTargetAppId}', 2, 38) + '_is1';
 
       if RegKeyExists({#IncompatibleArchRootKey}, RegKey) then begin
-        if MsgBox('{#NameShort} is already installed on this system for all users. We recommend first uninstalling that version before installing this one. Are you sure you want to continue the installation?', mbConfirmation, MB_YESNO) = IDNO then begin
-          Result := False;
-        end;
+        Log('{#NameShort} is installed for all users and will be migrated to this user installation.');
       end;
     end;
   #endif
@@ -1547,13 +1660,15 @@ end;
 // called before the wizard checks for running application
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  Result := '';
   if IsNotBackgroundUpdate() then
     StopTunnelServiceIfNeeded();
 
   if IsNotBackgroundUpdate() and not StopTunnelOtherProcesses() then
-     Result := '{#NameShort} is still running a tunnel process. Please stop the tunnel before installing.'
-  else
-  	Result := '';
+    Result := '{#NameShort} is still running a tunnel process. Please stop the tunnel before installing.';
+
+  if (Result = '') and not MigrateIncompatibleInstallation() then
+    Result := 'Unable to remove the existing {#NameShort} installation. Installation was stopped to prevent two copies from being installed. Please approve the administrator prompt and try again.';
 end;
 
 // VS Code will create a flag file before the update starts (/update=C:\foo\bar)
@@ -1573,7 +1688,7 @@ end;
 
 function ShouldUpdateShortcut(Path: String): Boolean;
 begin
-  Result := not (IsBackgroundUpdate() and FileExists(Path));
+  Result := not IsBackgroundUpdate() or FileExists(Path);
 end;
 
 // Check if VS Code created a cancel file to signal that the update should be aborted
@@ -1941,6 +2056,7 @@ begin
       end;
     end;
 
+    RepairMigratedShortcuts();
     CleanupLegacyVersionedResources();
 
     if ShouldRestartTunnelService then
