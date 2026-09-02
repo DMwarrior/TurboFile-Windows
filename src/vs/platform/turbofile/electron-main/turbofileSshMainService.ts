@@ -4811,10 +4811,35 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			if (endpoint.kind === 'local') {
 				await fsp.mkdir(endpoint.path, { recursive: true });
 			} else {
-				// Reuse the already-open directory session instead of withSftp, which opens a fresh SSH
-				// connection every call — that handshake is the bulk of "new folder is slow", especially
-				// on a high-latency remote host.
-				await this.withDirectorySftp(endpoint, sftp => this.ensureRemoteDirectory(sftp, endpoint.path));
+				// Keep mutations on the task SFTP session instead of the pane browsing session. Some NAS
+				// implementations expose different write permissions/state on a long-lived directory session.
+				for (let attempt = 0; ; attempt++) {
+					try {
+						await this.withSftp(endpoint, sftp => this.ensureRemoteDirectory(sftp, endpoint.path));
+						break;
+					} catch (error) {
+						// A few NAS products expose a restricted SFTP mkdir implementation while
+						// allowing the same account to create directories through its SSH shell.
+						// Try that path only for an explicit permission-style SFTP failure; all
+						// other errors keep the normal bounded transport retry behavior below.
+						if (!looksLikeWindowsPath(endpoint.path) && isRemotePermissionError(error)) {
+							try {
+								await this.withSshClient(endpoint, client => this.execRemote(client, buildPortablePosixMkdir(endpoint.path)), undefined);
+								break;
+							} catch {
+								// Preserve the original SFTP error when the shell is unavailable or
+								// has the same permission restriction.
+							}
+						}
+						const retryDelay = attempt < REMOTE_DIRECTORY_READ_MAX_ATTEMPTS - 1 && shouldRetryRemoteDirectoryRead(error)
+							? getRemoteDirectoryReadRetryDelay(attempt)
+							: undefined;
+						if (retryDelay === undefined) {
+							throw error;
+						}
+						await new Promise(resolve => setTimeout(resolve, retryDelay));
+					}
+				}
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			return { ok: true, message: 'Directory created.' };
@@ -12266,8 +12291,24 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			try {
 				stats = await this.remoteStat(sftp, current);
 			} catch {
-				await this.mkdirRemote(sftp, current);
-				stats = await this.remoteStat(sftp, current).catch(() => undefined);
+				try {
+					await this.mkdirRemote(sftp, current);
+				} catch (mkdirError) {
+					// Some NAS SFTP servers return SSH_FX_FAILURE (instead of ENOENT/EEXIST)
+					// for STAT on an existing directory. Verify the parent listing before
+					// surfacing the mkdir error so real permission failures are preserved.
+					const parentEntries = isRemotePathAlreadyExistsError(mkdirError) || isRemotePathGenericFailure(mkdirError)
+						? await this.readRemoteDirectory(sftp, getRemoteParentPath(current)).catch(() => undefined)
+						: undefined;
+					const entry = parentEntries?.find(candidate => candidate.filename === getTransferName(current));
+					if (!entry) {
+						throw mkdirError;
+					}
+					stats = entry.attrs;
+				}
+				if (!stats) {
+					stats = await this.remoteStat(sftp, current).catch(() => undefined);
+				}
 			}
 			if (stats && !stats.isDirectory()) {
 				throw new Error(`Remote path is not a directory: ${current}`);
@@ -13652,6 +13693,26 @@ function isRemotePathMissingError(error: unknown): boolean {
 	return candidate?.code === 2
 		|| candidate?.code === 'ENOENT'
 		|| /no such file|not found/i.test(candidate?.message ?? '');
+}
+
+function isRemotePathAlreadyExistsError(error: unknown): boolean {
+	const candidate = error as { readonly code?: string | number; readonly message?: string } | undefined;
+	return candidate?.code === 'EEXIST'
+		|| /already exists|file exists|directory exists/i.test(candidate?.message ?? '');
+}
+
+function isRemotePathGenericFailure(error: unknown): boolean {
+	const candidate = error as { readonly code?: string | number; readonly message?: string } | undefined;
+	return candidate?.code === 4
+		|| /^(?:failure|operation failed)$/i.test((candidate?.message ?? '').trim());
+}
+
+function isRemotePermissionError(error: unknown): boolean {
+	const candidate = error as { readonly code?: string | number; readonly message?: string } | undefined;
+	return candidate?.code === 'EACCES'
+		|| candidate?.code === 'EPERM'
+		|| candidate?.code === 3
+		|| /permission denied|operation not permitted|access denied|权限不足|拒绝访问/i.test(candidate?.message ?? '');
 }
 
 function isCrossDeviceMoveError(error: unknown): boolean {

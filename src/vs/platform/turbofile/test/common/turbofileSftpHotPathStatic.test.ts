@@ -70,6 +70,38 @@ suite('TurboFileSftpHotPathStatic', () => {
 		});
 	});
 
+	test('keeps NAS mkdir compatible when STAT reports a generic failure for existing entries', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const createDirectory = methodBlock(service, 'private async createDirectoryCore', 'async movePathsToTrash');
+		const ensure = methodBlock(service, 'private async ensureRemoteDirectory', 'private async uploadDirectoryConcurrent');
+		const mkdir = methodBlock(service, 'private mkdirRemote', 'private rmdirRemote');
+
+		assert.deepStrictEqual({
+			usesTaskMutationSession: createDirectory.includes('this.withSftp(endpoint')
+				&& !createDirectory.includes('this.withDirectorySftp(endpoint'),
+			checksParentListingAfterExistingFailure: ensure.includes('isRemotePathAlreadyExistsError(mkdirError)')
+				&& ensure.includes('isRemotePathGenericFailure(mkdirError)')
+				&& ensure.includes('getRemoteParentPath(current)')
+				&& ensure.includes('getTransferName(current)'),
+			preservesPermissionErrors: ensure.includes('if (!entry) {') && ensure.includes('throw mkdirError;'),
+			fallsBackToPosixShellForSftpPermissionErrors: createDirectory.includes('isRemotePermissionError(error)')
+				&& createDirectory.includes('this.withSshClient(endpoint')
+				&& createDirectory.includes('buildPortablePosixMkdir(endpoint.path)')
+				&& createDirectory.includes('!looksLikeWindowsPath(endpoint.path)'),
+			retriesOnlyTransportFailures: createDirectory.includes('shouldRetryRemoteDirectoryRead(error)')
+				&& createDirectory.includes('getRemoteDirectoryReadRetryDelay(attempt)')
+				&& createDirectory.includes('REMOTE_DIRECTORY_READ_MAX_ATTEMPTS'),
+			keepsMkdirErrorsVisible: mkdir.includes('reject(error);')
+		}, {
+			usesTaskMutationSession: true,
+			checksParentListingAfterExistingFailure: true,
+			preservesPermissionErrors: true,
+			fallsBackToPosixShellForSftpPermissionErrors: true,
+			retriesOnlyTransportFailures: true,
+			keepsMkdirErrorsVisible: true
+		});
+	});
+
 	test('starts directory work immediately on the warm task session and expands the pool progressively', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const connectionCount = methodBlock(service, 'private getDirectorySftpConnectionCount', 'private async collectLocalDirectoryTransferPlan');
