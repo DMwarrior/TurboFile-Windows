@@ -8,7 +8,14 @@ export type TurboFileTransferDisplayStatus = 'waiting' | 'running' | 'success' |
 
 export const TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 300;
 export const TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
-export const TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
+/**
+ * Refresh cadence for the transfer UI when the backend is temporarily quiet.
+ *
+ * This is deliberately a browser-only heartbeat. It does not poll the remote
+ * endpoint or participate in transfer scheduling, so it cannot affect transfer
+ * throughput.
+ */
+export const TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS = 1000;
 
 export interface ITurboFileTransferSizeItem {
 	readonly directory?: boolean;

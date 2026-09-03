@@ -120,6 +120,20 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(!refreshVisibleTaskLogEntry.includes('this.render();'));
 	});
 
+	test('keeps the transfer status UI alive while progress events are quiet', () => {
+		const editor = readEditor();
+		const tickerStart = editor.indexOf('private updateLiveTransferTicker(): void');
+		const ticker = editor.slice(tickerStart, editor.indexOf('private clearLiveTransferTicker', tickerStart));
+
+		assert.ok(ticker.includes('task.kind === \'transfer\' && task.status === \'running\''));
+		assert.ok(ticker.includes('TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS'));
+		assert.ok(ticker.includes("this.activePage === 'transfer' && !this.isTaskLogVisible"));
+		assert.ok(ticker.includes('this.refreshTaskbar();'));
+		assert.ok(ticker.includes("this.activePage === 'tasks' || this.isTaskLogVisible"));
+		assert.ok(ticker.includes('this.render();'));
+		assert.ok(ticker.includes('never polls a device or changes transfer scheduling'));
+	});
+
 	test('gives cancellable file tasks an operation id and forwards it to the backend', () => {
 		const editor = readEditor();
 		const beginTaskStart = editor.indexOf('private beginTask(');

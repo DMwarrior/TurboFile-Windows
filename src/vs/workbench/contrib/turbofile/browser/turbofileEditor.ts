@@ -76,7 +76,7 @@ import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImage
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
-import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, isTurboFileRsyncStrategy, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
 
@@ -5356,10 +5356,6 @@ export class TurboFileEditor extends EditorPane {
 		});
 	}
 
-	private isRsyncStrategy(strategy: string | undefined): boolean {
-		return isTurboFileRsyncStrategy(strategy);
-	}
-
 	private formatSpeed(bytesPerSecond: number | undefined): string {
 		return bytesPerSecond && bytesPerSecond > 0 ? `${formatTransferRate(bytesPerSecond)}/s` : '--';
 	}
@@ -5546,33 +5542,30 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateLiveTransferTicker(): void {
-		// During rsync startup the process can be quiet while ssh connects and rsync builds its
-		// file list. Tick only for that startup window; once data progress arrives, progress events
-		// drive rendering so the status bar does not jump on two different clocks.
-		const needsStartupTicker = this.tasks.some(task => this.needsLiveTransferStartupTicker(task));
-		if (needsStartupTicker && this.liveTransferTicker === undefined && this.container) {
+		// Progress events are intentionally throttled and some protocols can be quiet while data is
+		// still moving. Keep a browser-only heartbeat for every running transfer so elapsed time and
+		// the status bar never become stale. The heartbeat only renders existing in-memory state; it
+		// never polls a device or changes transfer scheduling.
+		const needsLiveTicker = this.tasks.some(task => this.needsLiveTransferTicker(task));
+		if (needsLiveTicker && this.liveTransferTicker === undefined && this.container) {
 			this.liveTransferTicker = getWindow(this.container).setInterval(() => {
-				if (!this.tasks.some(task => this.needsLiveTransferStartupTicker(task))) {
+				if (!this.tasks.some(task => this.needsLiveTransferTicker(task))) {
 					this.clearLiveTransferTicker();
 					return;
 				}
-				this.render();
-			}, TURBOFILE_RSYNC_STARTUP_TICK_INTERVAL_MS);
-		} else if (!needsStartupTicker) {
+				if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
+					this.refreshTaskbar();
+				} else if (this.activePage === 'tasks' || this.isTaskLogVisible) {
+					this.render();
+				}
+			}, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS);
+		} else if (!needsLiveTicker) {
 			this.clearLiveTransferTicker();
 		}
 	}
 
-	private needsLiveTransferStartupTicker(task: TurboFileTask): boolean {
-		if (task.kind !== 'transfer' || task.status !== 'running') {
-			return false;
-		}
-		if (task.transferStartedAt !== undefined) {
-			return false;
-		}
-		return this.getLiveTransferItems(task).some(item => item.status === 'running'
-			&& item.transferStartedAt === undefined
-			&& this.isRsyncStrategy(item.strategy ?? task.strategy));
+	private needsLiveTransferTicker(task: TurboFileTask): boolean {
+		return task.kind === 'transfer' && task.status === 'running';
 	}
 
 	private clearLiveTransferTicker(): void {
