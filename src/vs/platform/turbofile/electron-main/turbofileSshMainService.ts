@@ -113,7 +113,6 @@ const LOCAL_COPY_DIRECTORY_CONCURRENCY = 16;
 const LOCAL_COPY_FILE_HIGH_WATER_MARK = 1024 * 1024;
 const BATCH_TRANSFER_WORKERS = 16;
 const BATCH_TRANSFER_DIRECTORY_WORKERS = 4;
-const REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND = 470 * 1024 * 1024;
 const RSYNC_RELAY_BIND_HOST = '127.0.0.1';
 const SSH_TERMINAL_READY_MARKER = '__TURBOFILE_TERMINAL_READY__';
 const DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS = 5 * 1000;
@@ -393,6 +392,15 @@ interface ITransferProgressSnapshot {
 	lastBytes: number;
 }
 
+interface ITransferProgressPendingEvent {
+	request: { readonly progressId?: string; readonly clientStartedAt?: number };
+	transferredBytes: number;
+	totalBytes: number;
+	phase: ITurboFileTransferProgressEvent['phase'];
+	detail: string;
+	extra: ITransferProgressEventExtra;
+}
+
 interface IRsyncTimingState {
 	clientStartedAt?: number;
 	serviceStartedAt: number;
@@ -584,6 +592,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly terminalSessions = new Map<string, ITurboFileSshTerminalMainSession>();
 	private readonly transferProgressEmitters = new Map<string, Emitter<ITurboFileTransferProgressEvent>>();
 	private readonly transferProgressSnapshots = new Map<string, ITransferProgressSnapshot>();
+	private readonly directScpLegacyOptionSupport = new Map<string, Promise<boolean>>();
+	private readonly pendingTransferProgress = new Map<string, ITransferProgressPendingEvent>();
+	private readonly pendingTransferProgressTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly transferDataStartTimes = new Map<string, number>();
 	private readonly transferFirstPositiveProgressTimes = new Map<string, number>();
 	private readonly transferGrowthMonitoredProgressIds = new Set<string>();
@@ -3021,7 +3032,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async uploadPathWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, localPath: string, remotePath: string, recursive: boolean, initialRemoteSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
 		const stopGrowthTiming = recursive
-			? () => undefined
+			? this.beginRemotePathGrowthTiming(progressId, { kind: 'ssh', connection, path: remotePath }, initialRemoteSize, expectedBytes, onProgress, 1000, 500)
 			: this.beginRemoteFileGrowthTiming(progressId, connection, remotePath, initialRemoteSize, expectedBytes, onProgress);
 		try {
 			if (recursive) {
@@ -3042,7 +3053,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async downloadPathWithNativeOpenSshScp(connection: ITurboFileSshConnectionOptions, remotePath: string, localPath: string, recursive: boolean, initialLocalSize: number, expectedBytes: number, onProgress: ((transferredBytes: number) => void) | undefined, progressId?: string): Promise<void> {
 		const stopGrowthTiming = recursive
-			? () => undefined
+			? this.beginTransferGrowthTiming(progressId, () => getLocalPathSize(localPath).catch(() => 0), initialLocalSize, expectedBytes, onProgress, 1000, 500, 1000)
 			: this.beginTransferGrowthTiming(progressId, () => fsp.stat(localPath).then(stat => stat.size).catch(() => 0), initialLocalSize, expectedBytes, onProgress);
 		try {
 			if (recursive) {
@@ -3783,9 +3794,19 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					this.throwIfTransferCanceled(request.progressId);
 					const currentName = item.displayName ?? item.targetName;
 					const targetPath = this.joinBatchTargetPath(request.targetDirectory, item.targetName);
-					await this.moveLocalPathNative(item.sourcePath, targetPath, request.progressId);
+					let copiedBytes = 0;
+					await this.moveLocalPathNative(item.sourcePath, targetPath, request.progressId, delta => {
+						copiedBytes += delta;
+						const progressBytes = movedBytes + copiedBytes;
+						this.fireTransferProgress(request, totalBytes > 0 ? Math.min(progressBytes, totalBytes) : progressBytes, totalBytes, 'transfer', 'Moving locally.', false, {
+							strategy: 'local-copy',
+							completedItems: index,
+							totalItems: items.length,
+							currentName
+						});
+					});
 					completedMoves.push({ sourcePath: item.sourcePath, targetPath });
-					movedBytes += Math.max(0, item.expectedBytes ?? 0);
+					movedBytes += Math.max(copiedBytes, item.expectedBytes ?? 0);
 					this.fireTransferProgress(request, totalBytes > 0 ? Math.min(movedBytes, totalBytes) : movedBytes, totalBytes, 'transfer', 'Moving locally.', false, {
 						strategy: 'local-copy',
 						completedItems: index + 1,
@@ -3827,25 +3848,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const sources = items.map(item => item.sourcePath);
 		this.markTransferDataStarted(request.progressId);
+		const nativeOperation = async (): Promise<void> => {
+			if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
+				const input = Buffer.from(JSON.stringify(items.map(item => ({
+					sourcePath: item.sourcePath,
+					targetPath: this.joinBatchTargetPath(request.targetDirectory, item.targetName),
+					sourceType: item.sourceType ?? 'unknown'
+				}))), 'utf8');
+				await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, buildWindowsMappedBatchFromInputCommand(operation), input, {
+					progressId: request.progressId
+				}), request.progressId);
+			} else {
+				const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
+				await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }), request.progressId);
+			}
+		};
 		await this.runRemoteMutationWithSftpFallback(
 			request.source,
 			operation === 'move' ? 'batch-move' : 'batch-copy',
 			request.progressId,
-			async () => {
-				if (looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath)) {
-					const input = Buffer.from(JSON.stringify(items.map(item => ({
-						sourcePath: item.sourcePath,
-						targetPath: this.joinBatchTargetPath(request.targetDirectory, item.targetName),
-						sourceType: item.sourceType ?? 'unknown'
-					}))), 'utf8');
-					await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, buildWindowsMappedBatchFromInputCommand(operation), input, {
-						progressId: request.progressId
-					}), request.progressId);
-				} else {
-					const plan = createPosixNativeBatchTransferPlan(items, request.targetDirectory.path, operation);
-					await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }), request.progressId);
-				}
-			},
+			() => operation === 'copy' ? this.monitorRemoteBatchNativeCopy(request, items, expectedBytes, nativeOperation) : nativeOperation(),
 			looksLikeWindowsPath(request.targetDirectory.path) || sources.some(looksLikeWindowsPath) ? undefined : async () => {
 				const plan = createPosixPortableBatchTransferPlan(items, request.targetDirectory.path, operation);
 				await this.withDirectorySshClient(request.source, client => this.execRemoteWithInput(client, plan.command, plan.input, { progressId: request.progressId }), request.progressId);
@@ -3872,6 +3894,38 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.clearRemoteDirectoryListingCache(request.source);
 		this.clearRemoteDirectoryListingCache(request.targetDirectory);
 		return this.createBatchTransferResult(true, 'remote-copy', expectedBytes, 'Batch remote native transfer completed.', items.length, 0, [], startedAt, request.progressId);
+	}
+
+	/**
+	 * Native remote copy commands do not emit byte progress. Sample the target files while the
+	 * command is running so the client receives real byte deltas without changing the copy path.
+	 */
+	private async monitorRemoteBatchNativeCopy(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], expectedBytes: number, operation: () => Promise<void>): Promise<void> {
+		let lastTransferred = 0;
+		const stop = this.beginTransferGrowthTiming(request.progressId, async () => {
+			// Do not open one SSH channel per selected item. Slow probes are serialized and
+			// cannot overlap the next sampling interval or delay completion of the copy.
+			const sizes = await mapLimit(items, 1, item => this.getRemotePathContentSizeByCommand({
+				...request.targetDirectory,
+				path: this.joinBatchTargetPath(request.targetDirectory, item.targetName)
+			}, request.progressId).catch(() => 0));
+			return sizes.reduce((sum, size) => sum + Math.max(0, size), 0);
+		}, 0, expectedBytes, transferred => {
+			if (transferred > lastTransferred) {
+				lastTransferred = transferred;
+				this.fireTransferProgress(request, transferred, expectedBytes, 'transfer', 'Copying on remote host.', false, {
+					strategy: 'remote-copy',
+					completedItems: 0,
+					totalItems: items.length,
+					currentName: items[0]?.displayName ?? items[0]?.targetName
+				});
+			}
+		}, 1000, TRANSFER_PROGRESS_EVENT_INTERVAL_MS, 1000);
+		try {
+			await operation();
+		} finally {
+			stop();
+		}
 	}
 
 	private async tryLocalBatchRsyncTransfer(request: ITurboFileBatchTransferRequest, items: readonly ITurboFileBatchTransferItem[], operation: 'copy' | 'move', expectedBytes: number, startedAt: number): Promise<ITurboFileBatchTransferResult | undefined> {
@@ -4099,7 +4153,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (protocol !== 'rsync' && !(allowAutoFast && protocol === 'auto-fast')) {
 			return undefined;
 		}
-		if (request.source.supportsRsync !== true || request.targetDirectory.supportsRsync !== true || !request.targetDirectory.connection.password) {
+		if (request.source.supportsRsync !== true || request.targetDirectory.supportsRsync !== true) {
 			return undefined;
 		}
 		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.targetDirectory.path) || items.some(item => looksLikeWindowsPath(item.sourcePath))) {
@@ -4117,6 +4171,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const client = await this.connect(sourceConfigResult.config);
 		const forwardedSockets = new Set<Socket>();
 		let forwardedPort: number | undefined;
+		let credential: IRemoteScpCredential | undefined;
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, async () => {
 			for (const socket of forwardedSockets) {
 				socket.destroy();
@@ -4147,16 +4202,17 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				totalItems: items.length,
 				currentName: items[0]?.displayName ?? items[0]?.targetName
 			});
-			if (!await this.canUseLocalRsync(client)) {
+			if (!await this.canUseLocalRsync(client, !!request.targetDirectory.connection.password)) {
 				return undefined;
 			}
 			forwardedPort = await this.forwardIn(client, RSYNC_RELAY_BIND_HOST, 0);
 			const target = request.targetDirectory.connection;
 			const targetUserHost = `${target.username}@${RSYNC_RELAY_BIND_HOST}`;
 			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.source.connection);
-			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true, sshBinary);
+			credential = await this.prepareRemoteScpCredential(client, target, request.progressId, undefined, true);
+			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, !!target.password, sshBinary, credential.identityPath);
 			const sshpassPrefix = buildSshpassPrefix(target.password);
-			if (!await this.canUseTargetRsyncThroughRelay(client, targetUserHost, forwardedPort, sshpassPrefix)) {
+			if (!await this.canUseTargetRsyncThroughRelay(client, targetUserHost, sshTransport, sshpassPrefix, credential, request.progressId)) {
 				return undefined;
 			}
 			const rsyncOptions = buildRsyncOptions(true);
@@ -4171,7 +4227,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					completedItems: 0,
 					totalItems: items.length
 				}, undefined, transferredBytes);
-				await this.execRemote(client, rsyncCommand, {
+				await this.execRemote(client, wrapRemoteCredentialCommand(rsyncCommand, credential.cleanupCommand, credential.activePath, true), {
 					input: createTarNullListBuffer(group.relativePaths),
 					onStdout: progress.handleOutput,
 					onStderr: progress.handleOutput,
@@ -4203,6 +4259,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			for (const socket of forwardedSockets) {
 				socket.destroy();
+			}
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
 			}
 			client.end();
 		}
@@ -7081,7 +7140,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 		this.throwIfTransferCanceled(request.progressId);
 		const sourceType = request.sourceType ?? await this.withDirectorySftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
-		const expectedBytes = sourceType === 'directory' ? 0 : Math.max(0, request.expectedBytes ?? 0);
+		const expectedBytes = Math.max(0, request.expectedBytes ?? 0);
 		let bytes = expectedBytes;
 		if (sourceType === 'file' && bytes <= 0) {
 			bytes = await this.getRemotePathSizeByCommand(request.source, request.progressId).catch(() => expectedBytes);
@@ -7108,7 +7167,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}, request.progressId), request.progressId)
 		);
 		this.throwIfTransferCanceled(request.progressId);
-		return this.createTransferResult(true, 'remote-copy', bytes > 0 ? bytes : observedBytes, 'Remote copy completed.', startedAt, request.progressId);
+		// The last sampled /proc counter can precede completion (and reflinks may not write
+		// content at all). It is not the final file size. Resolve an unknown directory total
+		// only after the copy finishes; never recursively scan during the data hot path.
+		const resultBytes = bytes > 0 ? bytes : sourceType === 'directory'
+			? await this.getRemotePathContentSizeByCommand(request.target, request.progressId)
+			: observedBytes;
+		return this.createTransferResult(true, 'remote-copy', resultBytes, 'Remote copy completed.', startedAt, request.progressId);
 	}
 
 	private async tryDirectTarTransfer(request: ITurboFileTransferRequest, startedAt: number, forceProtocol = false, preverifiedDirectRoute?: TurboFileDirectSshRoute): Promise<ITurboFileTransferResult | undefined> {
@@ -8048,9 +8113,18 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		let transferredBytes = 0;
 		try {
 			this.throwIfTransferCanceled(request.progressId);
+			const remotePath = route === 'source-push' ? request.target.path : request.source.path;
+			if (/[\r\n\0]/.test(remotePath)) {
+				throw new Error('SCP paths cannot contain NUL or line breaks.');
+			}
+			const shellPath = escapeLegacyScpRemotePath(remotePath.replace(/\/+$/, ''));
+			const needsShellQuoting = shellPath !== remotePath.replace(/\/+$/, '');
+			// Legacy scp parses the remote path in a second shell. Use its escaped spelling and
+			// select -O only on clients that advertise it; older clients already use that protocol.
+			const legacyProtocol = needsShellQuoting && await this.supportsDirectScpLegacyOption(executorEndpoint, client, request.progressId);
 			const targetParentPath = getRemoteParentPath(request.target.path);
 			const targetPrepareCommand = sourceIsDirectory
-				? `${buildPortablePosixRm(request.target.path, true)} && ${buildPortablePosixMkdir(request.target.path)}`
+				? `${buildPortablePosixRm(request.target.path, true)} && ${buildPortablePosixMkdir(targetParentPath)}`
 				: `${buildPortablePosixMkdir(targetParentPath)} && ${buildPortablePosixRm(request.target.path, false)}`;
 			this.fireTransferProgress(request, 0, bytes, 'prepare', 'Preparing direct SCP transfer.', true, { strategy: 'scp-direct', route });
 			const preparedWithWarmTarget = route === 'source-push'
@@ -8065,11 +8139,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const mkdirCommand = route === 'source-push'
 				? `${sshpassPrefix}${buildDirectScpSshCommand(remote.port || 22, !!remote.password, credential.identityPath, controlPath)} ${quotePosixShellArg(remoteUserHost)} ${quotePosixShellArg(targetPrepareCommand)}`
 				: targetPrepareCommand;
-			const sourcePath = sourceIsDirectory ? getRemoteDirectoryContentsPath(request.source.path) : request.source.path;
-			const targetPath = sourceIsDirectory ? ensureTrailingRemoteSlash(request.target.path) : request.target.path;
-			const sourceArg = route === 'source-push' ? sourcePath : `${remoteUserHost}:${sourcePath}`;
-			const targetArg = route === 'source-push' ? `${remoteUserHost}:${targetPath}` : targetPath;
-			const scpCommand = wrapRemoteCredentialCommand(`${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath, sourceIsDirectory, controlPath)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`, credential.cleanupCommand, credential.activePath);
+			// Copy the named directory to a non-existent exact target. A source ending in '/.' is
+			// rejected by legacy SCP receivers; precreating the target would instead add an extra level.
+			const sourcePath = sourceIsDirectory ? request.source.path.replace(/\/+$/, '') : request.source.path;
+			const targetPath = sourceIsDirectory ? request.target.path.replace(/\/+$/, '') : request.target.path;
+			const sourceArg = route === 'source-push' ? sourcePath : `${remoteUserHost}:${shellPath}`;
+			const targetArg = route === 'source-push' ? `${remoteUserHost}:${shellPath}` : targetPath;
+			const scpCommand = wrapRemoteCredentialCommand(`${sshpassPrefix}${buildDirectScpCommand(remote.port || 22, !!remote.password, credential.identityPath, sourceIsDirectory, controlPath, 5, legacyProtocol)} ${quotePosixShellArg(sourceArg)} ${quotePosixShellArg(targetArg)}`, credential.cleanupCommand, credential.activePath);
 
 			if (route === 'source-push' && !preparedWithWarmTarget) {
 				const retainedPreparation = wrapRemoteCredentialCommand(mkdirCommand, credential.cleanupCommand, credential.activePath, true);
@@ -8079,11 +8155,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			stopGrowthTiming = sourceIsDirectory
 				? this.beginRemotePathGrowthTiming(request.progressId, request.target, 0, bytes, currentBytes => {
 					transferredBytes = Math.max(transferredBytes, currentBytes);
-					this.fireTransferProgress(request, currentBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
 				})
 				: this.beginRemoteFileGrowthTiming(request.progressId, request.target.connection!, request.target.path, 0, bytes, currentBytes => {
 					transferredBytes = Math.max(transferredBytes, currentBytes);
-					this.fireTransferProgress(request, currentBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
+					this.fireTransferProgress(request, transferredBytes, bytes, 'transfer', 'Direct SCP transfer in progress.', false, { strategy: 'scp-direct', route });
 				});
 			this.markTransferDataStarted(request.progressId);
 			await this.execRemote(client, scpCommand, {
@@ -8098,8 +8174,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					throw new Error(`Direct SCP size mismatch: expected ${bytes}, got ${targetSize}.`);
 				}
 			}
-			const resultBytes = Math.max(bytes, transferredBytes);
-			this.fireTransferProgress(request, resultBytes, bytes, 'transfer', 'Direct SCP transfer completed.', true, { strategy: 'scp-direct', route });
+			// An unknown directory total cannot be finalized from the last periodic sample.
+			// Resolve it after SCP exits, keeping recursive discovery out of transfer startup.
+			stopGrowthTiming();
+			const resultBytes = sourceIsDirectory && bytes <= 0
+				? await this.getRemotePathContentSizeByCommand(request.target, request.progressId)
+				: bytes;
+			this.fireTransferProgress(request, resultBytes, resultBytes, 'transfer', 'Direct SCP transfer completed.', true, { strategy: 'scp-direct', route });
 			return this.createTransferResult(true, 'scp-direct', resultBytes, 'Direct SCP completed.', startedAt, request.progressId);
 		} catch (error) {
 			if (this.isTransferCanceled(request.progressId)) {
@@ -8114,6 +8195,25 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			executorLease.release();
 		}
+	}
+
+	private supportsDirectScpLegacyOption(endpoint: ITurboFileTransferEndpoint, client: ISSHClient, progressId?: string): Promise<boolean> {
+		const key = getFileOperationDeviceKey(endpoint);
+		let pending = this.directScpLegacyOptionSupport.get(key);
+		if (!pending) {
+			let usage = '';
+			pending = this.execRemote(client, 'LC_ALL=C scp 2>&1 || true', {
+				progressId, timeoutMs: 5000,
+				onStdout: chunk => { usage = `${usage}${chunk}`.slice(-4096); }
+			})
+				.then(() => /usage:\s*scp\s+\[-[^\]]*O/.test(usage))
+				.catch(error => {
+					this.directScpLegacyOptionSupport.delete(key);
+					throw error;
+				});
+			this.directScpLegacyOptionSupport.set(key, pending);
+		}
+		return pending;
 	}
 
 	private async prepareDirectTargetWithWarmSession(target: ITurboFileTransferEndpoint, command: string, progressId: string | undefined): Promise<boolean> {
@@ -8364,7 +8464,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		if (request.source.supportsRsync !== true || request.target.supportsRsync !== true || request.strategyHint === 'direct') {
 			return undefined;
 		}
-		if (!request.target.connection.password || looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
+		if (looksLikeWindowsPath(request.source.path) || looksLikeWindowsPath(request.target.path)) {
 			return undefined;
 		}
 
@@ -8376,6 +8476,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const client = await this.connect(sourceConfigResult.config);
 		const forwardedSockets = new Set<Socket>();
 		let forwardedPort: number | undefined;
+		let credential: IRemoteScpCredential | undefined;
 		const unregisterCancel = this.registerTransferCancelHandler(request.progressId, async () => {
 			for (const socket of forwardedSockets) {
 				socket.destroy();
@@ -8402,7 +8503,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			this.throwIfTransferCanceled(request.progressId);
 			this.fireTransferProgress(request, 0, 0, 'transfer', 'Starting rsync relay transfer.', true, { strategy: 'rsync-relay' });
-			const canUseLocalRsync = await this.canUseLocalRsync(client);
+			const canUseLocalRsync = await this.canUseLocalRsync(client, !!request.target.connection.password);
 			if (!canUseLocalRsync) {
 				return undefined;
 			}
@@ -8411,14 +8512,15 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const target = request.target.connection;
 			const targetUserHost = `${target.username}@${RSYNC_RELAY_BIND_HOST}`;
 			const sshBinary = await this.resolveRemoteRsyncSshBinary(client, request.source.connection);
-			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, true, sshBinary);
+			credential = await this.prepareRemoteScpCredential(client, target, request.progressId, undefined, true);
+			const sshTransport = buildOptimizedRsyncSshCommand(forwardedPort, !!target.password, sshBinary, credential.identityPath);
 			const sshpassPrefix = buildSshpassPrefix(target.password);
 			const sourceType = request.sourceType ?? await this.withSftp(request.source, async sftp => getFileTypeFromStats(await this.remoteStat(sftp, request.source.path)), request.progressId).catch(() => 'unknown' as TurboFileFileType);
 			const sourceIsDirectory = sourceType === 'directory';
 			let bytes = 0;
 
 			const remoteTargetPath = sourceIsDirectory ? request.target.path : getRemoteParentPath(request.target.path);
-			const canUseTargetRsync = await this.canUseTargetRsyncThroughRelay(client, targetUserHost, forwardedPort, sshpassPrefix);
+			const canUseTargetRsync = await this.canUseTargetRsyncThroughRelay(client, targetUserHost, sshTransport, sshpassPrefix, credential, request.progressId);
 			if (!canUseTargetRsync) {
 				return undefined;
 			}
@@ -8429,7 +8531,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			const rsyncCommand = `${sshpassPrefix}rsync ${rsyncOptions} ${buildRsyncPathWithMkdirShellOption(remoteTargetPath)} -e ${quotePosixShellArg(sshTransport)} ${quotePosixShellArg(rsyncSourcePath)} ${quotePosixShellArg(`${targetUserHost}:${rsyncTargetPath}`)}`;
 			const progress = this.createRsyncProgressReporter(request, 0, 'relay-upload', 'Rsync relay transfer in progress.', { strategy: 'rsync-relay' });
 
-			await this.execRemote(client, rsyncCommand, {
+			await this.execRemote(client, wrapRemoteCredentialCommand(rsyncCommand, credential.cleanupCommand, credential.activePath), {
 				onStdout: progress.handleOutput,
 				onStderr: progress.handleOutput,
 				inactivityTimeoutMs: DIRECT_RSYNC_STALL_TIMEOUT_MS,
@@ -8453,22 +8555,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			for (const socket of forwardedSockets) {
 				socket.destroy();
 			}
+			if (credential?.cleanupCommand) {
+				await this.execRemote(client, credential.cleanupCommand, { timeoutMs: 2000 }).catch(() => undefined);
+			}
 			client.end();
 		}
 	}
 
-	private async canUseLocalRsync(client: ISSHClient): Promise<boolean> {
+	private async canUseLocalRsync(client: ISSHClient, hasPassword: boolean): Promise<boolean> {
 		try {
-			await this.execRemote(client, 'command -v rsync >/dev/null 2>&1 && command -v sshpass >/dev/null 2>&1');
+			await this.execRemote(client, `command -v rsync >/dev/null 2>&1${hasPassword ? ' && command -v sshpass >/dev/null 2>&1' : ''}`);
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
-	private async canUseTargetRsyncThroughRelay(client: ISSHClient, targetUserHost: string, forwardedPort: number, sshpassPrefix: string): Promise<boolean> {
+	private async canUseTargetRsyncThroughRelay(client: ISSHClient, targetUserHost: string, sshTransport: string, sshpassPrefix: string, credential: IRemoteScpCredential, progressId?: string): Promise<boolean> {
 		try {
-			await this.execRemote(client, `${sshpassPrefix}${buildCompatibleSshCommand(forwardedPort, true)} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg('command -v rsync >/dev/null 2>&1')}`);
+			const command = `${sshpassPrefix}${sshTransport} ${quotePosixShellArg(targetUserHost)} ${quotePosixShellArg('command -v rsync >/dev/null 2>&1')}`;
+			await this.execRemote(client, wrapRemoteCredentialCommand(command, credential.cleanupCommand, credential.activePath, true), { progressId });
 			return true;
 		} catch {
 			return false;
@@ -9826,7 +9932,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.throwIfTransferCanceled(progressId);
 	}
 
-	private async moveLocalPathNative(sourcePath: string, targetPath: string, progressId?: string): Promise<void> {
+	private async moveLocalPathNative(sourcePath: string, targetPath: string, progressId?: string, onDelta?: (delta: number) => void): Promise<void> {
 		this.throwIfTransferCanceled(progressId);
 		if (platform() === 'win32' || looksLikeWindowsPath(sourcePath) || looksLikeWindowsPath(targetPath)) {
 			await ensureLocalParentDirectory(targetPath);
@@ -9836,7 +9942,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				if (!isCrossDeviceMoveError(error)) {
 					throw error;
 				}
-				await this.copyLocalPath(sourcePath, targetPath, undefined, progressId);
+				await this.copyLocalPath(sourcePath, targetPath, onDelta, progressId);
 				try {
 					this.throwIfTransferCanceled(progressId);
 					await fsp.rm(sourcePath, { force: true, recursive: true });
@@ -10018,7 +10124,6 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	}
 
 	private async execRemoteCopyWithProgress(request: ITurboFileTransferRequest, command: string, bytes: number, sourceType: TurboFileFileType, reportsNativeProgress = false): Promise<number> {
-		let completed = false;
 		let nativeProgressBuffer = '';
 		let lastCopiedBytes = 0;
 		const handleNativeProgress = (chunk: string): void => {
@@ -10030,51 +10135,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			lastCopiedBytes = copiedBytes;
 			this.fireTransferProgress(request, bytes > 0 ? Math.min(copiedBytes, bytes) : copiedBytes, bytes, 'transfer', 'Remote copy in progress.', false, { strategy: 'remote-copy' });
 		};
-		const copy = this.withDirectorySshClient(request.source, client => this.execRemote(client, command, {
-			progressId: request.progressId,
-			onStderr: handleNativeProgress
-		}), request.progressId)
-			.finally(() => {
-				completed = true;
-			});
-
-		if (reportsNativeProgress) {
-			await copy;
-			return lastCopiedBytes;
-		}
-
-		if (bytes <= 0) {
-			await copy;
-			return 0;
-		}
-
-		const startedAt = Date.now();
-		const estimateDirectoryProgress = sourceType === 'directory';
-		try {
-			while (!completed) {
-				await delay(500);
-				if (completed) {
-					break;
-				}
-				this.throwIfTransferCanceled(request.progressId);
-				if (estimateDirectoryProgress) {
-					const elapsedSeconds = Math.max(0, (Date.now() - startedAt) / 1000);
-					const estimatedBytes = Math.min(bytes * 0.95, elapsedSeconds * REMOTE_NATIVE_DIRECTORY_COPY_PROGRESS_BYTES_PER_SECOND);
-					const copiedBytes = Math.max(0, Math.floor(estimatedBytes));
-					if (copiedBytes > lastCopiedBytes) {
-						lastCopiedBytes = copiedBytes;
-						this.fireTransferProgress(request, copiedBytes, bytes, 'transfer', 'Remote copy in progress.', false, { strategy: 'remote-copy' });
-					}
-					continue;
-				}
-				const copiedBytes = await this.getRemotePathSizeByCommand(request.target, request.progressId).catch(() => 0);
-				if (copiedBytes > 0 && copiedBytes !== lastCopiedBytes) {
+		const pollInterval = sourceType === 'directory' ? 1000 : TRANSFER_PROGRESS_EVENT_INTERVAL_MS;
+		const stop = reportsNativeProgress ? () => undefined : this.beginTransferGrowthTiming(request.progressId,
+			() => this.getRemotePathContentSizeByCommand(request.target, request.progressId), 0, bytes, copiedBytes => {
+				if (copiedBytes > lastCopiedBytes) {
 					lastCopiedBytes = copiedBytes;
-					this.fireTransferProgress(request, Math.min(copiedBytes, bytes), bytes, 'transfer', 'Remote copy in progress.', false, { strategy: 'remote-copy' });
+					this.fireTransferProgress(request, copiedBytes, bytes, 'transfer', 'Remote copy in progress.', false, { strategy: 'remote-copy' });
 				}
-			}
+			}, pollInterval, TRANSFER_PROGRESS_EVENT_INTERVAL_MS, pollInterval);
+		try {
+			await this.withDirectorySshClient(request.source, client => this.execRemote(client, command, {
+				progressId: request.progressId,
+				onStderr: handleNativeProgress
+			}), request.progressId);
 		} finally {
-			await copy;
+			stop();
 		}
 		return lastCopiedBytes;
 	}
@@ -10429,6 +10504,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			while (!stopped) {
 				try {
 					const size = await probeSize();
+					if (stopped) {
+						return;
+					}
 					const transferredBytes = this.normalizeGrowthProgressBytes(size, baselineSize, expectedBytes);
 					if (transferredBytes > 0) {
 						hasPositiveProgress = true;
@@ -10738,8 +10816,26 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		// slows the transfer itself — so an unknown total must still be throttled.
 		const isCompletionEvent = normalizedTotal > 0 && normalizedTransferred >= normalizedTotal;
 		if (!force && !isFirstDataProgress && !isFirstPositiveProgress && !isCompletionEvent && previous && now - previous.lastAt < TRANSFER_PROGRESS_EVENT_INTERVAL_MS) {
+			this.pendingTransferProgress.set(progressId, { request, transferredBytes: normalizedTransferred, totalBytes: normalizedTotal, phase, detail, extra });
+			if (!this.pendingTransferProgressTimers.has(progressId)) {
+				const delayMs = Math.max(1, TRANSFER_PROGRESS_EVENT_INTERVAL_MS - (now - previous.lastAt));
+				this.pendingTransferProgressTimers.set(progressId, setTimeout(() => {
+					this.pendingTransferProgressTimers.delete(progressId);
+					const pending = this.pendingTransferProgress.get(progressId);
+					this.pendingTransferProgress.delete(progressId);
+					if (pending) {
+						this.fireTransferProgress(pending.request, pending.transferredBytes, pending.totalBytes, pending.phase, pending.detail, true, pending.extra);
+					}
+				}, delayMs));
+			}
 			return;
 		}
+		const pendingTimer = this.pendingTransferProgressTimers.get(progressId);
+		if (pendingTimer) {
+			clearTimeout(pendingTimer);
+			this.pendingTransferProgressTimers.delete(progressId);
+		}
+		this.pendingTransferProgress.delete(progressId);
 
 		this.transferProgressSnapshots.set(progressId, { lastAt: now, lastBytes: normalizedTransferred });
 		const fallback = /fall(?:ing)? back|fallback/i.test(detail);
@@ -10774,6 +10870,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 
 		setTimeout(() => {
+			const pendingTimer = this.pendingTransferProgressTimers.get(progressId);
+			if (pendingTimer) {
+				clearTimeout(pendingTimer);
+				this.pendingTransferProgressTimers.delete(progressId);
+			}
+			this.pendingTransferProgress.delete(progressId);
 			this.transferProgressSnapshots.delete(progressId);
 			this.transferDataStartTimes.delete(progressId);
 			this.transferFirstPositiveProgressTimes.delete(progressId);
@@ -11732,7 +11834,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 				stream.stderr.on('data', data => {
 					armInactivity();
-					stderr += data.toString();
+					const chunk = data.toString();
+					stderr += chunk;
+					options.onStderr?.(chunk);
 				});
 				stream.on('error', error => abort(this.isTransferCanceled(options.progressId) ? TRANSFER_CANCELED_MESSAGE : error.message));
 				stream.on('close', code => {
@@ -14263,7 +14367,12 @@ function shouldPreferLegacyScpMode(connection: ITurboFileSshConnectionOptions): 
 	return !!connection.port && connection.port !== 22;
 }
 
-function buildDirectScpCommand(port: number, hasPassword = false, identityPath?: string, recursive = false, controlPath?: string, connectTimeoutSeconds = 5): string {
+function escapeLegacyScpRemotePath(path: string): string {
+	// Backslash escaping is understood both by the remote shell and SCP's fnmatch checks.
+	return path.replace(/([\\\s"'`$&;|<>()*?\[\]{}!#~])/g, '\\$1');
+}
+
+function buildDirectScpCommand(port: number, hasPassword = false, identityPath?: string, recursive = false, controlPath?: string, connectTimeoutSeconds = 5, legacyProtocol = false): string {
 	const parts = [
 		'scp',
 		'-q',
@@ -14280,6 +14389,9 @@ function buildDirectScpCommand(port: number, hasPassword = false, identityPath?:
 		'-o LogLevel=ERROR'
 	];
 	appendDirectSshControlOptions(parts, controlPath);
+	if (legacyProtocol) {
+		parts.push('-O');
+	}
 	if (hasPassword) {
 		parts.push('-o BatchMode=no');
 		parts.push('-o PreferredAuthentications=password,keyboard-interactive,publickey');

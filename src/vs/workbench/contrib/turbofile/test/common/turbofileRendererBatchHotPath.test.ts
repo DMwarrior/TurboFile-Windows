@@ -127,11 +127,22 @@ suite('TurboFileRendererBatchHotPath', () => {
 
 		assert.ok(ticker.includes('task.kind === \'transfer\' && task.status === \'running\''));
 		assert.ok(ticker.includes('TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS'));
+		assert.ok(!ticker.includes('now - task.lastProgressRenderAt < 350'));
 		assert.ok(ticker.includes("this.activePage === 'transfer' && !this.isTaskLogVisible"));
-		assert.ok(ticker.includes('this.refreshTaskbar();'));
+		assert.ok(ticker.includes('this.refreshTaskbarMetrics();'));
 		assert.ok(ticker.includes("this.activePage === 'tasks' || this.isTaskLogVisible"));
-		assert.ok(ticker.includes('this.render();'));
+		assert.ok(ticker.includes('this.refreshTaskLogMetrics();'));
+		assert.ok(!ticker.includes('this.render();'));
 		assert.ok(ticker.includes('never polls a device or changes transfer scheduling'));
+		assert.ok(!ticker.includes("this.activePage === 'transfer' && !this.isTaskLogVisible) {\n\t\t\t\t\tthis.refreshTaskbar();"));
+		assert.ok(!editor.slice(editor.indexOf('private renderTaskbar'), editor.indexOf('private isTerminalPanelVisibleForCurrentPage')).includes('this.renderDisposables.add(cancel);'));
+		const statusbarItem = editor.slice(editor.indexOf('private renderStatusbarItem'), editor.indexOf('private getLiveTransferStatusTitle'));
+		assert.ok(statusbarItem.includes("$('span.turbofile-statusbar-item-value')"));
+		assert.ok(editor.includes(".turbofile-statusbar-item-value"));
+		assert.ok(editor.includes('private refreshTaskLogMetrics(): void'));
+		assert.ok(editor.includes('this.getTransferTimeDisplay(liveSummary)'));
+		assert.ok(editor.includes('this.getTransferTimeDisplay(summary)'));
+		assert.ok(editor.includes('this.transferTimeDisplay.read(summary.startedAt, summary.remainingMs, Date.now())'));
 	});
 
 	test('gives cancellable file tasks an operation id and forwards it to the backend', () => {

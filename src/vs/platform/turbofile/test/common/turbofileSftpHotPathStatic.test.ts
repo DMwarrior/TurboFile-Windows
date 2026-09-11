@@ -207,7 +207,7 @@ suite('TurboFileSftpHotPathStatic', () => {
 
 		assert.deepStrictEqual({
 			scpPreservesPortableCollisionPreparation: directScp.includes('buildPortablePosixRm(request.target.path, true)')
-				&& directScp.includes('buildPortablePosixMkdir(request.target.path)')
+				&& !directScp.includes('buildPortablePosixMkdir(request.target.path)')
 				&& directScp.includes('buildPortablePosixMkdir(targetParentPath)')
 				&& directScp.includes('buildPortablePosixRm(request.target.path, false)')
 				&& !directScp.includes('canSkipRemoteFileTargetPreparation'),

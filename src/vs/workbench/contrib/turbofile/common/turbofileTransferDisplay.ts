@@ -17,6 +17,39 @@ export const TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PR
  */
 export const TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS = 1000;
 
+/** A shared sample for event renders and heartbeats, with no timer or I/O of its own. */
+export class TurboFileTransferTimeDisplay {
+	private sampledAt: number | undefined;
+	private startedAt: number | undefined;
+	private snapshot: { milliseconds: number | undefined; remaining: boolean } | undefined;
+
+	read(startedAt: number | undefined, remainingMs: number | undefined, now: number): { milliseconds: number | undefined; remaining: boolean } {
+		if (this.sampledAt === undefined || this.startedAt !== startedAt) {
+			this.sampledAt = now;
+			this.startedAt = startedAt;
+			this.snapshot = undefined;
+		} else if (now - this.sampledAt >= TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS) {
+			// Retain the clock phase even when a callback is late: 12.1 -> 13.1, not 13.0 -> 13.1.
+			this.sampledAt += Math.floor((now - this.sampledAt) / TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS) * TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS;
+			this.snapshot = undefined;
+		}
+		if (!this.snapshot) {
+			const remaining = remainingMs !== undefined && Number.isFinite(remainingMs) && remainingMs > 0;
+			this.snapshot = {
+				remaining,
+				milliseconds: remaining ? remainingMs : startedAt === undefined ? undefined : Math.max(0, this.sampledAt - startedAt)
+			};
+		}
+		return this.snapshot;
+	}
+
+	reset(): void {
+		this.sampledAt = undefined;
+		this.startedAt = undefined;
+		this.snapshot = undefined;
+	}
+}
+
 export interface ITurboFileTransferSizeItem {
 	readonly directory?: boolean;
 	readonly rawSize: number;

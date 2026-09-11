@@ -529,6 +529,16 @@ suite('TurboFileBatchStabilityStatic', () => {
 		assert.ok(!local.includes("'Copying locally.', true, {\n\t\t\t\t\tcompletedItems: index + 1"));
 	});
 
+	test('coalesces throttled progress and schedules the latest value for delivery', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const progress = methodBlock(service, 'private fireTransferProgress', 'private getTransferProgressEmitter');
+
+		assert.ok(progress.includes('this.pendingTransferProgress.set(progressId'));
+		assert.ok(progress.includes('setTimeout(() =>'));
+		assert.ok(progress.includes('this.fireTransferProgress(pending.request, pending.transferredBytes'));
+		assert.ok(progress.includes('clearTimeout(pendingTimer)'));
+	});
+
 	test('streams large local POSIX move selections through stdin', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const local = methodBlock(service, 'private async runLocalNativeBatchTransfer', 'private async runSameRemoteNativeBatchTransfer');
@@ -536,5 +546,53 @@ suite('TurboFileBatchStabilityStatic', () => {
 		assert.ok(local.includes('createPosixNativeBatchTransferPlan'));
 		assert.ok(local.includes('input: plan.input'));
 		assert.ok(!local.includes("runLocalCommand('mv', ['-f', ...sources"));
+	});
+
+	test('forwards cross-volume move byte deltas without changing rename or rollback', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const batch = methodBlock(service, 'private async runLocalNativeBatchTransfer', 'private async runSameRemoteNativeBatchTransfer');
+		const move = methodBlock(service, 'private async moveLocalPathNative', 'private async rollbackLocalMoves');
+		assert.deepStrictEqual({
+			batchCollectsDeltas: batch.includes('this.moveLocalPathNative(item.sourcePath, targetPath, request.progressId, delta =>'),
+			copyPreservesProgress: move.includes('this.copyLocalPath(sourcePath, targetPath, onDelta, progressId)'),
+			renamePreserved: move.includes('await fsp.rename(sourcePath, targetPath)'),
+			rollbackPreserved: batch.includes('await this.rollbackLocalMoves(completedMoves)')
+		}, { batchCollectsDeltas: true, copyPreservesProgress: true, renamePreserved: true, rollbackPreserved: true });
+	});
+
+	test('does not treat the last remote copy sample as the completed directory size', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const copy = methodBlock(service, 'private async trySameRemoteCopy', 'private async tryDirectTarTransfer');
+		assert.deepStrictEqual({
+			keepsKnownBytes: copy.includes('const expectedBytes = Math.max(0, request.expectedBytes ?? 0)'),
+			resolvesUnknownTotalAfterCopy: copy.indexOf('await this.getRemotePathContentSizeByCommand(request.target, request.progressId)') > copy.indexOf('await this.runRemoteMutationWithSftpFallback('),
+			returnsFinalBytes: copy.includes("this.createTransferResult(true, 'remote-copy', resultBytes")
+		}, { keepsKnownBytes: true, resolvesUnknownTotalAfterCopy: true, returnsFinalBytes: true });
+	});
+
+	test('bounds native batch probes and discards in-flight samples after stop', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const monitor = methodBlock(service, 'private async monitorRemoteBatchNativeCopy', 'private async tryLocalBatchRsyncTransfer');
+		const growth = methodBlock(service, 'private beginTransferGrowthTiming', 'private normalizeGrowthProgressBytes');
+		const probe = growth.indexOf('const size = await probeSize();');
+		assert.deepStrictEqual({
+			boundedProbes: monitor.includes('mapLimit(items, 1,'),
+			noCompletionSleep: !monitor.includes('await delay('),
+			awaitsOperation: monitor.includes('await operation();'),
+			stopsObserver: monitor.includes('stop();'),
+			discardsLateSample: growth.indexOf('if (stopped)', probe) < growth.indexOf('onProgress?.(transferredBytes)', probe)
+		}, { boundedProbes: true, noCompletionSleep: true, awaitsOperation: true, stopsObserver: true, discardsLateSample: true });
+	});
+
+	test('keeps native directory SCP progress probes coarse and active in both directions', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const upload = methodBlock(service, 'private async uploadPathWithNativeOpenSshScp', 'private async downloadPathWithNativeOpenSshScp');
+		const download = methodBlock(service, 'private async downloadPathWithNativeOpenSshScp', 'private async uploadFileWithScpProtocol');
+		assert.deepStrictEqual({
+			remoteDirectoryProbe: upload.includes('this.beginRemotePathGrowthTiming(') && upload.includes('onProgress, 1000, 500)'),
+			localDirectoryProbe: download.includes('getLocalPathSize(localPath)') && download.includes('onProgress, 1000, 500, 1000)'),
+			cleanup: [upload, download].every(block => block.includes('stopGrowthTiming();')),
+			keepsNativeScp: [upload, download].every(block => block.includes("this.runCancelableLocalCommand('scp.exe'"))
+		}, { remoteDirectoryProbe: true, localDirectoryProbe: true, cleanup: true, keepsNativeScp: true });
 	});
 });

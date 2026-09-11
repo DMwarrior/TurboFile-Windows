@@ -76,7 +76,7 @@ import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImage
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
-import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TurboFileTransferTimeDisplay, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
 
@@ -804,6 +804,7 @@ export class TurboFileEditor extends EditorPane {
 	private dialogState: TurboFileDialogState | undefined;
 	private imageGridObserver: IntersectionObserver | undefined;
 	private liveTransferTicker: number | undefined;
+	private readonly transferTimeDisplay = new TurboFileTransferTimeDisplay();
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	// Thumbnails load only after scrolling settles, and only for the page in view; bumping the token
 	// invalidates any batch still loading a page the user has scrolled away from (fast jumps).
@@ -5162,18 +5163,15 @@ export class TurboFileEditor extends EditorPane {
 			const transferSizeText = liveSummary.totalBytes !== undefined
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
 				: liveSummary.transferredBytes > 0 || isRsyncTransferRunning ? formatSize(liveSummary.transferredBytes) : '准备传输';
-			const showElapsedTime = liveSummary.remainingMs === undefined || liveSummary.remainingMs <= 0 || !Number.isFinite(liveSummary.remainingMs);
-			const timeText = showElapsedTime ? this.formatElapsed(liveSummary.startedAt) : this.formatRemaining(liveSummary.remainingMs);
-			const timeTitle = showElapsedTime ? '已耗时' : '剩余时间';
+			const time = this.getTransferTimeDisplay(liveSummary);
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
-			right.appendChild(this.renderStatusbarItem(Codicon.clock, timeText, timeTitle));
+			right.appendChild(this.renderStatusbarItem(Codicon.clock, time.text, time.title));
 			right.appendChild(this.renderStatusbarItem(Codicon.archive, transferSizeText, '已传输'));
 			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
 			if (protocol) {
 				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输模式'));
 			}
 			const cancel = this.createIconButton(Codicon.close, '取消运行中的传输', 'turbofile-statusbar-cancel');
-			this.renderDisposables.add(cancel);
 			cancel.element.disabled = runningTransfers.every(task => task.cancelRequested);
 			cancel.element.addEventListener('click', event => {
 				event.stopPropagation();
@@ -5206,6 +5204,62 @@ export class TurboFileEditor extends EditorPane {
 		current.replaceWith(this.renderTaskbar());
 	}
 
+	private refreshTaskbarMetrics(): void {
+		if (!this.container || this.activePage !== 'transfer' || !this.shouldShowTaskbar()) {
+			return;
+		}
+		const runningTransfers = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
+		const runningTasks = this.tasks.filter(task => task.status === 'running');
+		const taskbar = this.container.querySelector<HTMLElement>('.turbofile-taskbar');
+		if (!taskbar || !runningTransfers.length) {
+			return;
+		}
+		const summary = this.getLiveTransferAggregate(runningTransfers);
+		const progressValue = taskbar.querySelector<HTMLElement>('.turbofile-statusbar-progress-value');
+		if (progressValue) {
+			const percent = summary.totalBytes !== undefined && summary.totalBytes > 0
+				? Math.max(0, Math.min(100, (summary.transferredBytes / summary.totalBytes) * 100))
+				: runningTasks.length ? Math.max(...runningTasks.map(task => task.progress)) : 0;
+			progressValue.style.width = `${percent.toFixed(1)}%`;
+		}
+		const title = taskbar.querySelector<HTMLElement>('.turbofile-statusbar-message-title');
+		if (title) {
+			title.textContent = this.getLiveTransferStatusTitle(runningTransfers);
+		}
+		const rightValues = taskbar.querySelectorAll<HTMLElement>('.turbofile-statusbar-section.is-right .turbofile-statusbar-item-value');
+		if (rightValues[0]) {
+			rightValues[0].textContent = this.formatSpeed(summary.speedBytesPerSecond);
+		}
+		if (rightValues[1]) {
+			const time = this.getTransferTimeDisplay(summary);
+			if (rightValues[1].textContent !== time.text) {
+				rightValues[1].textContent = time.text;
+			}
+			rightValues[1].parentElement?.setAttribute('title', time.title);
+		}
+		if (rightValues[2]) {
+			rightValues[2].textContent = summary.totalBytes !== undefined
+				? `${formatSize(summary.transferredBytes)} / ${formatSize(summary.totalBytes)}`
+				: formatSize(summary.transferredBytes);
+		}
+	}
+
+	private refreshTaskLogMetrics(): void {
+		if (!this.container || (this.activePage !== 'tasks' && !this.isTaskLogVisible)) {
+			return;
+		}
+		const tasksById = new Map(this.tasks.map(task => [String(task.id), task]));
+		for (const row of this.container.querySelectorAll<HTMLElement>('.turbofile-task-row[data-task-id]')) {
+			const task = tasksById.get(row.dataset.taskId ?? '');
+			if (task) {
+				const metrics = row.querySelector<HTMLElement>('.turbofile-task-row-metrics');
+				if (metrics) {
+					metrics.textContent = this.getTaskMetrics(task);
+				}
+			}
+		}
+	}
+
 	/** Keep terminal visibility available for transfer-page terminal layout and focus state. */
 	private isTerminalPanelVisibleForCurrentPage(): boolean {
 		if (this.taskbarHiddenForTerminal) {
@@ -5227,7 +5281,7 @@ export class TurboFileEditor extends EditorPane {
 			item.title = title;
 		}
 		item.appendChild(renderIcon(icon));
-		const label = $('span');
+		const label = $('span.turbofile-statusbar-item-value');
 		label.textContent = text;
 		item.appendChild(label);
 		return item;
@@ -5360,15 +5414,12 @@ export class TurboFileEditor extends EditorPane {
 		return bytesPerSecond && bytesPerSecond > 0 ? `${formatTransferRate(bytesPerSecond)}/s` : '--';
 	}
 
-	private formatRemaining(milliseconds: number | undefined): string {
-		return milliseconds !== undefined && Number.isFinite(milliseconds) && milliseconds >= 0 ? formatDuration(milliseconds) : '--';
-	}
-
-	private formatElapsed(startedAt: number | undefined): string {
-		if (startedAt === undefined) {
-			return '--';
-		}
-		return formatDuration(Math.max(0, Date.now() - startedAt));
+	private getTransferTimeDisplay(summary: { startedAt?: number; remainingMs?: number }): { text: string; title: string } {
+		const time = this.transferTimeDisplay.read(summary.startedAt, summary.remainingMs, Date.now());
+		return {
+			text: time.milliseconds === undefined ? '--' : formatDuration(time.milliseconds),
+			title: time.remaining ? localize('turbofile.remainingTime', "剩余时间") : localize('turbofile.elapsedTime', "已耗时")
+		};
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
@@ -5554,9 +5605,9 @@ export class TurboFileEditor extends EditorPane {
 					return;
 				}
 				if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
-					this.refreshTaskbar();
+					this.refreshTaskbarMetrics();
 				} else if (this.activePage === 'tasks' || this.isTaskLogVisible) {
-					this.render();
+					this.refreshTaskLogMetrics();
 				}
 			}, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS);
 		} else if (!needsLiveTicker) {
@@ -5573,6 +5624,7 @@ export class TurboFileEditor extends EditorPane {
 			getWindow(this.container).clearInterval(this.liveTransferTicker);
 		}
 		this.liveTransferTicker = undefined;
+		this.transferTimeDisplay.reset();
 	}
 
 	private beginTask(kind: TurboFileTaskKind, label: string, detail: string, shouldRender: boolean = true): TurboFileTask {
