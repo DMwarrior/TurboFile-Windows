@@ -1599,10 +1599,53 @@ end;
 
 var
 	ShouldRestartTunnelService: Boolean;
+	ExplorerWasStoppedForInstall: Boolean;
 #ifdef ProxyMutex
 	ProxyWasRunning: Boolean;
 	AppWasRunning: Boolean;
 #endif
+
+function StopExplorerForInstall(): Boolean;
+var
+	ResultCode: Integer;
+	DragExtensionPath: String;
+begin
+	ExplorerWasStoppedForInstall := False;
+	DragExtensionPath := ExpandConstant('{app}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext\x64\TurboFileDragExt.dll');
+	if not FileExists(DragExtensionPath) then begin
+		Result := True;
+		exit;
+	end;
+
+	// Explorer may keep the CopyHook DLL loaded in a shell/COM instance that is not
+	// released by Restart Manager. Stop it explicitly before replacing the DLL.
+	if not Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM explorer.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+		Result := False;
+		exit;
+	end;
+	Sleep(500);
+	ExplorerWasStoppedForInstall := True;
+	Result := True;
+end;
+
+procedure RestartExplorerAfterInstall();
+var
+	ResultCode: Integer;
+begin
+	if not ExplorerWasStoppedForInstall then begin
+		exit;
+	end;
+	ExplorerWasStoppedForInstall := False;
+	if not Exec(ExpandConstant('{sys}\explorer.exe'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then begin
+		Log('Unable to restart Explorer after installation: ' + IntToStr(ResultCode));
+	end;
+end;
+
+procedure DeinitializeSetup();
+begin
+	// Restore the shell even when setup is cancelled or aborted after Explorer was stopped.
+	RestartExplorerAfterInstall();
+end;
 
 function StopTunnelOtherProcesses(): Boolean;
 var
@@ -1666,6 +1709,9 @@ begin
 
   if IsNotBackgroundUpdate() and not StopTunnelOtherProcesses() then
     Result := '{#NameShort} is still running a tunnel process. Please stop the tunnel before installing.';
+
+  if (Result = '') and not StopExplorerForInstall() then
+    Result := 'Unable to close Windows Explorer before replacing the drag extension. Please close Explorer windows and try again.';
 
   if (Result = '') and not MigrateIncompatibleInstallation() then
     Result := 'Unable to remove the existing {#NameShort} installation. Installation was stopped to prevent two copies from being installed. Please approve the administrator prompt and try again.';
@@ -2058,6 +2104,7 @@ begin
 
     RepairMigratedShortcuts();
     CleanupLegacyVersionedResources();
+	RestartExplorerAfterInstall();
 
     if ShouldRestartTunnelService then
     begin
