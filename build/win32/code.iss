@@ -95,7 +95,7 @@ Type: files; Name: "{app}\new_*"
 Type: files; Name: "{app}\updating_version"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 0,6.1
 Name: "addcontextmenufiles"; Description: "{cm:AddContextMenuFiles,{#NameShort}}"; GroupDescription: "{cm:Other}"; Flags: unchecked
 Name: "addcontextmenufolders"; Description: "{cm:AddContextMenuFolders,{#NameShort}}"; GroupDescription: "{cm:Other}"; Flags: unchecked
@@ -1357,6 +1357,28 @@ end;
 function IsVersionedUpdate(): Boolean;
 begin
   Result := '{#VersionedResourcesFolder}' <> '';
+end;
+
+procedure InitializeWizard();
+var
+  Index: Integer;
+  Parameter: String;
+begin
+  if WizardSilent() or IsBackgroundUpdate() then
+    Exit;
+
+  // Explicit unattended configuration takes precedence over the interactive default.
+  for Index := 1 to ParamCount() do begin
+    Parameter := Lowercase(ParamStr(Index));
+    if (Pos('/tasks=', Parameter) = 1) or
+       (Pos('/mergetasks=', Parameter) = 1) or
+       (Pos('/loadinf=', Parameter) = 1) then
+      Exit;
+  end;
+
+  // A previous installation may have saved this task as deselected. Change only
+  // its initial wizard state, allowing the user to uncheck it before installing.
+  WizardSelectTasks('desktopicon');
 end;
 
 #if "user" == InstallTarget
