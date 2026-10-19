@@ -10,6 +10,23 @@ import { orderTurboFileDirectSshRoutes, runTurboFileDirectRouteFlow, TurboFileDi
 
 suite('TurboFileDirectRoute', () => {
 
+	test('reports the stage that actually failed while retaining diagnostics outside serialized route metadata', () => {
+		const cause = new Error('sensitive remote command diagnostic');
+		const error = new TurboFileDirectDataError('source-push', [{ route: 'source-push', stage: 'initial' }], cause);
+		const unavailable = new TurboFileDirectUnavailableError([{ route: 'source-push', stage: 'initial' }], cause);
+		assert.deepStrictEqual({
+			stage: error.stage,
+			message: error.message,
+			causeRetained: error.transferCause === cause && unavailable.transferCause === cause,
+			serializedCause: JSON.stringify([error, unavailable]).includes(cause.message)
+		}, {
+			stage: 'initial',
+			message: 'The direct SSH transfer failed.',
+			causeRetained: true,
+			serializedCause: false
+		});
+	});
+
 	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('orders source push before target pull by default', () => {

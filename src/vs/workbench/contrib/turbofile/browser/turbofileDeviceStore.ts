@@ -11,6 +11,8 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileDeviceCapabilities, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
 
 const TURBOFILE_DEVICES_STORAGE_KEY = 'turbofile.devices';
+const TURBOFILE_DEVICE_ORDER_STORAGE_KEY = 'turbofile.deviceOrder';
+const TURBOFILE_LOCAL_WINDOWS_DEVICE_ID = 'local-windows';
 const TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY = 'turbofile.deletedDefaultDevices';
 const TURBOFILE_SECRET_PREFIX = 'turbofile.device.secret';
 const TURBOFILE_AUTO_FAST_DEFAULT_MIGRATION_KEY = 'turbofile.transferProtocolDefault.autoFast.v1';
@@ -86,12 +88,23 @@ export class TurboFileDeviceStore extends Disposable {
 	private readonly secretMutationChains = new Map<string, Promise<unknown>>();
 	private readonly onDidChangeDeviceSecretEmitter = this._register(new Emitter<string>());
 	readonly onDidChangeDeviceSecret = this.onDidChangeDeviceSecretEmitter.event;
+	private readonly onDidChangeDeviceOrderEmitter = this._register(new Emitter<void>());
+	readonly onDidChangeDeviceOrder = this.onDidChangeDeviceOrderEmitter.event;
+	private lastDeviceOrder: string;
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@ISecretStorageService private readonly secretStorageService: ISecretStorageService
 	) {
 		super();
+		this.lastDeviceOrder = JSON.stringify(this.loadDeviceOrder());
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, TURBOFILE_DEVICE_ORDER_STORAGE_KEY, this._store)(() => {
+			const deviceOrder = JSON.stringify(this.loadDeviceOrder());
+			if (deviceOrder !== this.lastDeviceOrder) {
+				this.lastDeviceOrder = deviceOrder;
+				this.onDidChangeDeviceOrderEmitter.fire();
+			}
+		}));
 		this._register(this.secretStorageService.onDidChangeSecret(key => {
 			if (this.isTurboFileDeviceSecretKey(key)) {
 				this.secretValueCache.delete(key);
@@ -101,14 +114,46 @@ export class TurboFileDeviceStore extends Disposable {
 	}
 
 	loadDevices(): TurboFileDevice[] {
+		return this.sortDevices(this.migrateDefaultTransferProtocolToAutoFast(this.readDevices()));
+	}
+
+	/** Applies the shared display order, retaining new devices at the end. */
+	sortDevices(devices: readonly TurboFileDevice[]): TurboFileDevice[] {
+		const devicesById = new Map<string, TurboFileDevice>();
+		for (const device of devices) {
+			if (!devicesById.has(device.id)) {
+				devicesById.set(device.id, device);
+			}
+		}
+		return this.getOrderedDeviceIds([...devicesById.keys()]).map(id => devicesById.get(id)!);
+	}
+
+	/** Moves a known device relative to another device without changing its configuration or secrets. */
+	reorderDevice(sourceId: string, targetId: string, position: 'before' | 'after'): boolean {
+		const deviceIds = this.getOrderedDeviceIds([TURBOFILE_LOCAL_WINDOWS_DEVICE_ID, ...this.readDevices().map(device => device.id)]);
+		if (sourceId === targetId || !deviceIds.includes(sourceId) || !deviceIds.includes(targetId)) {
+			return false;
+		}
+
+		const reorderedIds = deviceIds.filter(id => id !== sourceId);
+		const targetIndex = reorderedIds.indexOf(targetId);
+		reorderedIds.splice(targetIndex + (position === 'after' ? 1 : 0), 0, sourceId);
+		if (reorderedIds.every((id, index) => id === deviceIds[index])) {
+			return false;
+		}
+
+		this.storeDeviceOrder(reorderedIds);
+		return true;
+	}
+
+	private readDevices(): TurboFileDevice[] {
 		const raw = this.storageService.get(TURBOFILE_DEVICES_STORAGE_KEY, StorageScope.PROFILE, '[]');
 		try {
 			const devices = JSON.parse(raw);
 			if (!Array.isArray(devices)) {
 				return [];
 			}
-			const normalized = devices.map(device => this.normalizeDevice(device)).filter((device): device is TurboFileDevice => !!device && device.platform !== 'windows');
-			return this.migrateDefaultTransferProtocolToAutoFast(normalized);
+			return devices.map(device => this.normalizeDevice(device)).filter((device): device is TurboFileDevice => !!device && device.platform !== 'windows');
 		} catch {
 			return [];
 		}
@@ -256,6 +301,9 @@ export class TurboFileDeviceStore extends Disposable {
 		const devices = this.loadDevices();
 		const nextDevices = devices.filter(device => device.id !== deviceId);
 		this.storeDevices(nextDevices);
+		if (this.storageService.get(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, StorageScope.PROFILE) !== undefined) {
+			this.storeDeviceOrder(this.getOrderedDeviceIds([TURBOFILE_LOCAL_WINDOWS_DEVICE_ID, ...nextDevices.map(device => device.id)]));
+		}
 		if (this.isDefaultDeviceId(deviceId)) {
 			const deletedDefaultDeviceIds = this.loadDeletedDefaultDeviceIds();
 			deletedDefaultDeviceIds.add(deviceId);
@@ -293,6 +341,32 @@ export class TurboFileDeviceStore extends Disposable {
 
 	private storeDevices(devices: TurboFileDevice[]): void {
 		this.storageService.store(TURBOFILE_DEVICES_STORAGE_KEY, JSON.stringify(devices), StorageScope.PROFILE, StorageTarget.MACHINE);
+	}
+
+	private getOrderedDeviceIds(deviceIds: readonly string[]): string[] {
+		const availableIds = new Set(deviceIds);
+		return [...new Set([...this.loadDeviceOrder().filter(id => availableIds.has(id)), ...deviceIds])];
+	}
+
+	private loadDeviceOrder(): string[] {
+		const raw = this.storageService.get(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		try {
+			const parsed = JSON.parse(raw);
+			if (!Array.isArray(parsed)) {
+				return [];
+			}
+			const availableIds = new Set([TURBOFILE_LOCAL_WINDOWS_DEVICE_ID, ...this.readDevices().map(device => device.id)]);
+			return [...new Set(parsed.filter((id): id is string => typeof id === 'string' && availableIds.has(id)))];
+		} catch {
+			return [];
+		}
+	}
+
+	private storeDeviceOrder(deviceIds: readonly string[]): void {
+		const value = JSON.stringify(deviceIds);
+		if (this.storageService.get(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, StorageScope.PROFILE) !== value) {
+			this.storageService.store(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, value, StorageScope.PROFILE, StorageTarget.MACHINE);
+		}
 	}
 
 	private migrateDefaultTransferProtocolToAutoFast(devices: TurboFileDevice[]): TurboFileDevice[] {

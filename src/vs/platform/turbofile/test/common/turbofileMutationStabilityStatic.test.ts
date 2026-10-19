@@ -322,7 +322,7 @@ suite('TurboFileMutationStabilityStatic', () => {
 
 		assert.ok(createDirectory.includes('return this.createDirectoryCore(endpoint);'));
 		assert.ok(writeFile.includes('return this.writeFileCore(endpoint, content, encoding);'));
-		assert.ok(rename.includes('return this.renamePathCore(endpoint, targetPath);'));
+		assert.ok(rename.includes('await this.renamePathCore(endpoint, targetPath, progressId, onDelta)'));
 		assert.ok(compress.includes('await this.compressPathCore(endpoint, targetPath, progressId)'));
 		assert.ok(extract.includes('await this.extractPathCore(endpoint, targetDirectory, progressId)'));
 		for (const mutation of [createDirectory, writeFile, rename, compress, extract]) {

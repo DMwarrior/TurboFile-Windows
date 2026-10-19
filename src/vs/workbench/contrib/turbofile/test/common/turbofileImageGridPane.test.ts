@@ -29,17 +29,19 @@ suite('TurboFileImageGridPane', () => {
 		});
 	});
 
-	test('pastes into the focused pane grid when clipboard came from the other side', () => {
+	test('pastes into the focused pane grid for same-side, cross-side and external clipboard files', () => {
 		assert.deepStrictEqual([
 			getTurboFileImageGridPasteTargetSide('right', 'left'),
 			getTurboFileImageGridPasteTargetSide('left', 'right'),
 			getTurboFileImageGridPasteTargetSide('left', 'left'),
+			getTurboFileImageGridPasteTargetSide('right', 'right'),
 			getTurboFileImageGridPasteTargetSide('right', undefined)
 		], [
 			'right',
 			'left',
+			'left',
 			'right',
-			'left'
+			'right'
 		]);
 	});
 

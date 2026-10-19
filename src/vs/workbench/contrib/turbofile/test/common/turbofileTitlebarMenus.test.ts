@@ -22,9 +22,7 @@ suite('TurboFileTitlebarMenus', () => {
 			'turbofile.settings.imageGridSizeSortBasis',
 			'turbofile.settings.conflictPolicy',
 			'turbofile.settings.automaticUpdates',
-			'turbofile.settings.showHiddenFiles',
-			'turbofile.settings.fileListFontSize',
-			'turbofile.settings.fileListFontFamily'
+			'turbofile.settings.showHiddenFiles'
 		]) {
 			assert.ok(settings.includes(id), `missing settings action ${id}`);
 		}
@@ -93,6 +91,12 @@ suite('TurboFileTitlebarMenus', () => {
 			'turbofile.view.restorePanes',
 			'turbofile.view.zoomOut',
 			'turbofile.view.zoomIn',
+			'turbofile.view.font',
+			'turbofile.view.editorFontSize',
+			'turbofile.view.uiFontSize',
+			'turbofile.view.uiFontFamily',
+			'turbofile.view.fileListFontSize',
+			'turbofile.view.fileListFontFamily',
 			'turbofile.view.theme',
 			'turbofile.view.refresh'
 		]) {

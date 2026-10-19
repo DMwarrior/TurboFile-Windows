@@ -159,9 +159,18 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 			return ConfirmResult.CANCEL;
 		}
 
-		await Promise.all(inputs.map(input => input.cancelRunningTasksForClose?.()));
-		for (const input of inputs) {
-			input.setRunningTaskCount(0);
+		const cancellationResults = await Promise.allSettled(inputs.map(input => input.cancelRunningTasksForClose?.()));
+		const failures: string[] = [];
+		for (const [index, result] of cancellationResults.entries()) {
+			if (result.status === 'fulfilled') {
+				inputs[index].setRunningTaskCount(0);
+			} else {
+				failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+			}
+		}
+		if (failures.length) {
+			await this.dialogService.error(localize('turbofile.closeCancellationFailed', "未能取消正在运行的任务，已保留传输页。可再次取消或关闭以重试。"), failures.join('\n'));
+			return ConfirmResult.CANCEL;
 		}
 		return ConfirmResult.DONT_SAVE;
 	}

@@ -299,9 +299,9 @@ suite('TurboFileBatchStabilityStatic', () => {
 				&& !warmUpload.includes('lease.session.client.end()')
 				&& !warmDownload.includes('lease.session.client.end()'),
 			standaloneFallbacksReuseTheSameWireHelpers: standaloneUpload.includes('this.downloadFileWithScpProtocolOnClient') === false
-				&& standaloneUpload.includes('this.connect(configResult.config)')
+				&& standaloneUpload.includes('this.connect(configResult.config, progressId)')
 				&& standaloneUpload.includes('this.uploadFileWithScpProtocolOnClient(client')
-				&& standaloneDownload.includes('this.connect(configResult.config)')
+				&& standaloneDownload.includes('this.connect(configResult.config, progressId)')
 				&& standaloneDownload.includes('this.downloadFileWithScpProtocolOnClient(client'),
 			channelCancellationAndTimeoutsAreSymmetric: uploadProtocol.includes('this.registerTransferCancelHandler(progressId, cancel)')
 				&& downloadProtocol.includes('this.registerTransferCancelHandler(progressId, cancel)')
@@ -589,8 +589,10 @@ suite('TurboFileBatchStabilityStatic', () => {
 		const upload = methodBlock(service, 'private async uploadPathWithNativeOpenSshScp', 'private async downloadPathWithNativeOpenSshScp');
 		const download = methodBlock(service, 'private async downloadPathWithNativeOpenSshScp', 'private async uploadFileWithScpProtocol');
 		assert.deepStrictEqual({
-			remoteDirectoryProbe: upload.includes('this.beginRemotePathGrowthTiming(') && upload.includes('onProgress, 1000, 500)'),
-			localDirectoryProbe: download.includes('getLocalPathSize(localPath)') && download.includes('onProgress, 1000, 500, 1000)'),
+			remoteDirectoryProbe: upload.includes('this.beginRemotePathGrowthTiming(')
+				&& upload.includes('onProgress, 1000, 500, reportActivity)'),
+			localDirectoryProbe: download.includes('getLocalPathSize(localPath)')
+				&& download.includes('onProgress, 1000, 500, 1000, reportActivity)'),
 			cleanup: [upload, download].every(block => block.includes('stopGrowthTiming();')),
 			keepsNativeScp: [upload, download].every(block => block.includes("this.runCancelableLocalCommand('scp.exe'"))
 		}, { remoteDirectoryProbe: true, localDirectoryProbe: true, cleanup: true, keepsNativeScp: true });

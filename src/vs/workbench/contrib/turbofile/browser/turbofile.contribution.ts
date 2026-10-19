@@ -49,7 +49,6 @@ interface TurboFileActivityEntry {
 	readonly viewName: ReturnType<typeof localize2>;
 	readonly page: TurboFileWorkbenchPage;
 	readonly icon: ThemeIcon;
-	readonly appearanceIcon?: boolean;
 	readonly order: number;
 }
 
@@ -73,23 +72,13 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 		order: 1
 	},
 	{
-		containerId: 'workbench.view.turbofile.themesContainer',
-		viewId: 'workbench.view.turbofile.themes.route',
-		title: localize2('turbofile.themesContainer', '外观'),
-		viewName: localize2('turbofile.themesView', '外观设置'),
-		page: 'themes',
-		icon: Codicon.colorMode,
-		appearanceIcon: true,
-		order: 2
-	},
-	{
 		containerId: 'workbench.view.turbofile.settingsContainer',
 		viewId: 'workbench.view.turbofile.settings.route',
 		title: localize2('turbofile.settingsContainer', '设置'),
 		viewName: localize2('turbofile.settingsView', '系统设置'),
 		page: 'settings',
 		icon: Codicon.settingsGear,
-		order: 3
+		order: 2
 	},
 	{
 		containerId: 'workbench.view.turbofile.tasksContainer',
@@ -98,7 +87,7 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 		viewName: localize2('turbofile.tasksView', '任务日志'),
 		page: 'tasks',
 		icon: Codicon.history,
-		order: 4
+		order: 3
 	}
 ];
 
@@ -147,34 +136,6 @@ function getMostRecentTurboFileEditorInput(editorService: IEditorService): Turbo
 	return editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE)
 		.map(identifier => identifier.editor)
 		.find((editor): editor is TurboFileEditorInput => editor instanceof TurboFileEditorInput);
-}
-
-function renderTurboFileAppearanceNavIcon(): SVGElement {
-	const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-	svg.setAttribute('viewBox', '0 0 24 24');
-	svg.setAttribute('aria-hidden', 'true');
-	svg.classList.add('turbofile-nav-sun-icon');
-	const paths = [
-		'M12 2.75V5.1',
-		'M12 18.9v2.35',
-		'M4.64 4.64l1.66 1.66',
-		'M17.7 17.7l1.66 1.66',
-		'M2.75 12H5.1',
-		'M18.9 12h2.35',
-		'M4.64 19.36l1.66-1.66',
-		'M17.7 6.3l1.66-1.66'
-	];
-	for (const d of paths) {
-		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-		path.setAttribute('d', d);
-		svg.appendChild(path);
-	}
-	const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-	circle.setAttribute('cx', '12');
-	circle.setAttribute('cy', '12');
-	circle.setAttribute('r', '4');
-	svg.appendChild(circle);
-	return svg;
 }
 
 class TurboFileRouteView extends ViewPane {
@@ -394,7 +355,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 				button.classList.add('is-active');
 				button.setAttribute('aria-current', 'page');
 			}
-			button.appendChild(entry.appearanceIcon ? renderTurboFileAppearanceNavIcon() : renderIcon(entry.icon));
+			button.appendChild(renderIcon(entry.icon));
 			const label = $('span.turbofile-page-nav-label');
 			label.textContent = entry.title.value;
 			button.appendChild(label);

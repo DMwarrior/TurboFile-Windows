@@ -57,7 +57,7 @@ export interface ITurboFileSshService {
 	 * All endpoints must target the same device/connection.
 	 */
 	deletePaths(endpoints: readonly ITurboFileTransferEndpoint[], recursive?: boolean, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
-	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string): Promise<ITurboFileFileOperationResult>;
+	renamePath(endpoint: ITurboFileTransferEndpoint, targetPath: string, options?: ITurboFileCancelableOperationOptions): Promise<ITurboFileFileOperationResult>;
 	/**
 	 * Moves many paths into a single target directory in as few round trips as possible (POSIX remote:
 	 * one `xargs -0 mv` — a metadata-only rename, no data copied). All sources must be on the same

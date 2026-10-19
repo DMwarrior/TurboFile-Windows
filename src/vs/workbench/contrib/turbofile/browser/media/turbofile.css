@@ -558,106 +558,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	line-height: 1.45;
 }
 
-.turbofile-appearance-page {
-	display: grid;
-	align-content: start;
-	gap: 12px;
-	padding: 16px 20px;
-	background: var(--turbofile-unified-background);
-}
-
-.turbofile-appearance-shell {
-	width: 100%;
-	min-width: 0;
-	display: grid;
-	gap: 14px;
-}
-
-.turbofile-appearance-title {
-	margin: 0;
-	color: var(--vscode-foreground);
-	font-size: calc(var(--turbofile-browser-font-size, 14px) * 1.18);
-	font-weight: 700;
-	letter-spacing: 0;
-}
-
-.turbofile-appearance-card {
-	min-width: 0;
-	border: 1px solid var(--vscode-panel-border);
-	border-radius: 6px;
-	background: var(--vscode-sideBar-background);
-	overflow: hidden;
-}
-
-.turbofile-appearance-card-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 12px 14px;
-	border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.turbofile-appearance-card-copy {
-	display: grid;
-	gap: 4px;
-}
-
-.turbofile-appearance-card-copy h2 {
-	margin: 0;
-	font-size: calc(var(--turbofile-browser-font-size, 14px) * 1.02);
-	font-weight: 700;
-	color: var(--vscode-foreground);
-}
-
-.turbofile-appearance-card-copy p {
-	margin: 0;
-	color: var(--vscode-descriptionForeground);
-	font-size: calc(var(--turbofile-ui-font-size, 14px) * 0.92);
-	font-weight: 500;
-}
-
-.turbofile-appearance-mode-group {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	padding: 2px;
-	border: 1px solid var(--vscode-panel-border);
-	border-radius: 999px;
-	background: var(--vscode-editor-background);
-}
-
-.turbofile-appearance-mode-button {
-	height: 26px;
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	padding: 0 10px;
-	border: 0;
-	border-radius: 999px;
-	color: var(--vscode-descriptionForeground);
-	background: transparent;
-	font: inherit;
-	font-size: inherit;
-	font-weight: 600;
-	cursor: pointer;
-}
-
-.turbofile-appearance-font-summary {
-	display: grid;
-	border-top: 1px solid var(--vscode-panel-border);
-}
-
-.turbofile-appearance-mode-button:hover {
-	color: var(--vscode-foreground);
-	background: var(--vscode-list-hoverBackground);
-}
-
-.turbofile-appearance-mode-button.is-active {
-	color: var(--vscode-foreground);
-	background: color-mix(in srgb, var(--vscode-editor-background), var(--vscode-foreground) 8%);
-}
-
 .turbofile-appearance-icon {
 	width: 16px;
 	height: 16px;
@@ -672,329 +572,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 .turbofile-appearance-icon path[d^="M20.2"] {
 	fill: currentColor;
 	stroke: none;
-}
-
-.turbofile-appearance-preview {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-	gap: 0;
-	margin: 10px;
-	border-radius: 5px;
-	background: var(--turbofile-appearance-preview-background, var(--vscode-editor-background));
-	border: 1px solid var(--vscode-panel-border);
-	overflow: hidden;
-	font-family: var(--vscode-editor-font-family, var(--turbofile-browser-font-family, "Segoe UI", "Microsoft YaHei UI", sans-serif));
-	font-size: calc(var(--turbofile-browser-font-size, 14px) * 0.95);
-	filter: contrast(var(--turbofile-appearance-contrast-filter, 105%));
-}
-
-.turbofile-appearance-preview-pane {
-	min-width: 0;
-	padding: 6px 0;
-	position: relative;
-}
-
-.turbofile-appearance-preview-pane.is-left {
-	border-right: 2px solid var(--vscode-editorGutter-addedBackground, #2ea043);
-}
-
-.turbofile-appearance-code-line {
-	height: 26px;
-	display: grid;
-	grid-template-columns: 54px minmax(0, 1fr);
-	align-items: center;
-	color: var(--turbofile-appearance-preview-foreground, var(--vscode-editor-foreground));
-}
-
-.turbofile-appearance-code-line.is-removed {
-	background: color-mix(in srgb, var(--vscode-editorGutter-deletedBackground, #f85149) 28%, transparent);
-}
-
-.turbofile-appearance-code-line.is-added {
-	background: color-mix(in srgb, var(--vscode-editorGutter-addedBackground, #2ea043) 28%, transparent);
-}
-
-.turbofile-appearance-line-number {
-	padding-right: 14px;
-	color: var(--vscode-editorLineNumber-foreground);
-	text-align: right;
-	user-select: none;
-}
-
-.turbofile-appearance-code-line code {
-	min-width: 0;
-	color: var(--turbofile-appearance-preview-foreground, var(--vscode-editor-foreground));
-	white-space: pre;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.turbofile-appearance-code-line .is-keyword {
-	color: var(--turbofile-appearance-preview-accent, var(--vscode-textLink-foreground));
-}
-
-.turbofile-appearance-code-line .is-type {
-	color: var(--vscode-charts-green, #4ec9b0);
-}
-
-.turbofile-appearance-code-line .is-string {
-	color: var(--vscode-debugTokenExpression-string, #ce9178);
-}
-
-.turbofile-appearance-code-line .is-number {
-	color: var(--vscode-debugTokenExpression-number, #b5cea8);
-}
-
-.turbofile-appearance-config {
-	margin: 0 10px 10px;
-	border: 1px solid var(--vscode-panel-border);
-	border-radius: 5px;
-	background: var(--vscode-editor-background);
-	overflow: hidden;
-}
-
-.turbofile-appearance-config-header {
-	min-height: 46px;
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 10px;
-	padding: 8px 12px;
-	border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-.turbofile-appearance-config-header h3 {
-	margin: 0;
-	font-size: calc(var(--turbofile-browser-font-size, 14px) * 1.05);
-	font-weight: 700;
-}
-
-.turbofile-appearance-config-actions {
-	display: flex;
-	align-items: center;
-	flex-wrap: wrap;
-	gap: 8px;
-	color: var(--vscode-descriptionForeground);
-}
-
-.turbofile-appearance-config-actions button {
-	min-height: 28px;
-	border: 1px solid transparent;
-	border-radius: 4px;
-	background: transparent;
-	color: inherit;
-	font: inherit;
-	font-size: inherit;
-	font-weight: 600;
-	cursor: pointer;
-}
-
-.turbofile-appearance-config-actions button:hover {
-	background: var(--vscode-list-hoverBackground);
-	color: var(--vscode-foreground);
-}
-
-.turbofile-appearance-theme-name {
-	max-width: min(420px, 42vw);
-	height: 30px;
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	padding: 0 10px;
-	border: 1px solid var(--vscode-input-border);
-	border-radius: 5px;
-	background: var(--vscode-input-background);
-	color: var(--vscode-foreground);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.turbofile-appearance-aa {
-	width: 22px;
-	height: 22px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: 5px;
-	background: var(--vscode-editor-background);
-	color: var(--vscode-textLink-foreground, #007acc);
-	font-size: 12px;
-	font-weight: 700;
-}
-
-.turbofile-appearance-aa::before {
-	content: "Aa";
-}
-
-.turbofile-appearance-config-rows {
-	display: grid;
-}
-
-.turbofile-appearance-setting-row {
-	min-height: 44px;
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: center;
-	gap: 12px;
-	padding: 7px 12px;
-	border-top: 1px solid var(--vscode-panel-border);
-	font-size: inherit;
-	font-weight: 600;
-}
-
-.turbofile-appearance-color-pill,
-.turbofile-appearance-value-pill,
-.turbofile-appearance-font-size-value {
-	position: relative;
-	min-width: 172px;
-	height: 30px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 8px;
-	border: 1px solid var(--vscode-input-border);
-	border-radius: 5px;
-	padding: 0 10px;
-	font-weight: 600;
-	cursor: pointer;
-}
-
-.turbofile-appearance-color-pill.is-dark {
-	color: #ffffff;
-}
-
-.turbofile-appearance-color-pill.is-light {
-	color: #111827;
-}
-
-.turbofile-appearance-color-dot {
-	width: 14px;
-	height: 14px;
-	border-radius: 999px;
-	border: 1px solid color-mix(in srgb, currentColor, transparent 65%);
-}
-
-.turbofile-appearance-color-input {
-	position: absolute;
-	width: 1px;
-	height: 1px;
-	opacity: 0;
-	pointer-events: none;
-}
-
-.turbofile-appearance-value-pill,
-.turbofile-appearance-font-size-value {
-	color: var(--vscode-descriptionForeground);
-	background: var(--vscode-input-background);
-}
-
-.turbofile-appearance-toggle {
-	width: 40px;
-	height: 22px;
-	padding: 2px;
-	border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
-	border-radius: 999px;
-	background: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-input-background));
-	box-sizing: border-box;
-	cursor: pointer;
-}
-
-.turbofile-appearance-toggle.is-on {
-	background: var(--vscode-button-background);
-	border-color: var(--vscode-button-background);
-}
-
-.turbofile-appearance-toggle-knob {
-	width: 18px;
-	height: 18px;
-	display: block;
-	border-radius: 999px;
-	background: var(--vscode-descriptionForeground);
-	transform: translateX(0);
-}
-
-.turbofile-appearance-toggle.is-on .turbofile-appearance-toggle-knob {
-	transform: translateX(18px);
-	background: var(--vscode-button-foreground);
-}
-
-.turbofile-appearance-slider-control {
-	min-width: 220px;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	color: var(--vscode-foreground);
-}
-
-.turbofile-appearance-slider {
-	width: 180px;
-	accent-color: var(--vscode-button-background);
-}
-
-.turbofile-appearance-wide-setting {
-	min-height: 62px;
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: center;
-	gap: 12px;
-	padding: 10px 12px;
-	border-top: 1px solid var(--vscode-panel-border);
-}
-
-.turbofile-appearance-wide-copy {
-	display: grid;
-	gap: 4px;
-}
-
-.turbofile-appearance-wide-copy strong {
-	font-size: inherit;
-	font-weight: 700;
-}
-
-.turbofile-appearance-wide-copy span {
-	color: var(--vscode-descriptionForeground);
-	font-size: calc(var(--turbofile-ui-font-size, 14px) * 0.92);
-	font-weight: 500;
-}
-
-.turbofile-appearance-font-size-value {
-	min-width: 92px;
-	color: var(--vscode-descriptionForeground);
-	font-size: inherit;
-	cursor: default;
-}
-
-.turbofile-workbench.is-appearance-pointer button,
-.turbofile-workbench.is-appearance-pointer input[type="range"],
-.turbofile-workbench.is-appearance-pointer label {
-	cursor: pointer;
-}
-
-body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
-	background-color: color-mix(in srgb, var(--vscode-activityBar-background), transparent 8%) !important;
-}
-
-@media (max-width: 900px) {
-	.turbofile-appearance-card-header,
-	.turbofile-appearance-config-header {
-		align-items: stretch;
-		flex-direction: column;
-	}
-
-	.turbofile-appearance-preview {
-		grid-template-columns: 1fr;
-	}
-
-	.turbofile-appearance-preview-pane.is-left {
-		border-right: 0;
-		border-bottom: 2px solid var(--vscode-editorGutter-addedBackground, #2ea043);
-	}
-
-	.turbofile-appearance-theme-name {
-		max-width: none;
-		width: 100%;
-	}
 }
 
 .turbofile-page-header-actions,
@@ -1116,6 +693,46 @@ body.turbofile-shell.turbofile-appearance-translucent .part.sidebar {
 .turbofile-device-page-card.is-tone-0 {
 	--turbofile-device-card-accent: #5b8dff;
 	--turbofile-device-card-accent-2: #44c7de;
+}
+
+.turbofile-device-page-card[draggable="true"] {
+	cursor: grab;
+}
+
+.turbofile-device-page-card.is-device-order-dragging {
+	opacity: 0.5;
+	cursor: grabbing;
+}
+
+.turbofile-device-page-card.is-device-order-before::after,
+.turbofile-device-page-card.is-device-order-after::after {
+	content: '';
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 4px;
+	background: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+	pointer-events: none;
+}
+
+.turbofile-device-page-card.is-device-order-before::after {
+	left: 0;
+}
+
+.turbofile-device-page-card.is-device-order-after::after {
+	right: 0;
+}
+
+.turbofile-device-page-card.is-device-order-vertical::after {
+	left: 0;
+	right: 0;
+	width: auto;
+	height: 4px;
+}
+
+.turbofile-device-page-card.is-device-order-vertical.is-device-order-after::after {
+	top: auto;
+	bottom: 0;
 }
 
 .turbofile-device-page-card.is-tone-1 {
@@ -2853,10 +2470,10 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 @media (max-width: 980px) {
 	.turbofile-statusbar-content {
-		grid-template-columns: auto minmax(0, 1fr);
+		grid-template-columns: auto minmax(0, 1fr) auto;
 	}
 
-	.turbofile-statusbar-section.is-right {
+	.turbofile-statusbar-section.is-right .turbofile-statusbar-item:not(:first-child) {
 		display: none;
 	}
 }
@@ -4644,7 +4261,6 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-workbench.is-turbofile-dark .turbofile-page-card,
 .turbofile-workbench.is-turbofile-dark .turbofile-settings-section,
-.turbofile-workbench.is-turbofile-dark .turbofile-appearance-card,
 .turbofile-workbench.is-turbofile-dark .turbofile-dialog-panel,
 .turbofile-workbench.is-turbofile-dark .turbofile-task-log-panel,
 .turbofile-workbench.is-turbofile-dark .turbofile-sync-panel,
@@ -4656,7 +4272,6 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-workbench.is-turbofile-dark .turbofile-sidebar-device-form,
 .vs-dark .turbofile-workbench .turbofile-page-card,
 .vs-dark .turbofile-workbench .turbofile-settings-section,
-.vs-dark .turbofile-workbench .turbofile-appearance-card,
 .vs-dark .turbofile-workbench .turbofile-dialog-panel,
 .vs-dark .turbofile-workbench .turbofile-task-log-panel,
 .vs-dark .turbofile-workbench .turbofile-sync-panel,
@@ -4668,7 +4283,6 @@ body.hc-black .turbofile-live-transfer-panel {
 .vs-dark .turbofile-workbench .turbofile-sidebar-device-form,
 .hc-black .turbofile-workbench .turbofile-page-card,
 .hc-black .turbofile-workbench .turbofile-settings-section,
-.hc-black .turbofile-workbench .turbofile-appearance-card,
 .hc-black .turbofile-workbench .turbofile-dialog-panel,
 .hc-black .turbofile-workbench .turbofile-task-log-panel,
 .hc-black .turbofile-workbench .turbofile-sync-panel,
@@ -4996,14 +4610,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 	background: var(--vscode-button-hoverBackground, #1177bb);
 }
 
-.turbofile-appearance-page .turbofile-appearance-card:not(.turbofile-appearance-font-card) {
-	display: none !important;
-}
-
-.turbofile-appearance-page .turbofile-appearance-mode-group {
-	display: none !important;
-}
-
 .turbofile-workbench.is-turbofile-dark .turbofile-file-list,
 .vs-dark .turbofile-workbench .turbofile-file-list,
 .hc-black .turbofile-workbench .turbofile-file-list {
@@ -5047,7 +4653,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 .vs .turbofile-workbench,
 .vs .turbofile-workbench .turbofile-transfer-page,
 .vs .turbofile-workbench .turbofile-full-page,
-.vs .turbofile-workbench .turbofile-appearance-page,
 .vs .turbofile-workbench .turbofile-main,
 .vs .turbofile-workbench .turbofile-image-page,
 .vs .turbofile-workbench .turbofile-image-page-body {
@@ -5090,7 +4695,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 .vs .turbofile-page-header h2,
 .vs .turbofile-page-card-title,
 .vs .turbofile-section-title,
-.vs .turbofile-appearance-title,
 .vs .turbofile-image-page-title,
 .vs .turbofile-image-grid-title,
 .vs .turbofile-task-title,
@@ -5108,7 +4712,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .vs .turbofile-page-header p,
-.vs .turbofile-appearance-card-copy p,
 .vs .turbofile-info-line span,
 .vs .turbofile-task-meta,
 .vs .turbofile-task-row-detail,
@@ -5124,7 +4727,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 
 .vs .turbofile-page-card,
 .vs .turbofile-settings-section,
-.vs .turbofile-appearance-card,
 .vs .turbofile-dialog-panel,
 .vs .turbofile-task-log-panel,
 .vs .turbofile-sync-panel,
@@ -5263,7 +4865,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 	background: var(--tf-brand-blue);
 }
 
-.vs .turbofile-appearance-card-header,
 .vs .turbofile-browser-toolbar,
 .vs .turbofile-browser-pathbar,
 .vs .turbofile-pane-header,
@@ -5274,23 +4875,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 .vs .turbofile-image-grid-header {
 	border-color: var(--tf-border);
 	background: var(--tf-surface);
-}
-
-.vs .turbofile-appearance-mode-button {
-	border: 1px solid var(--tf-border);
-	color: var(--tf-text-muted);
-	background: var(--tf-surface);
-}
-
-.vs .turbofile-appearance-mode-button:hover {
-	color: var(--tf-brand-blue);
-	background: var(--tf-bg-secondary);
-}
-
-.vs .turbofile-appearance-mode-button.is-active {
-	border-color: var(--tf-brand-blue);
-	color: var(--tf-brand-blue);
-	background: var(--tf-brand-soft);
 }
 
 .vs .turbofile-editor-setting-select,

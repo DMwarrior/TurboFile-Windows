@@ -5,9 +5,7 @@
 
 type TurboFilePaneSide = 'left' | 'right';
 
-export function getTurboFileImageGridPasteTargetSide(gridSide: TurboFilePaneSide, clipboardSourceSide: TurboFilePaneSide | undefined): TurboFilePaneSide {
-	if (clipboardSourceSide && clipboardSourceSide !== gridSide) {
-		return gridSide;
-	}
-	return gridSide === 'left' ? 'right' : 'left';
+/** Paste follows the focused grid, including navigation on the same device and external files. */
+export function getTurboFileImageGridPasteTargetSide(gridSide: TurboFilePaneSide, _clipboardSourceSide: TurboFilePaneSide | undefined): TurboFilePaneSide {
+	return gridSide;
 }

@@ -189,11 +189,30 @@ suite('TurboFileSftpHotPathStatic', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const verifyUpload = methodBlock(service, 'private async verifySshUploadSize', 'private async tryLocalToSshTarTransfer');
 		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
+		const verification = directSftp.indexOf("await this.verifySshUploadSize(request.target, bytes, 'Direct SFTP', request.progressId);");
+		const transfer = directSftp.indexOf('await this.execRemote(client, transferCommand,');
+		const success = directSftp.indexOf("this.createTransferResult(true, 'sftp-direct'");
 
-		assert.ok(verifyUpload.includes('this.withDirectorySftp(target, async sftp => (await this.remoteStat(sftp, target.path)).size, progressId)'));
-		assert.ok(verifyUpload.indexOf('this.withDirectorySftp(') < verifyUpload.indexOf('this.getRemotePathContentSizeByCommand('));
-		assert.ok(directSftp.includes('this.withDirectorySftp(request.target, async sftp => (await this.remoteStat(sftp, request.target.path)).size, request.progressId)'));
-		assert.ok(directSftp.indexOf('this.withDirectorySftp(') < directSftp.indexOf('this.getRemotePathSizeByCommand('));
+		assert.deepStrictEqual({
+			usesWarmStatFirst: verifyUpload.includes('targetStat = await this.remoteStat(sftp, target.path);')
+				&& verifyUpload.indexOf('this.withDirectorySftp(target,') >= 0
+				&& verifyUpload.indexOf('this.withDirectorySftp(target,') < verifyUpload.indexOf('this.getRemotePathSizeByCommand(target, progressId, true)'),
+			fallbackChecksAFileInsteadOfDirectoryContents: verifyUpload.includes('this.getRemotePathSizeByCommand(target, progressId, true)')
+				&& !verifyUpload.includes('this.getRemotePathContentSizeByCommand('),
+			rejectsDirectoryShapeBeforeAcceptingSize: verifyUpload.indexOf('targetStat?.isDirectory()') >= 0
+				&& verifyUpload.indexOf('targetStat?.isDirectory()') < verifyUpload.indexOf('actualBytes === expectedBytes'),
+			awaitsVerificationBeforeSuccess: transfer >= 0 && verification > transfer && success > verification,
+			avoidsRecursivePreflight: transfer >= 0 && !directSftp.slice(0, transfer).includes('this.getRemotePathContentSizeByCommand(')
+				&& !directSftp.slice(0, transfer).includes('this.getRemotePathSize('),
+			avoidsNewFinalDirectoryScan: !directSftp.includes('this.getRemotePathContentSizeByCommand(')
+		}, {
+			usesWarmStatFirst: true,
+			fallbackChecksAFileInsteadOfDirectoryContents: true,
+			rejectsDirectoryShapeBeforeAcceptingSize: true,
+			awaitsVerificationBeforeSuccess: true,
+			avoidsRecursivePreflight: true,
+			avoidsNewFinalDirectoryScan: true
+		});
 	});
 
 	test('keeps safe setup and credential cleanup off the direct transfer critical tail without weakening collision checks', () => {
@@ -204,6 +223,8 @@ suite('TurboFileSftpHotPathStatic', () => {
 		const credentialCleanup = methodBlock(service, 'private scheduleDirectProbeCredentialCleanup', 'private scheduleDirectScpProbeCleanup');
 		const probeCleanup = methodBlock(service, 'private scheduleDirectScpProbeCleanup', 'private getCachedDirectScpProbeRoute');
 		const credentialWrapper = methodBlock(service, 'function wrapRemoteCredentialCommand', 'function buildDirectScpProbeCommand');
+		const sftpVerification = directSftp.indexOf("await this.verifySshUploadSize(request.target, bytes, 'Direct SFTP', request.progressId);");
+		const sftpSuccess = directSftp.indexOf("this.createTransferResult(true, 'sftp-direct'");
 
 		assert.deepStrictEqual({
 			scpPreservesPortableCollisionPreparation: directScp.includes('buildPortablePosixRm(request.target.path, true)')
@@ -222,7 +243,7 @@ suite('TurboFileSftpHotPathStatic', () => {
 				&& directSftp.includes('const retainedPreparation = wrapRemoteCredentialCommand(')
 				&& directSftp.includes('credential.activePath, true'),
 			verificationStillRunsBeforeSuccess: directScp.includes('if (targetSize !== bytes)')
-				&& directSftp.includes('if (targetSize !== bytes)')
+				&& sftpVerification >= 0 && sftpSuccess > sftpVerification
 				&& relay.includes('if (streamedBytes !== bytes)')
 				&& !relay.includes('this.remoteStat(targetSftp, request.target.path)'),
 			credentialCleanupTravelsWithDataCommand: directScp.includes('const scpCommand = wrapRemoteCredentialCommand(')

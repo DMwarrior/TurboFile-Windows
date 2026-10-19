@@ -6,7 +6,7 @@
 export type TurboFileTransferDisplayPhase = 'prepare' | 'transfer' | 'relay-download' | 'relay-upload' | 'rsync-direct' | 'complete';
 export type TurboFileTransferDisplayStatus = 'waiting' | 'running' | 'success' | 'error' | 'canceled';
 
-export const TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 300;
+export const TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS = 500;
 export const TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 /**
  * Refresh cadence for the transfer UI when the backend is temporarily quiet.
@@ -15,7 +15,71 @@ export const TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PR
  * endpoint or participate in transfer scheduling, so it cannot affect transfer
  * throughput.
  */
-export const TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS = 1000;
+export const TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
+
+/** Silence is not proof of a stalled transport. Hide stale speed, but never invent bytes. */
+export function isTurboFileTransferProgressQuiet(lastProgressAt: number | undefined, now: number): boolean {
+	return lastProgressAt !== undefined && now - lastProgressAt >= 5000;
+}
+
+export interface ITurboFileProgressDisplaySample {
+	readonly status: TurboFileTransferDisplayStatus;
+	readonly transferredBytes?: number;
+	readonly totalBytes?: number;
+	readonly speedBytesPerSecond?: number;
+	readonly startedAt?: number;
+	readonly transferStartedAt?: number;
+	readonly lastProgressAt?: number;
+}
+
+export interface ITurboFileProgressDisplayTask extends ITurboFileProgressDisplaySample {
+	readonly trackTotalBytes: boolean;
+	readonly activeTransferItemIndex?: number;
+	readonly transferItems?: readonly ITurboFileProgressDisplaySample[];
+}
+
+/** Batch events own task-level counters, even when the selection contains only one folder. */
+export function aggregateTurboFileTransferProgress(tasks: readonly ITurboFileProgressDisplayTask[], now: number): { transferredBytes: number; totalBytes?: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number } {
+	let transferredBytes = 0;
+	let totalBytes = 0;
+	let totalKnown = true;
+	let speedBytesPerSecond = 0;
+	let startedAt: number | undefined;
+	for (const task of tasks) {
+		const samples = task.activeTransferItemIndex !== undefined && task.transferItems?.length ? task.transferItems : [task];
+		for (const sample of samples) {
+			transferredBytes += Math.max(0, sample.transferredBytes ?? 0);
+			if (task.trackTotalBytes && sample.totalBytes !== undefined) {
+				totalBytes += Math.max(0, sample.totalBytes);
+			} else {
+				totalKnown = false;
+			}
+			if (task.status === 'running' && sample.status === 'running' && !isTurboFileTransferProgressQuiet(sample.lastProgressAt ?? task.lastProgressAt, now)) {
+				speedBytesPerSecond += Math.max(0, sample.speedBytesPerSecond ?? 0);
+			}
+			const start = sample.transferStartedAt ?? task.transferStartedAt ?? sample.startedAt ?? task.startedAt;
+			if (start !== undefined) {
+				startedAt = Math.min(startedAt ?? start, start);
+			}
+		}
+	}
+	return {
+		transferredBytes,
+		totalBytes: totalKnown ? totalBytes : undefined,
+		speedBytesPerSecond,
+		remainingMs: totalKnown && totalBytes > transferredBytes && speedBytesPerSecond > 0 ? (totalBytes - transferredBytes) / speedBytesPerSecond * 1000 : undefined,
+		startedAt
+	};
+}
+
+/** History retention must never evict a still-running transfer and its cancel control. */
+export function trimTurboFileTaskHistory<T extends { readonly status: string }>(tasks: T[], limit: number): void {
+	for (let index = tasks.length - 1; index >= 0 && tasks.length > limit; index--) {
+		if (tasks[index].status !== 'running') {
+			tasks.splice(index, 1);
+		}
+	}
+}
 
 /** A shared sample for event renders and heartbeats, with no timer or I/O of its own. */
 export class TurboFileTransferTimeDisplay {
@@ -47,6 +111,40 @@ export class TurboFileTransferTimeDisplay {
 		this.sampledAt = undefined;
 		this.startedAt = undefined;
 		this.snapshot = undefined;
+	}
+}
+
+export interface ITurboFileTransferMetrics {
+	readonly transferredBytes: number;
+	readonly totalBytes?: number;
+	readonly speedBytesPerSecond: number;
+	readonly remainingMs?: number;
+	readonly startedAt?: number;
+}
+
+/** One atomic snapshot per UI tick. Unrelated renders must not advance individual numbers. */
+export class TurboFileTransferMetricsDisplay {
+	private key: string | undefined;
+	private snapshot: (ITurboFileTransferMetrics & { readonly time: { milliseconds: number | undefined; remaining: boolean } }) | undefined;
+	private readonly clock = new TurboFileTransferTimeDisplay();
+
+	read(key: string, metrics: ITurboFileTransferMetrics, now: number): ITurboFileTransferMetrics & { readonly time: { milliseconds: number | undefined; remaining: boolean } } {
+		if (this.key !== key) {
+			this.reset();
+			this.key = key;
+		}
+		this.snapshot ??= { ...metrics, time: this.clock.read(metrics.startedAt, metrics.remainingMs, now) };
+		return this.snapshot;
+	}
+
+	advance(): void {
+		this.snapshot = undefined;
+	}
+
+	reset(): void {
+		this.key = undefined;
+		this.snapshot = undefined;
+		this.clock.reset();
 	}
 }
 
@@ -121,12 +219,7 @@ export function chooseDisplayTransferSpeed(options: {
 	const sampledSpeed = Number.isFinite(options.sampledSpeedBytesPerSecond) && options.sampledSpeedBytesPerSecond > 0
 		? options.sampledSpeedBytesPerSecond
 		: 0;
-	if (isTurboFileRsyncStrategy(options.strategy)) {
-		return sampledSpeed;
-	}
-	return options.eventSpeedBytesPerSecond !== undefined
-		&& Number.isFinite(options.eventSpeedBytesPerSecond)
-		&& options.eventSpeedBytesPerSecond >= 0
-		? options.eventSpeedBytesPerSecond
-		: sampledSpeed;
+	// Every protocol uses byte-delta smoothing. A protocol's instantaneous rate must not
+	// bypass the same display policy used for tar and rsync.
+	return sampledSpeed;
 }

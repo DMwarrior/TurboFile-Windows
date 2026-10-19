@@ -10,6 +10,19 @@ import * as path from 'path';
 suite('TurboFileRendererBatchHotPath', () => {
 	const readEditor = () => fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 
+	test('refreshes only metrics for steady progress and immediately recovers from a quiet interval', () => {
+		const editor = readEditor();
+		const start = editor.indexOf('private updateTransferProgress');
+		const progress = editor.slice(start, editor.indexOf('private calculateTransferSpeed', start));
+		assert.ok(progress.includes('wasQuiet && transferredBytes !== previousVisibleTransferredBytes'));
+		assert.ok(progress.includes('speedTarget.lastProgressAt === undefined || transferredBytes !== previousVisibleTransferredBytes || semanticChanged'));
+		assert.ok(progress.includes('this.refreshTaskbarMetrics()'));
+		assert.ok(!progress.includes('this.render()'));
+		assert.ok(progress.includes("task.status !== 'running' || task.progressId !== event.progressId"));
+		assert.ok(!progress.includes('> renderIntervalMs'));
+		assert.ok(progress.includes('this.transferMetricsDisplay.advance()'));
+	});
+
 	test('resolves SSH credentials once for an entire recycle-bin batch', () => {
 		const editor = readEditor();
 		const moveStart = editor.indexOf('private async moveUserItemsToTrash');
@@ -32,7 +45,7 @@ suite('TurboFileRendererBatchHotPath', () => {
 		const editor = readEditor();
 		const taskInterface = editor.slice(editor.indexOf('interface TurboFileTask {'), editor.indexOf('interface TurboFileTransferExecutionResult'));
 		const titleStart = editor.indexOf('private getLiveTransferStatusTitle');
-		const title = editor.slice(titleStart, editor.indexOf('private getLiveTransferItems', titleStart));
+		const title = editor.slice(titleStart, editor.indexOf('private getLiveTransferAggregate', titleStart));
 		const progressStart = editor.indexOf('private updateTransferProgress');
 		const progress = editor.slice(progressStart, editor.indexOf('private calculateTransferSpeed', progressStart));
 
@@ -142,7 +155,9 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(editor.includes('private refreshTaskLogMetrics(): void'));
 		assert.ok(editor.includes('this.getTransferTimeDisplay(liveSummary)'));
 		assert.ok(editor.includes('this.getTransferTimeDisplay(summary)'));
-		assert.ok(editor.includes('this.transferTimeDisplay.read(summary.startedAt, summary.remainingMs, Date.now())'));
+		assert.ok(ticker.includes('this.transferMetricsDisplay.advance()'));
+		assert.ok(editor.includes('const time = summary.time;'));
+		assert.ok(editor.includes('this.transferMetricsDisplay.read('));
 	});
 
 	test('gives cancellable file tasks an operation id and forwards it to the backend', () => {

@@ -16,35 +16,44 @@ export class TurboFileDirectUnavailableError extends Error {
 	readonly route: TurboFileDirectSshRoute | undefined;
 	readonly stage: TurboFileDirectRouteStage | undefined;
 	readonly failures: readonly ITurboFileDirectRouteFailure[];
+	readonly transferCause!: unknown;
 
-	constructor(failures: readonly ITurboFileDirectRouteFailure[]) {
+	constructor(failures: readonly ITurboFileDirectRouteFailure[], transferCause?: unknown) {
 		super('No direct SSH route is available.');
 		this.name = 'TurboFileDirectUnavailableError';
 		this.failures = [...failures];
 		const latestFailure = this.failures[this.failures.length - 1];
 		this.route = latestFailure?.route;
 		this.stage = latestFailure?.stage;
+		setTransferCause(this, transferCause);
 	}
 }
 
 export class TurboFileDirectDataError extends Error {
 	readonly route: TurboFileDirectSshRoute;
-	readonly stage = 'retry' as const;
+	readonly stage: TurboFileDirectRouteStage;
 	readonly failures: readonly ITurboFileDirectRouteFailure[];
 	readonly transferCause!: unknown;
 
 	constructor(route: TurboFileDirectSshRoute, failures: readonly ITurboFileDirectRouteFailure[], transferCause?: unknown) {
-		super('The direct SSH transfer failed after verification.');
+		super('The direct SSH transfer failed.');
 		this.name = 'TurboFileDirectDataError';
 		this.route = route;
 		this.failures = [...failures];
-		Object.defineProperty(this, 'transferCause', {
-			value: transferCause,
-			enumerable: false,
-			configurable: false,
-			writable: false
-		});
+		this.stage = this.failures[this.failures.length - 1]?.stage ?? 'initial';
+		setTransferCause(this, transferCause);
 	}
+}
+
+function setTransferCause(error: Error, transferCause: unknown): void {
+	// SSH diagnostics can contain connection details. Keep the cause available to the
+	// error formatter without including it in serialized route metadata.
+	Object.defineProperty(error, 'transferCause', {
+		value: transferCause,
+		enumerable: false,
+		configurable: false,
+		writable: false
+	});
 }
 
 export interface ITurboFileDirectRouteFlowOptions<T> {
@@ -73,6 +82,7 @@ export function classifyTurboFileDirectSshVerification(markerMatched: boolean, n
 
 export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRouteFlowOptions<T>): Promise<ITurboFileDirectRouteFlowResult<T>> {
 	const failures: ITurboFileDirectRouteFailure[] = [];
+	let latestFailure: unknown;
 	for (const route of options.routes) {
 		let failure: unknown;
 		try {
@@ -82,6 +92,7 @@ export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRo
 				throw error;
 			}
 			failure = error;
+			latestFailure = error;
 			failures.push({ route, stage: 'initial' });
 		}
 
@@ -108,5 +119,5 @@ export async function runTurboFileDirectRouteFlow<T>(options: ITurboFileDirectRo
 		}
 	}
 
-	throw new TurboFileDirectUnavailableError(failures);
+	throw new TurboFileDirectUnavailableError(failures, latestFailure);
 }

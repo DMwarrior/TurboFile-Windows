@@ -76,7 +76,7 @@ import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImage
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
-import { chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, getVisibleTransferStartedAt, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, TurboFileTransferTimeDisplay, TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS, TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { aggregateTurboFileTransferProgress, chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, isTurboFileTransferProgressQuiet, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, trimTurboFileTaskHistory, TurboFileTransferMetricsDisplay, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
 
@@ -406,6 +406,7 @@ interface TurboFileOptimisticRenameSnapshot {
 }
 
 interface TurboFileTaskTransferItem {
+	lastProgressAt?: number;
 	readonly name: string;
 	readonly type: TurboFileFileType;
 	displaySize: string;
@@ -428,6 +429,7 @@ interface TurboFileTaskTransferItem {
 }
 
 interface TurboFileTask {
+	lastProgressAt?: number;
 	id: number;
 	kind: TurboFileTaskKind;
 	label: string;
@@ -456,8 +458,9 @@ interface TurboFileTask {
 	speedSamples?: number[];
 	lastSampleAt?: number;
 	lastSampleBytes?: number;
-	lastProgressRenderAt?: number;
+	metricsDisplay?: TurboFileTransferMetricsDisplay;
 	lastProgressSemanticKey?: string;
+	transferFallbacks?: Array<{ readonly previousStrategy: string | undefined; readonly nextStrategy: string | undefined; readonly reason: string }>;
 }
 
 interface TurboFileTransferExecutionResult {
@@ -530,12 +533,11 @@ const PREPARED_TRANSFER_PAIR_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000] 
 // Keep the consistency scan out of the next user-initiated transfer's startup window. The target
 // row is already patched synchronously, so waiting for one full idle second has no visible cost.
 const POST_TRANSFER_RECONCILE_DELAY_MS = 1000;
-const TRANSFER_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
-const RSYNC_PROGRESS_RENDER_INTERVAL_MS = TURBOFILE_RSYNC_PROGRESS_RENDER_INTERVAL_MS;
-const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = 350;
+const TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS = TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS;
 const TRANSFER_SPEED_SAMPLE_MAX_COUNT = 8;
 const TURBOFILE_BROWSER_FONT_SIZE_STORAGE_KEY = 'turbofile.browser.fontSize';
 const TURBOFILE_BROWSER_FONT_FAMILY_STORAGE_KEY = 'turbofile.browser.fontFamily';
+const TURBOFILE_DEVICE_ORDER_DRAG_TYPE = 'application/x-turbofile-device-order';
 const TURBOFILE_UI_FONT_SIZE_STORAGE_KEY = 'turbofile.ui.fontSize';
 const TURBOFILE_UI_FONT_FAMILY_STORAGE_KEY = 'turbofile.ui.fontFamily';
 const TURBOFILE_LOCAL_WINDOWS_DEFAULT_PATH_STORAGE_KEY = 'turbofile.localWindows.defaultPath';
@@ -795,6 +797,14 @@ export class TurboFileEditor extends EditorPane {
 	private container: HTMLElement | undefined;
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
+	private deviceOrderDragId: string | undefined;
+	private deviceOrderDragCard: HTMLElement | undefined;
+	private deviceOrderDropTarget: HTMLElement | undefined;
+	private deviceOrderDragHorizontal = true;
+	private pendingRenderAfterDeviceOrderDrag = false;
+	private pendingDeviceOrderDrop: { readonly sourceId: string; readonly targetId: string; readonly position: 'before' | 'after' } | undefined;
+	private deviceOrderWriteInProgress = false;
+	private readonly deviceOrderDropScheduler = this._register(new RunOnceScheduler(() => this.completeDeviceOrderDrop(), 0));
 	private imageGridState: TurboFileImageGridState | undefined;
 	private readonly paneImageGridStates: Record<'left' | 'right', TurboFileImageGridState | undefined> = { left: undefined, right: undefined };
 	private imageGridSortKey: TurboFileImageGridSortKey = 'name';
@@ -804,7 +814,7 @@ export class TurboFileEditor extends EditorPane {
 	private dialogState: TurboFileDialogState | undefined;
 	private imageGridObserver: IntersectionObserver | undefined;
 	private liveTransferTicker: number | undefined;
-	private readonly transferTimeDisplay = new TurboFileTransferTimeDisplay();
+	private readonly transferMetricsDisplay = new TurboFileTransferMetricsDisplay();
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	// Thumbnails load only after scrolling settles, and only for the page in view; bumping the token
 	// invalidates any batch still loading a page the user has scrolled away from (fast jumps).
@@ -982,6 +992,12 @@ export class TurboFileEditor extends EditorPane {
 				this.preparedTransferPairScheduler.schedule(0);
 			}
 		}));
+		this._register(this.deviceStore.onDidChangeDeviceOrder(() => {
+			this.devices = this.deviceStore?.loadDevices() ?? [];
+			if (this.isEditorVisible && !this.deviceOrderWriteInProgress) {
+				this.render();
+			}
+		}));
 		this.devices = this.deviceStore.loadDevices();
 		void this.ensureDefaultSshDevices().catch(error => this.handleDefaultSshDevicesError(error));
 		void this.ensureTurboFileChrome();
@@ -997,9 +1013,6 @@ export class TurboFileEditor extends EditorPane {
 		this._register(this.workbenchThemeService.onDidColorThemeChange(() => {
 			this.applyTurboFileThemeState();
 			this.ensureTitlebarChrome();
-			if (this.activePage === 'themes') {
-				this.render();
-			}
 		}));
 		this._register(this.updateService.onStateChange(() => this.ensureTitlebarAppMenu()));
 		void this.syncNativeEditorDisplaySettings();
@@ -1152,6 +1165,7 @@ export class TurboFileEditor extends EditorPane {
 			this.prewarmCurrentTransferPair(true);
 		} else {
 			this.preparedTransferPairScheduler.cancel();
+			this.finishDeviceOrderDrag();
 		}
 	}
 
@@ -1161,6 +1175,7 @@ export class TurboFileEditor extends EditorPane {
 
 	override dispose(): void {
 		this.isEditorVisible = false;
+		this.finishDeviceOrderDrag();
 		const hasVisibleTurboFileEditor = this.syncGlobalEditorVisibility();
 		if (!hasVisibleTurboFileEditor) {
 			document.body.classList.remove('turbofile-editor-theme-light', 'turbofile-editor-theme-dark', 'turbofile-theme-switching');
@@ -1199,6 +1214,14 @@ export class TurboFileEditor extends EditorPane {
 	private render(): void {
 		if (!this.container) {
 			return;
+		}
+		if (this.deviceOrderDragId) {
+			if (this.activePage === 'devices') {
+				// Keep the native drag's source attached while background device status updates arrive.
+				this.pendingRenderAfterDeviceOrderDrag = true;
+				return;
+			}
+			this.finishDeviceOrderDrag();
 		}
 		if (this.shouldDeferRenderForOpenDeviceSelect()) {
 			this.pendingRenderAfterDeviceSelectClose = true;
@@ -1267,9 +1290,6 @@ export class TurboFileEditor extends EditorPane {
 		}
 		if (this.activePage === 'settings') {
 			return this.renderSettingsPage();
-		}
-		if (this.activePage === 'themes') {
-			return this.renderThemesPage();
 		}
 		if (this.activePage === 'tasks') {
 			return this.renderTasksPage();
@@ -1418,7 +1438,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private handleWorkbenchKeydown(event: KeyboardEvent): void {
-		if (event.defaultPrevented) {
+		if (event.defaultPrevented || !this.isKeyboardEventFromTurboFileSurface(event.target)) {
 			return;
 		}
 
@@ -1451,7 +1471,7 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		const key = event.key.toLowerCase();
+		const key = this.getClipboardShortcutKey(event);
 		if (key !== 'a' && key !== 'c' && key !== 'x' && key !== 'v') {
 			return false;
 		}
@@ -1489,7 +1509,12 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private handleImageGridKeyboardShortcut(event: KeyboardEvent): boolean {
-		const state = this.getActiveImageGridPreviewState() ?? this.imageGridState;
+		const targetElement = event.target instanceof HTMLElement ? event.target : undefined;
+		const targetSide = this.getPaneSideFromElement(targetElement);
+		const focusedPaneState = targetSide && targetElement?.closest('.turbofile-pane-image-grid')
+			? this.paneImageGridStates[targetSide]
+			: undefined;
+		const state = this.getActiveImageGridPreviewState() ?? focusedPaneState ?? this.imageGridState;
 		if (!state || !this.isImageGridSurfaceActive(state) || this.dialogState || this.isDeviceFormVisible || this.isTaskLogVisible) {
 			return false;
 		}
@@ -1510,7 +1535,6 @@ export class TurboFileEditor extends EditorPane {
 			return false;
 		}
 
-		const targetElement = target instanceof HTMLElement ? target : undefined;
 		if (state.displayMode === 'pane' && !state.previewVisible && !targetElement?.closest('.turbofile-pane-image-grid')) {
 			return false;
 		}
@@ -1525,7 +1549,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		if (!state.previewVisible && (event.ctrlKey || event.metaKey) && !event.altKey) {
-			const key = event.key.toLowerCase();
+			const key = this.getClipboardShortcutKey(event);
 			if (key === 'a') {
 				event.preventDefault();
 				this.selectAllImageGridItems(state);
@@ -1661,7 +1685,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private isKeyboardEventFromTurboFileSurface(target: EventTarget | null): boolean {
-		if (!this.container) {
+		if (!this.container || !this.isEditorVisible) {
 			return false;
 		}
 
@@ -1670,7 +1694,10 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const ownerDocument = this.container.ownerDocument;
-		return target === ownerDocument.body || target === ownerDocument.documentElement;
+		// A render removes the focused list and leaves focus on the document. Only the active editor
+		// may use its remembered side in that case; hidden tabs and other groups keep their listeners.
+		return (target === ownerDocument.body || target === ownerDocument.documentElement)
+			&& !!this.currentInput && this.editorService.activeEditor === this.currentInput;
 	}
 
 	private getPaneSideFromElement(element: HTMLElement | undefined): 'left' | 'right' | undefined {
@@ -1680,6 +1707,15 @@ export class TurboFileEditor extends EditorPane {
 
 	private setActiveFilePaneSide(side: 'left' | 'right'): void {
 		this.activeFilePaneSide = side;
+	}
+
+	private getClipboardShortcutKey(event: KeyboardEvent): string {
+		const key = event.key.toLowerCase();
+		// IMEs can report Process/Unidentified while the physical shortcut key remains available.
+		if ((key === 'process' || key === 'unidentified' || key === '') && /^Key[ACXV]$/.test(event.code)) {
+			return event.code.slice(3).toLowerCase();
+		}
+		return key;
 	}
 
 	/** Clears the current native drag session and every transient target highlight. */
@@ -2191,7 +2227,7 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderDevicesPage(): HTMLElement {
 		const page = $('.turbofile-full-page');
-		page.appendChild(this.renderPageHeader(Codicon.server, '设备管理', '管理已保存的 SSH 设备，可在这里编辑、删除和测试连接。', [
+		page.appendChild(this.renderPageHeader(Codicon.server, '设备管理', localize('turbofile.devicesPageDescription', "拖动卡片调整设备顺序，可编辑、删除和测试连接。"), [
 			this.createPageButton(Codicon.refresh, '刷新设备', () => void this.refreshDevicesFromStore()),
 			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm())
 		]));
@@ -2200,8 +2236,126 @@ export class TurboFileEditor extends EditorPane {
 		for (const device of this.getAllDevices()) {
 			grid.appendChild(this.renderDevicePageCard(device));
 		}
+		this.registerDeviceOrderDragInterceptor(grid);
 		page.appendChild(grid);
 		return page;
+	}
+
+	private beginDeviceOrderDrag(card: HTMLElement, device: TurboFileDevice, event: DragEvent): void {
+		if (!event.dataTransfer || this.activePage !== 'devices') {
+			event.preventDefault();
+			return;
+		}
+		this.deviceOrderDragId = device.id;
+		this.deviceOrderDragCard = card;
+		const first = card.parentElement?.children[0];
+		const second = card.parentElement?.children[1];
+		this.deviceOrderDragHorizontal = !!first && !!second && Math.abs(first.getBoundingClientRect().top - second.getBoundingClientRect().top) < 2;
+		card.classList.add('is-device-order-dragging');
+		event.dataTransfer.clearData();
+		event.dataTransfer.setData(TURBOFILE_DEVICE_ORDER_DRAG_TYPE, device.id);
+		event.dataTransfer.effectAllowed = 'move';
+		event.stopPropagation();
+	}
+
+	private registerDeviceOrderDragInterceptor(grid: HTMLElement): void {
+		const ownerWindow = getWindow(grid);
+		const handle = (event: DragEvent): void => this.handleDeviceOrderDragEvent(event, grid);
+		const end = (): void => this.finishDeviceOrderDrag();
+		for (const type of ['dragenter', 'dragover', 'drop'] as const) {
+			ownerWindow.addEventListener(type, handle, true);
+			this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener(type, handle, true) });
+		}
+		ownerWindow.addEventListener('dragend', end, true);
+		this.renderDisposables.add({ dispose: () => ownerWindow.removeEventListener('dragend', end, true) });
+	}
+
+	private handleDeviceOrderDragEvent(event: DragEvent, grid: HTMLElement): void {
+		if (!this.isEditorVisible || this.activePage !== 'devices' || this.isDeviceFormVisible || this.dialogState || this.isTaskLogVisible
+			|| !event.dataTransfer?.types.includes(TURBOFILE_DEVICE_ORDER_DRAG_TYPE)) {
+			return;
+		}
+		const element = event.target instanceof Element ? event.target : undefined;
+		if (!element || !this.container?.contains(element)) {
+			this.clearDeviceOrderDropTarget();
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		event.dataTransfer.dropEffect = 'move';
+		const card = element.closest<HTMLElement>('[data-device-order-id]');
+		if (!card || !grid.contains(card) || card.dataset.deviceOrderId === this.deviceOrderDragId) {
+			this.clearDeviceOrderDropTarget();
+			if (event.type === 'drop') {
+				this.finishDeviceOrderDrag();
+			}
+			return;
+		}
+		const rect = card.getBoundingClientRect();
+		const position = this.deviceOrderDragHorizontal
+			? event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
+			: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+		if (event.type !== 'drop') {
+			if (this.deviceOrderDropTarget !== card) {
+				this.clearDeviceOrderDropTarget();
+				this.deviceOrderDropTarget = card;
+			}
+			card.classList.toggle('is-device-order-before', position === 'before');
+			card.classList.toggle('is-device-order-after', position === 'after');
+			card.classList.toggle('is-device-order-vertical', !this.deviceOrderDragHorizontal);
+			return;
+		}
+		const sourceId = this.deviceOrderDragId ?? event.dataTransfer.getData(TURBOFILE_DEVICE_ORDER_DRAG_TYPE);
+		const targetId = card.dataset.deviceOrderId;
+		this.finishDeviceOrderDrag();
+		if (sourceId && targetId && sourceId !== targetId) {
+			// Delay persistence/rendering until the native drop returns, preserving its source DOM.
+			this.pendingDeviceOrderDrop = { sourceId, targetId, position };
+			this.deviceOrderDropScheduler.schedule(0);
+		}
+	}
+
+	private clearDeviceOrderDropTarget(): void {
+		this.deviceOrderDropTarget?.classList.remove('is-device-order-before', 'is-device-order-after', 'is-device-order-vertical');
+		this.deviceOrderDropTarget = undefined;
+	}
+
+	private finishDeviceOrderDrag(): void {
+		this.deviceOrderDragCard?.classList.remove('is-device-order-dragging');
+		this.deviceOrderDragCard = undefined;
+		this.deviceOrderDragId = undefined;
+		this.clearDeviceOrderDropTarget();
+		if (this.pendingRenderAfterDeviceOrderDrag) {
+			this.deviceOrderDropScheduler.schedule(0);
+		}
+	}
+
+	private completeDeviceOrderDrop(): void {
+		const drop = this.pendingDeviceOrderDrop;
+		const shouldRender = this.pendingRenderAfterDeviceOrderDrag;
+		this.pendingDeviceOrderDrop = undefined;
+		this.pendingRenderAfterDeviceOrderDrag = false;
+		let changed = false;
+		let saveFailed = false;
+		if (drop && this.deviceStore) {
+			this.deviceOrderWriteInProgress = true;
+			try {
+				changed = this.deviceStore.reorderDevice(drop.sourceId, drop.targetId, drop.position);
+				if (changed) {
+					this.devices = this.deviceStore.loadDevices();
+					this.statusMessage = localize('turbofile.deviceOrderSaved', "设备顺序已保存。");
+				}
+			} catch (error) {
+				saveFailed = true;
+				this.statusMessage = localize('turbofile.deviceOrderSaveFailed', "保存设备顺序失败：{0}", error instanceof Error ? error.message : String(error));
+				getWindow(this.container).alert(this.statusMessage);
+			} finally {
+				this.deviceOrderWriteInProgress = false;
+			}
+		}
+		if (this.isEditorVisible && (changed || shouldRender || saveFailed)) {
+			this.render();
+		}
 	}
 
 	private ensureTitlebarChrome(): void {
@@ -2282,13 +2436,7 @@ export class TurboFileEditor extends EditorPane {
 			]),
 			new Separator(),
 			this.createCheckedAction('turbofile.settings.automaticUpdates', localize('turbofile.automaticUpdates', "自动检查更新"), this.shouldAutomaticallyCheckForUpdates(), () => { void this.toggleAutomaticUpdateChecks(); }),
-			this.createCheckedAction('turbofile.settings.showHiddenFiles', localize('turbofile.showHiddenFiles', "显示隐藏文件"), this.shouldShowHiddenFiles(), () => this.toggleShowHiddenFiles()),
-			new SubmenuAction('turbofile.settings.fileListFontSize', localize('turbofile.fileListFontSize', "文件列表字号"), [11, 12, 13, 14, 16, 18, 20].map(value =>
-				this.createCheckedAction(`turbofile.settings.fileListFontSize.${value}`, `${value}px`, this.getBrowserFontSize() === value, () => this.updateBrowserFontSize(value))
-			)),
-			new SubmenuAction('turbofile.settings.fileListFontFamily', localize('turbofile.fileListFontFamily', "文件列表字体"), TURBOFILE_BROWSER_FONT_FAMILIES.map(([value, label], index) =>
-				this.createCheckedAction(`turbofile.settings.fileListFontFamily.${index}`, label, this.getBrowserFontFamily() === value, () => this.updateBrowserFontFamily(value))
-			))
+			this.createCheckedAction('turbofile.settings.showHiddenFiles', localize('turbofile.showHiddenFiles', "显示隐藏文件"), this.shouldShowHiddenFiles(), () => this.toggleShowHiddenFiles())
 		];
 	}
 
@@ -2317,10 +2465,47 @@ export class TurboFileEditor extends EditorPane {
 			new Separator(),
 			toAction({ id: 'turbofile.view.zoomOut', label: localize('turbofile.zoomOutInterface', "缩小界面"), enabled: this.getUiFontSize() > 11, run: () => this.updateUiFontSize(this.getUiFontSize() - 1) }),
 			toAction({ id: 'turbofile.view.zoomIn', label: localize('turbofile.zoomInInterface', "放大界面"), enabled: this.getUiFontSize() < 24, run: () => this.updateUiFontSize(this.getUiFontSize() + 1) }),
+			new SubmenuAction('turbofile.view.font', localize('turbofile.font', "字体"), [
+				this.createFontSizeMenu('turbofile.view.editorFontSize', localize('turbofile.editorFontSize', "文档字号"), this.getEditorFontSize(), 8, 40, value => this.updateEditorFontSize(value)),
+				this.createFontSizeMenu('turbofile.view.uiFontSize', localize('turbofile.uiFontSize', "UI 字号"), this.getUiFontSize(), 11, 24, value => this.updateUiFontSize(value)),
+				new SubmenuAction('turbofile.view.uiFontFamily', localize('turbofile.uiFontFamily', "UI 字体"), TURBOFILE_UI_FONT_FAMILIES.map(([value, label], index) =>
+					this.createCheckedAction(`turbofile.view.uiFontFamily.${index}`, label, this.getUiFontFamily() === value, () => this.updateUiFontFamily(value))
+				)),
+				this.createFontSizeMenu('turbofile.view.fileListFontSize', localize('turbofile.fileListFontSize', "文件浏览区字号"), this.getBrowserFontSize(), 11, 20, value => this.updateBrowserFontSize(value)),
+				new SubmenuAction('turbofile.view.fileListFontFamily', localize('turbofile.fileListFontFamily', "文件浏览区字体"), TURBOFILE_BROWSER_FONT_FAMILIES.map(([value, label], index) =>
+					this.createCheckedAction(`turbofile.view.fileListFontFamily.${index}`, label, this.getBrowserFontFamily() === value, () => this.updateBrowserFontFamily(value))
+				))
+			]),
 			new SubmenuAction('turbofile.view.theme', localize('turbofile.theme', "主题"), this.getThemeMenuActions()),
 			new Separator(),
 			toAction({ id: 'turbofile.view.refresh', label: localize('turbofile.refreshCurrentPane', "刷新当前面板"), enabled: true, run: () => this.refreshPane(side, { force: true }) })
 		];
+	}
+
+	private createFontSizeMenu(id: string, label: string, currentSize: number, min: number, max: number, update: (value: number) => void): SubmenuAction {
+		const sizes = [...new Set([min, 10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 36, max, currentSize])]
+			.filter(value => value >= min && value <= max).sort((a, b) => a - b);
+		return new SubmenuAction(id, label, [
+			...sizes.map(value => this.createCheckedAction(`${id}.${value}`, `${value}px`, currentSize === value, () => update(value))),
+			new Separator(),
+			toAction({
+				id: `${id}.custom`, label: localize('turbofile.customFontSize', "自定义…"), run: async () => {
+					const value = await this.quickInputService.input({
+						title: label,
+						value: String(currentSize),
+						prompt: localize('turbofile.fontSizeRange', "输入 {0} 到 {1} 之间的整数", min, max),
+						validateInput: async input => {
+							const size = Number(input);
+							return Number.isInteger(size) && size >= min && size <= max
+								? undefined : localize('turbofile.invalidFontSize', "字号必须是 {0} 到 {1} 之间的整数。", min, max);
+						}
+					});
+					if (value !== undefined) {
+						update(Number(value));
+					}
+				}
+			})
+		]);
 	}
 
 	private getTitlebarHelpActions(): IAction[] {
@@ -2778,6 +2963,20 @@ export class TurboFileEditor extends EditorPane {
 
 	private renderDevicePageCard(device: TurboFileDevice): HTMLElement {
 		const card = $('.turbofile-page-card.turbofile-device-page-card');
+		card.dataset.deviceOrderId = device.id;
+		card.draggable = true;
+		card.title = localize('turbofile.dragDeviceToReorder', "拖动卡片调整设备顺序");
+		let startedOnAction = false;
+		card.addEventListener('pointerdown', event => {
+			startedOnAction = event.target instanceof Element && !!event.target.closest('button, a, input, select, textarea');
+		});
+		card.addEventListener('dragstart', event => {
+			if (startedOnAction) {
+				event.preventDefault();
+				return;
+			}
+			this.beginDeviceOrderDrag(card, device, event);
+		});
 		card.classList.add(`is-tone-${this.getDeviceCardTone(device)}`);
 		const title = $('.turbofile-page-card-title');
 		title.appendChild(this.renderDevicePageIcon(device));
@@ -2883,111 +3082,6 @@ export class TurboFileEditor extends EditorPane {
 		*/
 	}
 
-	private renderAppearanceFontSettingsCard(): HTMLElement {
-		const card = $('.turbofile-appearance-card.turbofile-appearance-font-card');
-		const header = $('.turbofile-appearance-card-header');
-		const copy = $('.turbofile-appearance-card-copy');
-		const title = $('h2');
-		title.textContent = '字体';
-		const description = $('p');
-		description.textContent = '调整极速传界面和文件浏览区的显示字体。';
-		copy.appendChild(title);
-		copy.appendChild(description);
-		header.appendChild(copy);
-		card.appendChild(header);
-
-		const rows = $('.turbofile-appearance-font-summary');
-		rows.appendChild(this.renderEditorFontSizeSetting());
-		rows.appendChild(this.renderUiFontSizeSetting());
-		rows.appendChild(this.renderUiFontFamilySetting());
-		rows.appendChild(this.renderBrowserFontSizeSetting());
-		rows.appendChild(this.renderBrowserFontFamilySetting());
-		card.appendChild(rows);
-		return card;
-	}
-
-	private renderEditorFontSizeSetting(): HTMLElement {
-		return this.renderFontSizeSetting('文档字体大小', '调整当前打开文档的字号，修改后立即生效。', 'editor.fontSize', this.getEditorFontSize(), 8, 40, value => this.updateEditorFontSize(value));
-	}
-
-	private renderUiFontSizeSetting(): HTMLElement {
-		return this.renderFontSizeSetting('UI 字号', '统一调整极速传界面的字体大小，不影响 VS Code 原生文档编辑器。', 'turbofile-ui-font-size', this.getUiFontSize(), 11, 24, value => this.updateUiFontSize(value));
-	}
-
-	private renderBrowserFontSizeSetting(): HTMLElement {
-		return this.renderFontSizeSetting('文件浏览区字体大小', '只控制左右文件浏览区域，修改后立即生效。', 'turbofile-browser-font-size', this.getBrowserFontSize(), 11, 20, value => this.updateBrowserFontSize(value));
-	}
-
-	private renderUiFontFamilySetting(): HTMLElement {
-		return this.renderFontFamilySetting('UI 字体', '选择极速传界面使用的字体。', 'turbofile-ui-font-family', this.getUiFontFamily(), TURBOFILE_UI_FONT_FAMILIES, value => this.updateUiFontFamily(value));
-	}
-
-	private renderBrowserFontFamilySetting(): HTMLElement {
-		return this.renderFontFamilySetting('文件浏览区字体', '选择文件名、大小和时间的显示字体。', 'turbofile-browser-font-family', this.getBrowserFontFamily(), TURBOFILE_BROWSER_FONT_FAMILIES, value => this.updateBrowserFontFamily(value));
-	}
-
-	private renderFontSizeSetting(labelText: string, descriptionText: string, id: string, currentFontSize: number, min: number, max: number, update: (value: number) => void): HTMLElement {
-		const row = $('.turbofile-editor-setting-row.turbofile-appearance-wide-setting');
-		const copy = $('.turbofile-editor-setting-copy');
-		const label = $('label') as HTMLLabelElement;
-		label.textContent = labelText;
-		label.htmlFor = id;
-		const description = $('span');
-		description.textContent = descriptionText;
-		copy.appendChild(label);
-		copy.appendChild(description);
-
-		const controls = $('.turbofile-editor-setting-controls');
-		const input = $('input.turbofile-editor-font-size-input') as HTMLInputElement;
-		input.id = id;
-		input.type = 'number';
-		input.min = String(min);
-		input.max = String(max);
-		input.step = '1';
-		input.value = String(currentFontSize);
-		input.addEventListener('change', () => update(input.valueAsNumber));
-		input.addEventListener('keydown', event => {
-			if (event.key === 'Enter') {
-				event.preventDefault();
-				update(input.valueAsNumber);
-			}
-		});
-		controls.appendChild(input);
-
-		row.appendChild(copy);
-		row.appendChild(controls);
-		return row;
-	}
-
-	private renderFontFamilySetting(labelText: string, descriptionText: string, id: string, currentFontFamily: string, options: readonly (readonly [string, string])[], update: (value: string) => void): HTMLElement {
-		const row = $('.turbofile-editor-setting-row.turbofile-appearance-wide-setting');
-		const copy = $('.turbofile-editor-setting-copy');
-		const label = $('label') as HTMLLabelElement;
-		label.textContent = labelText;
-		label.htmlFor = id;
-		const description = $('span');
-		description.textContent = descriptionText;
-		copy.appendChild(label);
-		copy.appendChild(description);
-
-		const controls = $('.turbofile-editor-setting-controls');
-		const select = $('select.turbofile-browser-select') as HTMLSelectElement;
-		select.id = id;
-		for (const [value, optionLabel] of options) {
-			const option = $('option') as HTMLOptionElement;
-			option.value = value;
-			option.textContent = optionLabel;
-			option.selected = value === currentFontFamily;
-			select.appendChild(option);
-		}
-		select.addEventListener('change', () => update(select.value));
-		controls.appendChild(select);
-
-		row.appendChild(copy);
-		row.appendChild(controls);
-		return row;
-	}
-
 	private getUiFontSize(): number {
 		const stored = Number(this.storageService.get(TURBOFILE_UI_FONT_SIZE_STORAGE_KEY, StorageScope.PROFILE, String(TURBOFILE_UI_DEFAULT_FONT_SIZE)));
 		return this.normalizeUiFontSize(stored, TURBOFILE_UI_DEFAULT_FONT_SIZE);
@@ -3082,17 +3176,6 @@ export class TurboFileEditor extends EditorPane {
 		this.container.classList.remove('is-appearance-pointer', 'is-appearance-translucent-sidebar');
 		document.body.classList.remove('turbofile-appearance-pointer', 'turbofile-appearance-translucent');
 		this.container.style.removeProperty('--turbofile-browser-font-color');
-	}
-
-	private renderThemesPage(): HTMLElement {
-		const page = $('.turbofile-full-page.turbofile-appearance-page');
-		const shell = $('.turbofile-appearance-shell');
-		const title = $('h1.turbofile-appearance-title');
-		title.textContent = '外观';
-		shell.appendChild(title);
-		shell.appendChild(this.renderAppearanceFontSettingsCard());
-		page.appendChild(shell);
-		return page;
 	}
 
 	private applyTurboFileThemeState(): void {
@@ -3266,9 +3349,6 @@ export class TurboFileEditor extends EditorPane {
 		} finally {
 			this.isLoadingColorThemes = false;
 			this.hasLoadedColorThemes = true;
-			if (this.activePage === 'themes') {
-				this.render();
-			}
 		}
 	}
 
@@ -3920,7 +4000,7 @@ export class TurboFileEditor extends EditorPane {
 				if (this.isEditableKeyboardTarget(event.target)) {
 					return;
 				}
-				const key = event.key.toLowerCase();
+				const key = this.getClipboardShortcutKey(event);
 				if (key === 'a') {
 					event.preventDefault();
 					this.setActiveFilePaneSide(side);
@@ -3936,6 +4016,9 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		list.addEventListener('paste', event => {
+			if (this.isEditableKeyboardTarget(event.target)) {
+				return;
+			}
 			event.preventDefault();
 			void this.pasteIntoPane(side);
 		});
@@ -5126,7 +5209,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const progress = $('.turbofile-statusbar-progress');
 		const progressValue = $('.turbofile-statusbar-progress-value');
-		const liveSummary = runningTransfers.length ? this.getLiveTransferAggregate(runningTransfers) : undefined;
+		const liveSummary = runningTransfers.length ? this.getLiveTransferDisplay(runningTransfers) : undefined;
 		const livePercent = liveSummary && liveSummary.totalBytes !== undefined && liveSummary.totalBytes > 0
 			? Math.max(0, Math.min(100, (liveSummary.transferredBytes / liveSummary.totalBytes) * 100))
 			: runningTasks.length ? Math.max(...runningTasks.map(task => task.progress)) : 0;
@@ -5159,17 +5242,16 @@ export class TurboFileEditor extends EditorPane {
 
 		const right = $('.turbofile-statusbar-section.is-right');
 		if (runningTransfers.length && liveSummary) {
-			const isRsyncTransferRunning = runningTransfers.some(task => task.strategy?.startsWith('rsync'));
 			const transferSizeText = liveSummary.totalBytes !== undefined
 				? `${formatSize(liveSummary.transferredBytes)} / ${formatSize(liveSummary.totalBytes)}`
-				: liveSummary.transferredBytes > 0 || isRsyncTransferRunning ? formatSize(liveSummary.transferredBytes) : '准备传输';
+				: formatSize(liveSummary.transferredBytes);
 			const time = this.getTransferTimeDisplay(liveSummary);
 			right.appendChild(this.renderStatusbarItem(Codicon.arrowSwap, this.formatSpeed(liveSummary.speedBytesPerSecond), '当前速度'));
 			right.appendChild(this.renderStatusbarItem(Codicon.clock, time.text, time.title));
 			right.appendChild(this.renderStatusbarItem(Codicon.archive, transferSizeText, '已传输'));
 			const protocol = runningTransfers.length === 1 ? this.getTransferProtocolLabel(runningTransfers[0].strategy) : undefined;
 			if (protocol) {
-				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, '传输模式'));
+				right.appendChild(this.renderStatusbarItem(Codicon.terminal, protocol, this.getTransferProtocolTooltip(runningTransfers[0])));
 			}
 			const cancel = this.createIconButton(Codicon.close, '取消运行中的传输', 'turbofile-statusbar-cancel');
 			cancel.element.disabled = runningTransfers.every(task => task.cancelRequested);
@@ -5214,7 +5296,7 @@ export class TurboFileEditor extends EditorPane {
 		if (!taskbar || !runningTransfers.length) {
 			return;
 		}
-		const summary = this.getLiveTransferAggregate(runningTransfers);
+		const summary = this.getLiveTransferDisplay(runningTransfers);
 		const progressValue = taskbar.querySelector<HTMLElement>('.turbofile-statusbar-progress-value');
 		if (progressValue) {
 			const percent = summary.totalBytes !== undefined && summary.totalBytes > 0
@@ -5288,6 +5370,8 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getLiveTransferStatusTitle(tasks: TurboFileTask[]): string {
+		const quiet = tasks.some(task => isTurboFileTransferProgressQuiet(task.lastProgressAt ?? task.startedAt, Date.now()));
+		const prefix = quiet ? localize('turbofile.awaitingProgress', "等待进度反馈（任务未结束）") : '正在传输';
 		let itemCount = 0;
 		let firstName: string | undefined;
 		let runningName: string | undefined;
@@ -5313,93 +5397,15 @@ export class TurboFileEditor extends EditorPane {
 		if (!activeName) {
 			return tasks.length > 1 ? `正在传输 ${tasks.length} 个任务` : tasks[0]?.label ?? '正在传输';
 		}
-		return itemCount > 1 ? `正在传输：${activeName} · ${itemCount} 项` : `正在传输：${activeName}`;
-	}
-
-	private getLiveTransferItems(task: TurboFileTask): TurboFileTaskTransferItem[] {
-		return task.transferItems?.length ? task.transferItems : [this.createFallbackTransferItem(task)];
-	}
-
-	private createFallbackTransferItem(task: TurboFileTask): TurboFileTaskTransferItem {
-		const totalBytes = task.trackTotalBytes ? task.totalBytes : undefined;
-		const rawSize = totalBytes ?? 0;
-		const transferredBytes = task.transferredBytes ?? 0;
-		return {
-			name: task.label.replace(/^复制\s+/, ''),
-			type: 'file',
-			displaySize: totalBytes !== undefined ? formatSize(totalBytes) : '',
-			rawSize,
-			status: task.status === 'running' ? 'running' : task.status,
-			progress: task.progress,
-			transferredBytes,
-			totalBytes: totalBytes ?? 0,
-			speedBytesPerSecond: task.speedBytesPerSecond ?? 0,
-			remainingMs: task.remainingMs,
-			strategy: task.strategy,
-			speedSamples: task.speedSamples ?? []
-		};
+		return itemCount > 1 ? `${prefix}：${activeName} · ${itemCount} 项` : `${prefix}：${activeName}`;
 	}
 
 	private getLiveTransferAggregate(tasks: TurboFileTask[]): { transferredBytes: number; totalBytes?: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number } {
-		let transferredBytes = 0;
-		let totalBytes = 0;
-		let totalBytesKnown = true;
-		let speedBytesPerSecond = 0;
-		let startedAt: number | undefined;
-		const addStartedAt = (candidate: number | undefined): void => {
-			if (candidate === undefined) {
-				return;
-			}
-			startedAt = startedAt === undefined ? candidate : Math.min(startedAt, candidate);
-		};
-		for (const task of tasks) {
-			const taskDataStartedAt = task.transferStartedAt;
-			const taskVisibleStartedAt = getVisibleTransferStartedAt({
-				status: task.status,
-				strategy: task.strategy,
-				startedAt: task.startedAt,
-				transferStartedAt: task.transferStartedAt
-			});
-			if ((task.transferItems?.length ?? 0) > 1 && task.activeTransferItemIndex === undefined) {
-				transferredBytes += task.transferredBytes ?? 0;
-				if (task.trackTotalBytes && task.totalBytes !== undefined) {
-					totalBytes += task.totalBytes;
-				} else {
-					totalBytesKnown = false;
-				}
-				speedBytesPerSecond += task.status === 'running' ? task.speedBytesPerSecond ?? 0 : 0;
-				addStartedAt(taskVisibleStartedAt);
-				continue;
-			}
-			const items = this.getLiveTransferItems(task);
-			for (const item of items) {
-				transferredBytes += item.transferredBytes;
-				const itemTotalBytes = this.getLiveTransferItemTotal(item, task);
-				if (itemTotalBytes === undefined) {
-					totalBytesKnown = false;
-				} else {
-					totalBytes += itemTotalBytes;
-				}
-				speedBytesPerSecond += item.status === 'running' ? item.speedBytesPerSecond : 0;
-				addStartedAt(getVisibleTransferStartedAt({
-					status: item.status,
-					strategy: item.strategy ?? task.strategy,
-					startedAt: item.startedAt ?? task.startedAt,
-					transferStartedAt: item.transferStartedAt ?? taskDataStartedAt
-				}));
-			}
-		}
-		const remainingBytes = totalBytesKnown ? Math.max(0, totalBytes - transferredBytes) : 0;
-		const remainingMs = totalBytesKnown && totalBytes > 0 && transferredBytes < totalBytes && speedBytesPerSecond > 0
-			? (remainingBytes / speedBytesPerSecond) * 1000
-			: undefined;
-		return {
-			transferredBytes,
-			totalBytes: totalBytesKnown ? totalBytes : undefined,
-			speedBytesPerSecond,
-			remainingMs,
-			startedAt
-		};
+		return aggregateTurboFileTransferProgress(tasks, Date.now());
+	}
+
+	private getLiveTransferDisplay(tasks: TurboFileTask[]) {
+		return this.transferMetricsDisplay.read(tasks.map(task => task.id).join(','), this.getLiveTransferAggregate(tasks), Date.now());
 	}
 
 	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem, task: TurboFileTask): number | undefined {
@@ -5411,11 +5417,11 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private formatSpeed(bytesPerSecond: number | undefined): string {
-		return bytesPerSecond && bytesPerSecond > 0 ? `${formatTransferRate(bytesPerSecond)}/s` : '--';
+		return `${formatTransferRate(Math.max(0, bytesPerSecond ?? 0))}/s`;
 	}
 
-	private getTransferTimeDisplay(summary: { startedAt?: number; remainingMs?: number }): { text: string; title: string } {
-		const time = this.transferTimeDisplay.read(summary.startedAt, summary.remainingMs, Date.now());
+	private getTransferTimeDisplay(summary: { time: { milliseconds: number | undefined; remaining: boolean } }): { text: string; title: string } {
+		const time = summary.time;
 		return {
 			text: time.milliseconds === undefined ? '--' : formatDuration(time.milliseconds),
 			title: time.remaining ? localize('turbofile.remainingTime', "剩余时间") : localize('turbofile.elapsedTime', "已耗时")
@@ -5423,9 +5429,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private async cancelRunningTransfers(tasks: readonly TurboFileTask[]): Promise<void> {
-		for (const task of tasks) {
-			await this.cancelTask(task);
-		}
+		await Promise.allSettled(tasks.map(task => this.cancelTask(task)));
 	}
 
 	private getRunningTaskCount(): number {
@@ -5439,6 +5443,11 @@ export class TurboFileEditor extends EditorPane {
 	private async cancelRunningTasksForClose(): Promise<void> {
 		const runningTasks = this.tasks.filter(task => task.status === 'running');
 		await this.cancelRunningTransfers(runningTasks);
+		const failedCancellations = runningTasks.filter(task => task.status === 'running' && !task.cancelRequested);
+		if (failedCancellations.length) {
+			this.updateInputRunningTaskCount();
+			throw new Error(failedCancellations.map(task => localize('turbofile.closeTaskCancellationError', "{0}: {1}", task.label, task.error ?? task.detail)).join('\n'));
+		}
 		for (const task of runningTasks) {
 			if (task.status === 'running') {
 				this.finishTask(task, 'canceled', `已取消任务：${task.label}`);
@@ -5505,7 +5514,9 @@ export class TurboFileEditor extends EditorPane {
 		name.append(task.label);
 
 		const detail = $('.turbofile-task-row-detail');
-		detail.textContent = task.detail;
+		const fallbackDetail = this.getTransferFallbackDetail(task);
+		detail.textContent = fallbackDetail ? `${task.detail}\n${fallbackDetail}` : task.detail;
+		detail.title = detail.textContent;
 
 		const metrics = $('.turbofile-task-row-metrics');
 		metrics.textContent = this.getTaskMetrics(task);
@@ -5556,12 +5567,24 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const result = await this.sshService.cancelTransfer(task.progressId);
-		if (!result.ok && task.status === 'running') {
-			this.finishTask(task, 'error', `取消任务失败：${result.message}`, { error: result.message });
-		} else if (task.status === 'running') {
-			this.finishTask(task, 'canceled', `已取消任务：${task.label}`);
-			this.prewarmCurrentTransferPair(true);
+		try {
+			const result = await this.sshService.cancelTransfer(task.progressId);
+			if (!result.ok) {
+				throw new Error(result.message);
+			}
+			if (task.status === 'running') {
+				this.finishTask(task, 'canceled', `已取消任务：${task.label}`);
+				this.prewarmCurrentTransferPair(true);
+			}
+		} catch (error) {
+			if (task.status === 'running') {
+				const message = error instanceof Error ? error.message : String(error);
+				task.cancelRequested = false;
+				task.error = message;
+				task.detail = localize('turbofile.cancelTaskFailed', "取消任务失败：{0}", message);
+				this.statusMessage = task.detail;
+				this.render();
+			}
 		}
 	}
 
@@ -5604,6 +5627,12 @@ export class TurboFileEditor extends EditorPane {
 					this.clearLiveTransferTicker();
 					return;
 				}
+				this.transferMetricsDisplay.advance();
+				for (const task of this.tasks) {
+					if (this.needsLiveTransferTicker(task)) {
+						task.metricsDisplay?.advance();
+					}
+				}
 				if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
 					this.refreshTaskbarMetrics();
 				} else if (this.activePage === 'tasks' || this.isTaskLogVisible) {
@@ -5624,7 +5653,7 @@ export class TurboFileEditor extends EditorPane {
 			getWindow(this.container).clearInterval(this.liveTransferTicker);
 		}
 		this.liveTransferTicker = undefined;
-		this.transferTimeDisplay.reset();
+		this.transferMetricsDisplay.reset();
 	}
 
 	private beginTask(kind: TurboFileTaskKind, label: string, detail: string, shouldRender: boolean = true): TurboFileTask {
@@ -5651,9 +5680,7 @@ export class TurboFileEditor extends EditorPane {
 				this.postTransferReconcileScheduler.schedule(POST_TRANSFER_RECONCILE_DELAY_MS);
 			}
 		}
-		if (this.tasks.length > 16) {
-			this.tasks.splice(16);
-		}
+		trimTurboFileTaskHistory(this.tasks, 16);
 		this.statusMessage = detail;
 		this.updateInputRunningTaskCount();
 		this.updateLiveTransferTicker();
@@ -5681,12 +5708,23 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private updateTransferProgress(task: TurboFileTask, event: ITurboFileTransferProgressEvent): void {
+		if (task.status !== 'running' || task.progressId !== event.progressId) {
+			return;
+		}
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
 		const previousVisibleTransferredBytes = activeItem?.transferredBytes ?? task.transferredBytes ?? 0;
 		if (event.currentName) {
 			task.currentTransferName = event.currentName;
 		}
 		const strategy = this.getTransferStrategyFromProgress(event) ?? task.strategy;
+		if (event.state === 'fallback') {
+			const reason = event.detail || localize('turbofile.transferFallbackNoDetail', "当前协议不可用，正在尝试其他传输协议。");
+			const fallbacks = task.transferFallbacks ??= [];
+			const previousFallback = fallbacks[fallbacks.length - 1];
+			if (!previousFallback || previousFallback.nextStrategy !== strategy || previousFallback.reason !== reason) {
+				fallbacks.push({ previousStrategy: activeItem?.strategy ?? task.strategy, nextStrategy: strategy, reason });
+			}
+		}
 		const semanticKey = createTurboFileTransferProgressSemanticKey({
 			phase: event.phase,
 			state: event.state,
@@ -5723,6 +5761,12 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const now = Date.now();
 		const speedTarget = activeItem ?? task;
+		const wasQuiet = isTurboFileTransferProgressQuiet(speedTarget.lastProgressAt ?? task.startedAt, now);
+		// Repeated size probes are not new data. They must not keep an obsolete speed alive.
+		if (speedTarget.lastProgressAt === undefined || transferredBytes !== previousVisibleTransferredBytes || semanticChanged) {
+			task.lastProgressAt = now;
+			speedTarget.lastProgressAt = now;
+		}
 		const resetRsyncSpeedSample = isRsyncProgress
 			&& transferredBytes > 0
 			&& task.transferStartedAt === undefined
@@ -5766,6 +5810,11 @@ export class TurboFileEditor extends EditorPane {
 				activeItem.endedAt = now;
 			}
 		}
+		if (!activeItem) {
+			task.transferredBytes = transferredBytes;
+			task.totalBytes = totalBytes;
+			task.speedBytesPerSecond = speed;
+		}
 		const aggregate = this.getLiveTransferAggregate([task]);
 		task.transferredBytes = activeItem ? aggregate.transferredBytes : transferredBytes;
 		task.totalBytes = activeItem ? aggregate.totalBytes : totalBytes;
@@ -5779,13 +5828,23 @@ export class TurboFileEditor extends EditorPane {
 		this.statusMessage = detail;
 		this.updateLiveTransferTicker();
 
-		const renderIntervalMs = strategy?.startsWith('rsync') ? RSYNC_PROGRESS_RENDER_INTERVAL_MS : TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
-		if (semanticChanged || isFirstPositiveBytes || isTerminal || (totalBytes !== undefined && totalBytes > 0 && transferredBytes >= totalBytes) || now - (task.lastProgressRenderAt ?? 0) > renderIntervalMs) {
-			task.lastProgressRenderAt = now;
+		// Steady byte/speed/time changes are painted together by the single 500 ms ticker.
+		// Only first data, recovery and terminal boundaries may bypass that cadence.
+		if (isFirstPositiveBytes || isTerminal || (wasQuiet && transferredBytes !== previousVisibleTransferredBytes)) {
+			this.transferMetricsDisplay.advance();
+			task.metricsDisplay?.advance();
+		}
+		if (semanticChanged || isFirstPositiveBytes || isTerminal || (wasQuiet && transferredBytes !== previousVisibleTransferredBytes)) {
 			if (this.activePage === 'transfer' && !this.isTaskLogVisible) {
-				this.refreshTaskbar();
+				if (semanticChanged || isTerminal) {
+					this.refreshTaskbar();
+				} else {
+					this.refreshTaskbarMetrics();
+				}
+			} else if (semanticChanged || isTerminal) {
+				this.refreshVisibleTaskLogEntry(task);
 			} else {
-				this.render();
+				this.refreshTaskLogMetrics();
 			}
 		}
 	}
@@ -5800,7 +5859,7 @@ export class TurboFileEditor extends EditorPane {
 			return previousSpeed;
 		}
 		const elapsed = now - previousAt;
-		if (elapsed < TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS) {
+		if (elapsed < TRANSFER_SPEED_SAMPLE_MIN_INTERVAL_MS && !(previousSpeed <= 0 && transferredBytes > previousBytes)) {
 			return previousSpeed;
 		}
 		target.lastSampleAt = now;
@@ -5947,6 +6006,23 @@ export class TurboFileEditor extends EditorPane {
 		}
 	}
 
+	/** Keep real protocol fallback causes available after subsequent progress or task completion. */
+	private getTransferFallbackDetail(task: TurboFileTask): string | undefined {
+		return task.transferFallbacks?.map(fallback => {
+			const previous = this.getTransferProtocolLabel(fallback.previousStrategy);
+			const next = this.getTransferProtocolLabel(fallback.nextStrategy);
+			return previous && next && previous !== next
+				? localize('turbofile.transferFallbackTransition', "{0} → {1}：{2}", previous, next, fallback.reason)
+				: localize('turbofile.transferFallbackReason', "协议回退：{0}", fallback.reason);
+		}).join('\n') || undefined;
+	}
+
+	private getTransferProtocolTooltip(task: TurboFileTask): string {
+		const fallbackDetail = this.getTransferFallbackDetail(task);
+		const label = localize('turbofile.transferProtocolTooltip', "传输模式");
+		return fallbackDetail ? `${label}\n${fallbackDetail}` : label;
+	}
+
 	private getPlannedTransferStrategy(sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItem: TurboFileFileItem): TurboFileTransferStrategy {
 		if (sourceDevice.id === LOCAL_WINDOWS_DEVICE_ID && targetDevice.id === LOCAL_WINDOWS_DEVICE_ID) {
 			return 'local-copy';
@@ -6064,6 +6140,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private formatTransferProgressDetail(event: ITurboFileTransferProgressEvent, transferredBytes: number, totalBytes: number | undefined): string {
+		if (event.state === 'fallback') {
+			return localize('turbofile.transferFallbackReason', "协议回退：{0}", event.detail || localize('turbofile.transferFallbackNoDetail', "当前协议不可用，正在尝试其他传输协议。"));
+		}
 		const phase = event.phase;
 		const phaseLabel = phase === 'relay-download'
 			? '中转下载'
@@ -6107,7 +6186,7 @@ export class TurboFileEditor extends EditorPane {
 		} else {
 			task.durationMs = options.durationMs ?? task.durationMs;
 		}
-		task.progress = status === 'canceled' ? Math.max(task.progress, 0) : 100;
+		task.progress = status === 'success' ? 100 : Math.max(task.progress, 0);
 		task.bytes = options.bytes;
 		task.averageBytesPerSecond = options.averageBytesPerSecond
 			?? (options.bytes !== undefined && task.durationMs !== undefined && task.durationMs > 0 ? Math.round(options.bytes / (task.durationMs / 1000)) : task.averageBytesPerSecond);
@@ -6194,11 +6273,18 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getTaskMetrics(task: TurboFileTask): string {
+		if (task.kind === 'transfer' && task.status === 'running') {
+			const summary = (task.metricsDisplay ??= new TurboFileTransferMetricsDisplay()).read(String(task.id), this.getLiveTransferAggregate([task]), Date.now());
+			return [this.getTransferTimeDisplay(summary).text, formatSize(summary.transferredBytes), this.formatSpeed(summary.speedBytesPerSecond), task.strategy].filter(Boolean).join(' · ');
+		}
 		const timingStartedAt = task.transferStartedAt ?? task.startedAt;
 		const elapsedMs = task.durationMs ?? ((task.endedAt ?? Date.now()) - timingStartedAt);
 		const duration = formatDuration(elapsedMs);
 		const parts = [duration];
 		if (task.status === 'running' && task.transferredBytes !== undefined) {
+			if (isTurboFileTransferProgressQuiet(task.lastProgressAt ?? task.startedAt, Date.now())) {
+				parts.push(localize('turbofile.awaitingProgress', "等待进度反馈（任务未结束）"));
+			}
 			if (task.totalBytes !== undefined) {
 				parts.push(`${formatSize(task.transferredBytes)} / ${formatSize(task.totalBytes)}`);
 			} else if (task.transferredBytes > 0) {
@@ -6451,6 +6537,9 @@ export class TurboFileEditor extends EditorPane {
 		});
 		body.addEventListener('focusin', () => this.setActiveImageGridState(state));
 		body.addEventListener('paste', event => {
+			if (this.isEditableKeyboardTarget(event.target)) {
+				return;
+			}
 			this.setActiveImageGridState(state);
 			event.preventDefault();
 			void this.pasteIntoPane(getTurboFileImageGridPasteTargetSide(state.side, this.internalTransferClipboard?.sourceSide));
@@ -8459,6 +8548,9 @@ export class TurboFileEditor extends EditorPane {
 		const actions: IAction[] = [
 			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
 			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side)),
+			this.menuAction('turbofile.copy', localize('turbofile.copyFiles', "复制"), Codicon.copy, () => this.copySelectedToInternalClipboard(side, 'copy'), canOperate),
+			this.menuAction('turbofile.cut', localize('turbofile.cutFiles', "剪切"), Codicon.arrowRight, () => this.copySelectedToInternalClipboard(side, 'move'), canOperate),
+			this.menuAction('turbofile.paste', localize('turbofile.pasteFiles', "粘贴"), Codicon.clippy, () => this.pasteIntoPane(side), !this.paneStates[side].trashMode.active),
 			this.menuAction('turbofile.rename', '重命名', Codicon.edit, () => this.renameSelected(side), canOperate),
 			this.menuAction('turbofile.copyPath', '复制路径', Codicon.copy, () => this.copySelectedPath(side), canOperate),
 			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate)
@@ -8485,7 +8577,8 @@ export class TurboFileEditor extends EditorPane {
 	private getPaneContextActions(side: 'left' | 'right'): IAction[] {
 		const actions: IAction[] = [
 			this.menuAction('turbofile.newFolder', '新建文件夹', Codicon.newFolder, () => this.createFolder(side)),
-			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side))
+			this.menuAction('turbofile.newFile', '新建文件', Codicon.newFile, () => this.createFile(side)),
+			this.menuAction('turbofile.paste', localize('turbofile.pasteFiles', "粘贴"), Codicon.clippy, () => this.pasteIntoPane(side), !this.paneStates[side].trashMode.active)
 		];
 		if (this.paneStates[side].trashMode.active) {
 			actions.push(
@@ -9583,12 +9676,8 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const sourceDevice = clipboard.sourceDevice;
-		let sourceItems = this.createSameDirectoryCopyItems(clipboard, targetSide, targetDevice);
-		const resolvedSourceItems = await this.resolveTransferConflictItems(sourceItems, targetSide);
-		if (!resolvedSourceItems?.length) {
-			return false;
-		}
-		sourceItems = resolvedSourceItems;
+		// Conflict prompts can outlive navigation in either pane. Freeze the destination before
+		// awaiting them, just as the clipboard already freezes the source device and directory.
 		const transferContext = this.createTransferContext(
 			clipboard.sourceSide,
 			targetSide,
@@ -9597,9 +9686,15 @@ export class TurboFileEditor extends EditorPane {
 			clipboard.sourcePath,
 			this.paneStates[targetSide].path
 		);
+		let sourceItems = this.createSameDirectoryCopyItems(clipboard, targetSide, targetDevice);
+		const resolvedSourceItems = await this.resolveTransferConflictItems(sourceItems, targetSide);
+		if (!resolvedSourceItems?.length) {
+			return false;
+		}
+		sourceItems = resolvedSourceItems;
 		if (sourceItems.length > 1) {
 			const transferred = await this.transferItemsBatch(clipboard.sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, clipboard.operation, undefined, transferContext);
-			if (transferred && clipboard.operation === 'move') {
+			if (transferred && clipboard.operation === 'move' && this.internalTransferClipboard === clipboard) {
 				this.internalTransferClipboard = undefined;
 			}
 			return transferred;
@@ -9615,7 +9710,7 @@ export class TurboFileEditor extends EditorPane {
 
 		if (clipboard.operation === 'move' && this.isSameDeviceForNativeOperation(sourceDevice, targetDevice)) {
 			const moved = await this.moveInternalItemsNatively(task, sourceDevice, sourceItems, transferContext);
-			if (moved) {
+			if (moved && this.internalTransferClipboard === clipboard) {
 				this.internalTransferClipboard = undefined;
 			}
 			return moved;
@@ -9715,7 +9810,9 @@ export class TurboFileEditor extends EditorPane {
 				this.schedulePostTransferReconcile('move', transferContext);
 				return false;
 			}
-			this.internalTransferClipboard = undefined;
+			if (this.internalTransferClipboard === clipboard) {
+				this.internalTransferClipboard = undefined;
+			}
 		}
 
 		const successMessage = batch
@@ -9837,11 +9934,26 @@ export class TurboFileEditor extends EditorPane {
 		// movePathsIntoDirectory (POSIX remote: a single `xargs -0 mv` round trip) instead of issuing one
 		// renamePath round trip per item, which made dragging many files feel like a slow per-file copy.
 		let result: Awaited<ReturnType<ITurboFileSshService['movePathsIntoDirectory']>>;
+		const progressId = task.progressId!;
+		const progress = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
 		try {
 			const connection = device.id === LOCAL_WINDOWS_DEVICE_ID ? undefined : await this.getSshConnectionOptions(device);
 			const endpoints = await Promise.all(sourceItems.map(item => this.toTransferEndpoint(device, item.path!, connection)));
-			result = await this.sshService.movePathsIntoDirectory(endpoints, transferContext.target.directoryPath, { progressId: task.progressId });
+			if (task.cancelRequested || task.status !== 'running') {
+				return;
+			}
+			result = await this.sshService.movePathsIntoDirectory(endpoints, transferContext.target.directoryPath, { progressId });
+			if (result.canceled || task.cancelRequested) {
+				this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"));
+				this.schedulePostTransferReconcile('move', transferContext);
+				return;
+			}
 		} catch (error) {
+			if (task.cancelRequested) {
+				this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"));
+				this.schedulePostTransferReconcile('move', transferContext);
+				return;
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			for (const transferItem of task.transferItems) {
 				transferItem.status = 'error';
@@ -9851,6 +9963,8 @@ export class TurboFileEditor extends EditorPane {
 			this.finishTask(task, 'error', `移动失败：${message}`, { strategy, error: message });
 			this.schedulePostTransferReconcile('move', transferContext);
 			return;
+		} finally {
+			progress.dispose();
 		}
 
 		let totalBytes = 0;
@@ -9887,6 +10001,25 @@ export class TurboFileEditor extends EditorPane {
 		this.finishTask(task, 'success', batch ? `移动完成：${sourceItems.length} 项 → ${targetLabel}` : `移动完成：${sourceItems[0].name} → ${targetLabel}`, { bytes: totalBytes, strategy }, false);
 	}
 
+	/** Retain native rename's overwrite semantics while exposing cancellation and progress. */
+	private async renameTransferItem(task: TurboFileTask, device: TurboFileDevice, sourcePath: string, targetPath: string): Promise<Awaited<ReturnType<ITurboFileSshService['renamePath']>>> {
+		if (task.cancelRequested || task.status !== 'running') {
+			return { ok: false, canceled: true, message: localize('turbofile.moveCanceled', "移动已取消。") };
+		}
+		const progressId = `turbofile-move-${task.id}-${Date.now()}`;
+		task.progressId = progressId;
+		const progress = this.sshService.onDynamicTransferProgress(progressId)(event => this.updateTransferProgress(task, event));
+		try {
+			const source = await this.toTransferEndpoint(device, sourcePath);
+			if (task.cancelRequested || task.status !== 'running') {
+				return { ok: false, canceled: true, message: localize('turbofile.moveCanceled', "移动已取消。") };
+			}
+			return await this.sshService.renamePath(source, targetPath, { progressId });
+		} finally {
+			progress.dispose();
+		}
+	}
+
 	private async moveInternalItemsNatively(task: TurboFileTask, device: TurboFileDevice, sourceItems: readonly TurboFileFileItem[], transferContext: TurboFileTransferContext): Promise<boolean> {
 		const batch = sourceItems.length > 1;
 		const failures: string[] = [];
@@ -9896,6 +10029,10 @@ export class TurboFileEditor extends EditorPane {
 		let totalBytes = 0;
 
 		for (const [index, sourceItem] of sourceItems.entries()) {
+			if (task.cancelRequested || task.status !== 'running') {
+				this.schedulePostTransferReconcile('move', transferContext);
+				return false;
+			}
 			const transferItem = task.transferItems?.[index];
 			task.activeTransferItemIndex = index;
 			if (transferItem) {
@@ -9934,7 +10071,12 @@ export class TurboFileEditor extends EditorPane {
 
 			this.updateTask(task, batch ? `正在移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
 			try {
-				const result = await this.sshService.renamePath(await this.toTransferEndpoint(device, sourceItem.path), targetPath);
+				const result = await this.renameTransferItem(task, device, sourceItem.path, targetPath);
+				if (result.canceled || task.cancelRequested) {
+					this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"), { bytes: totalBytes });
+					this.schedulePostTransferReconcile('move', transferContext);
+					return false;
+				}
 				if (!result.ok) {
 					if (transferItem) {
 						transferItem.status = 'error';
@@ -9957,6 +10099,11 @@ export class TurboFileEditor extends EditorPane {
 					transferItem.endedAt = Date.now();
 				}
 			} catch (error) {
+				if (task.cancelRequested) {
+					this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"), { bytes: totalBytes });
+					this.schedulePostTransferReconcile('move', transferContext);
+					return false;
+				}
 				const message = error instanceof Error ? error.message : String(error);
 				if (transferItem) {
 					transferItem.status = 'error';
@@ -9992,6 +10139,10 @@ export class TurboFileEditor extends EditorPane {
 		let totalBytes = 0;
 
 		for (const [index, sourceItem] of sourceItems.entries()) {
+			if (task.cancelRequested || task.status !== 'running') {
+				this.schedulePostTransferReconcile('move', transferContext);
+				return false;
+			}
 			const transferItem = task.transferItems?.[index];
 			task.activeTransferItemIndex = index;
 			if (transferItem) {
@@ -10025,7 +10176,12 @@ export class TurboFileEditor extends EditorPane {
 
 			this.updateTask(task, batch ? `正在本机移动 ${index + 1}/${sourceItems.length}：${sourceItem.name}` : `正在本机移动：${sourceItem.name}`, Math.min(88, 12 + Math.round((index / sourceItems.length) * 70)), false);
 			try {
-				const result = await this.sshService.renamePath(await this.toTransferEndpoint(this.localWindowsDevice, sourceItem.path), targetPath);
+				const result = await this.renameTransferItem(task, this.localWindowsDevice, sourceItem.path, targetPath);
+				if (result.canceled || task.cancelRequested) {
+					this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"), { bytes: totalBytes });
+					this.schedulePostTransferReconcile('move', transferContext);
+					return false;
+				}
 				if (!result.ok) {
 					if (transferItem) {
 						transferItem.status = 'error';
@@ -10048,6 +10204,11 @@ export class TurboFileEditor extends EditorPane {
 					transferItem.endedAt = Date.now();
 				}
 			} catch (error) {
+				if (task.cancelRequested) {
+					this.finishTask(task, 'canceled', localize('turbofile.moveCanceled', "移动已取消。"), { bytes: totalBytes });
+					this.schedulePostTransferReconcile('move', transferContext);
+					return false;
+				}
 				const message = error instanceof Error ? error.message : String(error);
 				if (transferItem) {
 					transferItem.status = 'error';
@@ -10529,6 +10690,7 @@ export class TurboFileEditor extends EditorPane {
 				refreshTarget: false,
 				task,
 				targetPath: joinPanePath(targetDirectory, sourceItem.name, true),
+				sourceDeviceOverride: sourceDevice,
 				targetDeviceOverride: targetDevice,
 				initiatedAt
 			});
@@ -10659,12 +10821,12 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 			return false;
 		}
+		const transferContext = this.createTransferContext(sourceSide, targetSide, sourceDevice, targetDevice);
 		const resolvedSourceItems = await this.resolveTransferConflictItems(sourceItems, targetSide);
 		if (!resolvedSourceItems?.length) {
 			return false;
 		}
 		sourceItems = resolvedSourceItems;
-		const transferContext = this.createTransferContext(sourceSide, targetSide, sourceDevice, targetDevice);
 
 		if (shouldUseBatchTransfer(operation, sourceItems.length)) {
 			return this.transferItemsBatch(sourceSide, targetSide, sourceDevice, targetDevice, sourceItems, operation, initiatedAt, transferContext);
@@ -10718,6 +10880,8 @@ export class TurboFileEditor extends EditorPane {
 				refreshTarget: false,
 				task,
 				targetPath: joinPanePath(transferContext.target.directoryPath, sourceItem.name, this.isWindowsDevice(targetDevice)),
+				sourceDeviceOverride: sourceDevice,
+				targetDeviceOverride: targetDevice,
 				initiatedAt
 			});
 			if (result.ok) {
@@ -10783,6 +10947,9 @@ export class TurboFileEditor extends EditorPane {
 		if (!sourceDevice || !targetDevice || !sourceItem.path || sourceItem.parent) {
 			return { ok: false, message: '来源或目标无效。', bytes: 0 };
 		}
+		if (options.task && (options.task.cancelRequested || options.task.status !== 'running')) {
+			return { ok: false, canceled: true, message: localize('turbofile.transferCanceledBeforeStart', "传输已取消，未启动文件传输。"), bytes: 0 };
+		}
 
 		const targetPath = options.targetPath ?? joinPanePath(targetState.path, sourceItem.name, this.isWindowsDevice(targetDevice));
 		const progressId = options.task ? `turbofile-transfer-${options.task.id}-${Date.now()}` : undefined;
@@ -10801,6 +10968,9 @@ export class TurboFileEditor extends EditorPane {
 				this.toTransferEndpoint(sourceDevice, sourceItem.path),
 				this.toTransferEndpoint(targetDevice, targetPath)
 			]);
+			if (options.task && (options.task.cancelRequested || options.task.status !== 'running')) {
+				return { ok: false, canceled: true, message: localize('turbofile.transferCanceledBeforeStart', "传输已取消，未启动文件传输。"), bytes: 0 };
+			}
 			const plannedStrategy = this.getPlannedTransferStrategy(sourceDevice, targetDevice, sourceItem);
 			const activeItem = options.task?.activeTransferItemIndex !== undefined ? options.task.transferItems?.[options.task.activeTransferItemIndex] : undefined;
 			const expectedBytes = sourceItem.directory
@@ -10878,6 +11048,12 @@ export class TurboFileEditor extends EditorPane {
 				this.toTransferEndpoint(sourceDevice, items[0].path!),
 				this.toTransferEndpoint(targetDevice, transferContext.target.directoryPath)
 			]);
+			if (task.cancelRequested || task.status !== 'running') {
+				if (task.status === 'running') {
+					this.finishTask(task, 'canceled', localize('turbofile.batchTransferCanceledBeforeStart', "批量传输已取消，未启动文件传输。"));
+				}
+				return false;
+			}
 			const expectedBytes = task.trackTotalBytes ? Math.max(0, task.totalBytes ?? 0) : 0;
 			const plannedStrategy = this.getPlannedBatchTransferStrategy(sourceDevice, targetDevice, items);
 			const initialStrategy = this.shouldDeferSshToSshStrategy(sourceDevice, targetDevice) ? undefined : plannedStrategy;
@@ -14679,7 +14855,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		// Only treat a panel hide as "the user hid this page's terminal" while the transfer page is
-		// actually showing. A hide triggered while on another in-app page (images, themes, tasks, …)
+		// actually showing. A hide triggered while on another in-app page (images, tasks, …)
 		// must not mark the terminal hidden, otherwise it would appear to vanish when returning to the
 		// transfer page even though it is still open and bound.
 		const pageInstanceId = this.currentInput?.instanceId;
@@ -15462,7 +15638,8 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private getAllDevices(): TurboFileDevice[] {
-		return [this.localWindowsDevice, ...this.devices];
+		const devices = [this.localWindowsDevice, ...this.devices];
+		return this.deviceStore?.sortDevices(devices) ?? devices;
 	}
 
 	private createLocalWindowsDevice(): TurboFileDevice {
@@ -15741,11 +15918,12 @@ export class TurboFileEditor extends EditorPane {
 
 	private getPaneDevice(side: 'left' | 'right'): TurboFileDevice | undefined {
 		const state = this.paneStates[side];
-		return this.getAllDevices().find(device => device.id === state.deviceId);
+		return this.getDeviceById(state.deviceId);
 	}
 
 	private getDeviceById(deviceId: string): TurboFileDevice | undefined {
-		return this.getAllDevices().find(device => device.id === deviceId);
+		// Lookups on the thumbnail/progress paths do not need the display order or its storage read.
+		return deviceId === LOCAL_WINDOWS_DEVICE_ID ? this.localWindowsDevice : this.devices.find(device => device.id === deviceId);
 	}
 
 	private renderFileBrowserIcon(item: TurboFileFileItem): Element {

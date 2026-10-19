@@ -30,12 +30,15 @@ export interface ITurboFileConcurrentBatchAttemptOptions {
 }
 
 export async function runTurboFileBatchTransferFlow(options: ITurboFileBatchTransferFlowOptions): Promise<ITurboFileBatchTransferResult | undefined> {
+	let latestIncompleteResult: ITurboFileBatchTransferResult | undefined;
+	let latestError: Error | undefined;
 	for (const [index, attempt] of options.attempts.entries()) {
 		let result: ITurboFileBatchTransferResult | undefined;
 		try {
 			result = await options.runAttempt(attempt, index);
 		} catch (error) {
 			const typedError = error instanceof Error ? error : new Error(String(error));
+			latestError = typedError;
 			const shouldContinue = options.shouldContinueAfterError?.(typedError, attempt)
 				?? shouldContinueTurboFileTransferPlan(classifyTurboFileTransferFailure(typedError));
 			options.onAttemptError(typedError, attempt, shouldContinue ? options.attempts[index + 1] : undefined);
@@ -48,6 +51,8 @@ export async function runTurboFileBatchTransferFlow(options: ITurboFileBatchTran
 			continue;
 		}
 		if (!result.ok && result.completed !== options.totalItems) {
+			latestIncompleteResult = result;
+			latestError = undefined;
 			options.onIncompleteResult(result);
 			if (!shouldContinueAfterIncompleteResult(result)) {
 				return result;
@@ -60,10 +65,16 @@ export async function runTurboFileBatchTransferFlow(options: ITurboFileBatchTran
 		const cleanupFailures = await options.cleanupSources();
 		return cleanupFailures.length ? options.createCleanupFailureResult(result, cleanupFailures) : result;
 	}
-	return undefined;
+	if (latestError) {
+		throw latestError;
+	}
+	return latestIncompleteResult;
 }
 
 function shouldContinueAfterIncompleteResult(result: ITurboFileBatchTransferResult): boolean {
+	if (result.canceled) {
+		return false;
+	}
 	const messages = result.failures.length ? result.failures.map(failure => failure.message) : [result.message];
 	return messages.every(message => shouldContinueTurboFileTransferPlan(classifyTurboFileTransferFailure(new Error(message))));
 }

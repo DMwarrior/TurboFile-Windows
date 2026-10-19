@@ -62,17 +62,18 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(service.includes("initialAttempt?.protocol === 'scp' || initialAttempt?.protocol === 'sftp'"));
 		assert.ok(service.includes('const workerLimit = usesConcurrentWorkers ? maximumWorkers : 1;'));
 
-		assert.ok(transferFile.includes('const result = await this.transferFileCore(request);'));
+		assert.match(transferFile, /\b(?:const|let) result = await this\.transferFileCore\(request\);/);
 		assert.ok(!transferFile.includes('runWithAccess'));
 		assert.ok(transferBatch.includes('const scheduling = getBatchTransferSchedulingSnapshot(request, items, this.transferScheduler);'));
 		assert.ok(transferBatch.includes('schedulerConcurrency: scheduling.workerLimit'));
-		assert.ok(transferBatch.includes('const result = await this.transferBatchCore(scheduledRequest);'));
+		assert.match(transferBatch, /\b(?:const|let) result = await this\.transferBatchCore\(scheduledRequest\);/);
 		assert.ok(!transferBatch.includes('runWithAccess'));
 
 		assert.ok(concurrentBatch.includes('this.transferFileCore({'));
 		assert.ok(!concurrentBatch.includes('this.transferFile({'));
 		assert.ok(concurrentBatch.includes('request.schedulerConcurrency ?? 1'));
-		assert.ok(uploadVerification.includes('this.deletePathCore(target, true, progressId)'));
+		assert.ok(!uploadVerification.includes('this.deletePathCore('));
+		assert.ok(uploadVerification.includes('targetStat?.isDirectory()'));
 		assert.ok(deletePathsCore.includes('this.deletePathCore(targets[0], recursive, progressId)'));
 	});
 
@@ -96,7 +97,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(permanentDelete.includes('await this.permanentlyDeleteTrashItemsCore(request)'));
 		assert.ok(emptyTrash.includes('await this.emptyTrashCore(device, progressId)'));
 		assert.ok(deletePaths.includes('await this.deletePathsCore(endpoints, recursive, progressId)'));
-		assert.ok(movePaths.includes('await this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId)'));
+		assert.ok(movePaths.includes('await this.movePathsIntoDirectoryCore(sources, targetDirectory, progressId, onDelta)'));
 		for (const block of [moveToTrash, restoreTrash, restoreTrashPaths, permanentDelete, emptyTrash, deletePaths, movePaths]) {
 			assert.ok(!block.includes('fileOperationQueue'));
 		}
@@ -255,25 +256,30 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const nativeDownload = methodBlock(service, 'private async runNativeLocalTarDownload', 'private async runParallelLocalDirectoryTarUpload');
 		const batchDownload = methodBlock(service, 'private async runRemoteBatchTarDownload', 'private async tryDirectBatchTarTransfer');
+		const remoteDownloadPipe = methodBlock(service, 'private async pipeRemoteTarDownload', 'private async createLocalTarRootAliasIfNeeded');
 
 		assert.ok(nativeDownload.includes('remoteInput?: Uint8Array'));
 		assert.ok(nativeDownload.includes("writeInputToWritableStream(sshProcess.stdin, remoteInput, 'native tar download path list')"));
 		assert.ok(batchDownload.includes('createRemoteBatchTarSourcePlan'));
 		assert.ok(batchDownload.includes('sourcePlan.input'));
-		assert.ok(batchDownload.includes("writeInputToWritableStream(sourceStream.stream, sourcePlan.input, 'batch tar download path list')"));
+		assert.match(batchDownload, /this\.pipeRemoteTarDownload\(configResult\.config, sourcePlan\.command,[\s\S]*?sourcePlan\.input\)/);
+		assert.ok(remoteDownloadPipe.includes("remoteInput ? writeInputToWritableStream(sourceStream.stream, remoteInput, 'tar download path list') : Promise.resolve()"));
 	});
 
 	test('keeps large direct and relay tar commands compact while preserving streaming progress', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const direct = methodBlock(service, 'private async tryDirectBatchTarTransferRoute', 'private async tryRelayBatchTarTransfer');
 		const relay = methodBlock(service, 'private async tryRelayBatchTarTransfer', 'private async runConcurrentBatchTransfer');
+		const streamRelay = methodBlock(service, 'private async relayRemoteStreamsWithWatchdog', 'private transformImageBuffer');
 
 		assert.ok(direct.includes('isTurboFileBatchCommandSafe'));
 		assert.ok(direct.includes('prepareRemoteBatchTarTarget'));
 		assert.ok(direct.includes('input: sourcePlan.input'));
 		assert.ok(relay.includes('createRemoteBatchTarSourcePlan'));
 		assert.ok(relay.includes('execRemoteWithInput'));
-		assert.ok(relay.includes("writeInputToWritableStream(sourceStream.stream, sourcePlan.input, 'batch tar relay path list')"));
+		assert.ok(relay.includes('relayRemoteStreamsWithWatchdog(sourceStream, targetStream, onArchiveDelta, request.progressId, sourcePlan.input)'));
+		assert.ok(streamRelay.includes("writeInputToWritableStream(source.stream, input, 'tar relay path list')"));
+		assert.ok(streamRelay.includes('Promise.all([archivePipeline, inputWrite, source.close, target.close])'));
 	});
 
 	test('requires a complete reverse rsync stdin manifest before source cleanup can succeed', () => {
@@ -433,7 +439,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(!sameRemote.includes('getRemotePathContentSizeByCommand(request.source)'));
 		assert.ok(posixCopy.includes('/proc/$tf_copy_pid/io'));
 		assert.ok(posixCopy.includes('TURBOFILE_COPY_BYTES'));
-		assert.ok(remoteCopy.includes('onStderr: handleNativeProgress'));
+		assert.ok(remoteCopy.includes('onStderr: chunk => { control?.accept(chunk); handleNativeProgress(chunk); }'));
 		assert.ok(remoteCopy.includes('parseRemoteCopyProgressBytes'));
 	});
 
@@ -596,23 +602,25 @@ suite('TurboFileSshMainServiceStatic', () => {
 		})));
 	});
 
-	test('keeps direct SCP and SFTP target growth timing observational', () => {
+	test('bounds silent direct SCP and SFTP without imposing a ten-second data deadline', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
-		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private async prepareRemoteScpCredential');
+		const directScp = methodBlock(service, 'private async tryDirectScpTransferRoute', 'private supportsDirectScpLegacyOption');
 		const directSftp = methodBlock(service, 'private async tryDirectSftpTransferRoute', 'private async tryTunneledRsyncRelayTransfer');
 
 		assert.deepStrictEqual([directScp, directSftp].map(block => ({
 			keepsGrowthTiming: block.includes('beginRemoteFileGrowthTiming') && block.includes('beginRemotePathGrowthTiming'),
 			keepsBoundedMkdir: block.includes('timeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS'),
-			noGrowthActivityClock: !block.includes('lastActivityAt') && !block.includes('markActivity'),
-			noGrowthWatchdog: !block.includes('inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS')
-				&& !block.includes('getActivityTime: () => lastActivityAt')
-				&& !block.includes('produced no target growth')
+			activityIsIndependentOfDisplayedBytes: block.includes('const reportActivity = (): void => { lastActivityAt = Date.now(); };')
+				&& (block.match(/}, undefined, undefined, reportActivity\)/g)?.length === 2),
+			boundsSilenceUsingExistingGrowth: block.includes('getActivityTime: () => lastActivityAt')
+				&& block.includes('REMOTE_DIRECTORY_TRANSFER_INACTIVITY_TIMEOUT_MS : REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS'),
+			noShortDataDeadline: !block.includes('inactivityTimeoutMs: DIRECT_TRANSFER_STALL_TIMEOUT_MS')
 		})), [directScp, directSftp].map(() => ({
 			keepsGrowthTiming: true,
 			keepsBoundedMkdir: true,
-			noGrowthActivityClock: true,
-			noGrowthWatchdog: true
+			activityIsIndependentOfDisplayedBytes: true,
+			boundsSilenceUsingExistingGrowth: true,
+			noShortDataDeadline: true
 		})));
 	});
 
@@ -814,7 +822,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& growthTiming.includes('hasPositiveProgress = true;')
 				&& growthTiming.includes('initialPollIntervalMs = TRANSFER_INITIAL_GROWTH_POLL_INTERVAL_MS')
 				&& growthTiming.includes('hasPositiveProgress ? pollIntervalMs : Math.min(pollIntervalMs, initialPollIntervalMs)'),
-			keepsExpensiveDirectoryGrowthAtTheSteadyCadence: remotePathGrowthTiming.includes('initialDelayMs, pollIntervalMs);'),
+			keepsExpensiveDirectoryGrowthAtTheSteadyCadence: remotePathGrowthTiming.includes('initialDelayMs, pollIntervalMs, onActivity);'),
 			firstPositiveBypassesSteadyStateThrottle: progress.includes('const isFirstPositiveProgress = normalizedTransferred > 0')
 				&& progress.includes('!isFirstPositiveProgress && !isCompletionEvent')
 		}, {
@@ -1053,8 +1061,9 @@ suite('TurboFileSshMainServiceStatic', () => {
 				&& (remoteSize.match(/this\.throwIfTransferCanceled\(progressId\);/g)?.length ?? 0) >= 4
 				&& remoteSize.includes('this.getRemotePathSize(sftp, joinRemotePath(remotePath, entry.filename), progressId)')
 				&& remoteSizeByCommand.includes('progressId?: string')
-				&& remoteSizeByCommand.includes('this.execRemoteBytes(client, buildWindowsSizeCommand(endpoint.path), { progressId })')
-				&& remoteSizeByCommand.includes('this.execRemoteBytes(client, buildPosixSizeCommand(endpoint.path), { progressId })')
+				&& remoteSizeByCommand.includes('buildWindowsSizeCommand(endpoint.path)')
+				&& remoteSizeByCommand.includes('buildPosixSizeCommand(endpoint.path)')
+				&& (remoteSizeByCommand.match(/this\.execRemoteBytes\(client, command, \{ progressId \}\)/g)?.length ?? 0) === 2
 				&& remoteSizeByCommand.includes('this.getRemotePathSize(sftp, endpoint.path, progressId)')
 				&& remoteContentSizeByCommand.includes('progressId?: string')
 				&& remoteContentSizeByCommand.includes('this.getRemotePathSizeByCommand(endpoint, progressId)')

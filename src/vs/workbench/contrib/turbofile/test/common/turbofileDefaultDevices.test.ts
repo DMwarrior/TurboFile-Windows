@@ -7,12 +7,13 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import { DeferredPromise } from '../../../../../base/common/async.js';
-import { Emitter } from '../../../../../base/common/event.js';
+import { Emitter, Event } from '../../../../../base/common/event.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from '../../browser/turbofileDeviceStore.js';
 import { defaultTurboFileDeviceCapabilities, TurboFileDevice } from '../../common/turbofileTypes.js';
 
 class TestStorageService {
 	readonly values = new Map<string, string>();
+	onDidChangeValue(): Event<void> { return Event.None; }
 
 	get(key: string, _scope: unknown, fallbackValue: string): string {
 		return this.values.get(key) ?? fallbackValue;

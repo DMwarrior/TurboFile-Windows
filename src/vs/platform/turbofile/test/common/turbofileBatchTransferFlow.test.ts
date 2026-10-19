@@ -185,6 +185,51 @@ suite('TurboFileBatchTransferFlow', () => {
 		assert.deepStrictEqual(calls, ['attempt:direct', 'incomplete', 'attempt:relay']);
 	});
 
+	test('preserves the last concrete failure when every attempt fails', async () => {
+		const errors = attempts.map(attempt => new Error(`${attempt.protocol} ${attempt.route}: connect ETIMEDOUT`));
+		const events: string[] = [];
+		await assert.rejects(runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			runAttempt: async (_attempt, index) => { throw errors[index]; },
+			onAttemptError: (error, _attempt, nextAttempt) => events.push(`${error.message}:${nextAttempt ? 'fallback' : 'final'}`)
+		})), error => error === errors[errors.length - 1]);
+		assert.deepStrictEqual(events, errors.map((error, index) => `${error.message}:${index < errors.length - 1 ? 'fallback' : 'final'}`));
+	});
+
+	test('preserves partial progress when the last result is incomplete', async () => {
+		const incomplete = result(false, 'scp-relay', 1);
+		const actual = await runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			totalItems: 2,
+			runAttempt: async (_attempt, index) => index === attempts.length - 1 ? incomplete : undefined
+		}));
+		assert.strictEqual(actual, incomplete);
+	});
+
+	test('never cleans move sources when all attempts end in a partial transfer', async () => {
+		let cleanupCalls = 0;
+		const incomplete = result(false, 'scp-relay', 1);
+		const actual = await runTurboFileBatchTransferFlow(options({
+			totalItems: 2,
+			runAttempt: async () => incomplete,
+			cleanupSources: async () => { cleanupCalls++; return []; }
+		}));
+		assert.deepStrictEqual({ actual, cleanupCalls }, { actual: incomplete, cleanupCalls: 0 });
+	});
+
+	test('does not retry a canceled partial result even when its message lacks cancellation text', async () => {
+		const calls: string[] = [];
+		const canceled = { ...result(false, 'tar-direct', 0), canceled: true };
+		const actual = await runTurboFileBatchTransferFlow(options({
+			operation: 'copy',
+			runAttempt: async attempt => {
+				calls.push(`${attempt.protocol}:${attempt.route}`);
+				return canceled;
+			}
+		}));
+		assert.deepStrictEqual({ actual, calls }, { actual: canceled, calls: ['tar:direct'] });
+	});
+
 	test('defers typed direct batch errors until every concurrent worker settles', async () => {
 		const events: string[] = [];
 		const unavailableError = new TurboFileDirectUnavailableError([]);
