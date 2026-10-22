@@ -39,6 +39,8 @@ import { IEncryptionMainService } from '../../platform/encryption/common/encrypt
 import { EncryptionMainService } from '../../platform/encryption/electron-main/encryptionMainService.js';
 import { ITurboFileSshService } from '../../platform/turbofile/common/turbofile.js';
 import { TurboFileSshMainService } from '../../platform/turbofile/electron-main/turbofileSshMainService.js';
+import { ITurboFileJournalService, TURBOFILE_JOURNAL_CHANNEL } from '../../platform/turbofile/common/turbofileJournal.js';
+import { TurboFileJournalChannel } from '../../platform/turbofile/electron-main/turbofileJournalChannel.js';
 import { NativeParsedArgs } from '../../platform/environment/common/argv.js';
 import { IEnvironmentMainService } from '../../platform/environment/electron-main/environmentMainService.js';
 import { isLaunchedFromCli } from '../../platform/environment/node/argvHelper.js';
@@ -113,7 +115,7 @@ import { IExtensionsScannerService } from '../../platform/extensionManagement/co
 import { ExtensionsScannerService } from '../../platform/extensionManagement/node/extensionsScannerService.js';
 import { UserDataProfilesHandler } from '../../platform/userDataProfile/electron-main/userDataProfilesHandler.js';
 import { ProfileStorageChangesListenerChannel } from '../../platform/userDataProfile/electron-main/userDataProfileStorageIpc.js';
-import { Promises, RunOnceScheduler, runWhenGlobalIdle } from '../../base/common/async.js';
+import { Promises, raceTimeout, RunOnceScheduler, runWhenGlobalIdle } from '../../base/common/async.js';
 import { CancellationToken } from '../../base/common/cancellation.js';
 import { resolveMachineId, resolveSqmId, resolveDevDeviceId, validateDevDeviceId } from '../../platform/telemetry/electron-main/telemetryUtils.js';
 import { ExtensionsProfileScannerService } from '../../platform/extensionManagement/node/extensionsProfileScannerService.js';
@@ -143,6 +145,12 @@ import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetr
  * even if the user starts many instances (e.g. from the command line).
  */
 export class CodeApplication extends Disposable {
+	private turboFileJournalChannel: TurboFileJournalChannel | undefined;
+	private journalDrain: Promise<void> | undefined;
+
+	private drainTurboFileJournal(): Promise<void> {
+		return this.journalDrain ??= raceTimeout(this.turboFileJournalChannel?.drain() ?? Promise.resolve(), 1500).then(() => undefined, error => { this.logService.warn('[TurboFile journal] Shutdown flush failed', error); });
+	}
 
 	private static readonly SECURITY_PROTOCOL_HANDLING_CONFIRMATION_SETTING_KEY = {
 		[Schemas.file]: 'security.promptForLocalFileProtocolHandling' as const,
@@ -393,7 +401,10 @@ export class CodeApplication extends Disposable {
 	private registerListeners(): void {
 
 		// Dispose on shutdown
-		Event.once(this.lifecycleMainService.onWillShutdown)(() => this.dispose());
+		Event.once(this.lifecycleMainService.onWillShutdown)(e => {
+			// Keep IPC alive while the bounded operation-history queue is drained.
+			e.join('turbofileJournal', this.drainTurboFileJournal().finally(() => this.dispose()));
+		});
 
 		// Contextmenu via IPC support
 		registerContextMenuListener();
@@ -1017,6 +1028,7 @@ export class CodeApplication extends Disposable {
 
 	private setupSharedProcess(machineId: string, sqmId: string, devDeviceId: string): { sharedProcessReady: Promise<MessagePortClient>; sharedProcessClient: Promise<MessagePortClient> } {
 		const sharedProcess = this._register(this.mainInstantiationService.createInstance(SharedProcess, machineId, sqmId, devDeviceId));
+		sharedProcess.setShutdownBarrier(() => this.drainTurboFileJournal());
 
 		this._register(sharedProcess.onDidCrash(() => this.windowsMainService?.sendToFocused('vscode:reportSharedProcessCrash')));
 
@@ -1081,6 +1093,7 @@ export class CodeApplication extends Disposable {
 
 		// TurboFile
 		services.set(ITurboFileSshService, new SyncDescriptor(TurboFileSshMainService));
+		services.set(ITurboFileJournalService, ProxyChannel.toService(getDelayedChannel(sharedProcessReady.then(client => client.getChannel(TURBOFILE_JOURNAL_CHANNEL)))));
 
 		// Cross-app IPC
 		services.set(ICrossAppIPCService, new SyncDescriptor(CrossAppIPCService));
@@ -1274,7 +1287,8 @@ export class CodeApplication extends Disposable {
 
 		// TurboFile
 		const turboFileSshChannel = ProxyChannel.fromService(accessor.get(ITurboFileSshService), disposables);
-		mainProcessElectronServer.registerChannel('turbofile:ssh', turboFileSshChannel);
+		this.turboFileJournalChannel = disposables.add(new TurboFileJournalChannel(turboFileSshChannel, accessor.get(ITurboFileJournalService), this.logService));
+		mainProcessElectronServer.registerChannel('turbofile:ssh', this.turboFileJournalChannel);
 
 		// Signing
 		const signChannel = ProxyChannel.fromService(accessor.get(ISignService), disposables);

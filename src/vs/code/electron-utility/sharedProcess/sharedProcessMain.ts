@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { hostname, release } from 'os';
+import { raceTimeout } from '../../../base/common/async.js';
 import { MessagePortMain, MessageEvent } from '../../../base/parts/sandbox/node/electronTypes.js';
 import { toErrorMessage } from '../../../base/common/errorMessage.js';
 import { onUnexpectedError, setUnexpectedErrorHandler } from '../../../base/common/errors.js';
@@ -20,6 +21,8 @@ import { LogsDataCleaner } from './contrib/logsDataCleaner.js';
 import { UnusedWorkspaceStorageDataCleaner } from './contrib/storageDataCleaner.js';
 import { IChecksumService } from '../../../platform/checksum/common/checksumService.js';
 import { ChecksumService } from '../../../platform/checksum/node/checksumService.js';
+import { ITurboFileJournalService, TURBOFILE_JOURNAL_CHANNEL } from '../../../platform/turbofile/common/turbofileJournal.js';
+import { TurboFileJournalService } from '../../../platform/turbofile/node/turbofileJournalService.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { ConfigurationService } from '../../../platform/configuration/common/configurationService.js';
 import { IDiagnosticsService } from '../../../platform/diagnostics/common/diagnostics.js';
@@ -134,6 +137,7 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 	private readonly server = this._register(new UtilityProcessMessagePortServer(this));
 
 	private lifecycleService: SharedProcessLifecycleService | undefined = undefined;
+	private journalService: TurboFileJournalService | undefined;
 
 	private readonly onDidWindowConnectRaw = this._register(new Emitter<MessagePortMain>());
 
@@ -147,10 +151,10 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 
 		// Shared process lifecycle
 		let didExit = false;
-		const onExit = () => {
+		const onExit = async () => {
 			if (!didExit) {
 				didExit = true;
-
+				try { await raceTimeout(this.journalService?.close() ?? Promise.resolve(), 1500); } catch { /* History failures must not prevent shutdown. */ }
 				this.lifecycleService?.fireOnWillShutdown();
 				this.dispose();
 			}
@@ -283,6 +287,7 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 
 		// Checksum
 		services.set(IChecksumService, new SyncDescriptor(ChecksumService, undefined, false /* proxied to other processes */));
+		services.set(ITurboFileJournalService, new SyncDescriptor(TurboFileJournalService));
 
 		// V8 Inspect profiler
 		services.set(IV8InspectProfilingService, new SyncDescriptor(V8InspectProfilingService, undefined, false /* proxied to other processes */));
@@ -415,6 +420,8 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 		// Checksum
 		const checksumChannel = ProxyChannel.fromService(accessor.get(IChecksumService), this._store);
 		this.server.registerChannel('checksum', checksumChannel);
+		this.journalService = accessor.get(ITurboFileJournalService) as TurboFileJournalService;
+		this.server.registerChannel(TURBOFILE_JOURNAL_CHANNEL, ProxyChannel.fromService(this.journalService, this._store));
 
 		// Profiling
 		const profilingChannel = ProxyChannel.fromService(accessor.get(IV8InspectProfilingService), this._store);

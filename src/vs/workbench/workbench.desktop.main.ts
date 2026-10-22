@@ -58,6 +58,7 @@ import './services/encryption/electron-browser/encryptionService.js';
 import './services/imageResize/electron-browser/imageResizeService.js';
 import './services/secrets/electron-browser/secretStorageService.js';
 import './services/turbofile/electron-browser/turbofileSshService.js';
+import './services/turbofile/electron-browser/turbofileJournalService.js';
 import './services/localization/electron-browser/languagePackService.js';
 import './services/telemetry/electron-browser/telemetryService.js';
 import './services/extensions/electron-browser/extensionHostStarter.js';

@@ -6156,3 +6156,37 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-trash-pathbar > .codicon {
 	color: var(--vscode-charts-orange);
 }
+
+.turbofile-workbench .turbofile-devices-page,
+.turbofile-workbench .turbofile-journal {
+	box-sizing: border-box;
+	background: var(--turbofile-file-surface-final, var(--tf-file-surface, var(--vscode-editor-background)));
+	border-left: 1px solid var(--turbofile-pane-border, var(--vscode-panel-border));
+}
+.turbofile-journal > .turbofile-page-header { align-items: center; }
+.turbofile-journal-notice { color: var(--vscode-descriptionForeground); }
+.turbofile-journal-record {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 7px 16px;
+	padding: 14px 16px;
+	margin-bottom: 10px;
+	border: 1px solid var(--turbofile-pane-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, var(--turbofile-file-surface-final));
+	user-select: text;
+}
+.turbofile-journal-record.is-error { border-left: 3px solid var(--vscode-errorForeground); }
+.turbofile-journal-record.is-partial { border-left: 3px solid var(--vscode-editorWarning-foreground); }
+.turbofile-journal-record time { color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.turbofile-journal-path,
+.turbofile-journal-metrics,
+.turbofile-journal-error { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.turbofile-journal-metrics { color: var(--vscode-descriptionForeground); }
+.turbofile-journal-error { color: var(--vscode-errorForeground); white-space: pre-wrap; }
+.turbofile-journal-pager { display: flex; justify-content: center; gap: 12px; padding: 12px; }
+.turbofile-task-log-panel .turbofile-journal { overflow: auto; min-height: 0; padding: 14px; }
+
+@media (max-width: 650px) {
+	.turbofile-journal-record { grid-template-columns: minmax(0, 1fr); }
+}

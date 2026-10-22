@@ -26,6 +26,7 @@ import { getIconClasses } from '../../../../editor/common/services/getIconClasse
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITurboFileFileEntry, ITurboFileImageBatchEntry, ITurboFileImageResourceOptions, ITurboFileReadImageOptions, ITurboFileRemoteCapabilities, ITurboFileSshConnectionOptions, ITurboFileSshService, ITurboFileTransferAttempt, ITurboFileTransferEndpoint, ITurboFileTransferProgressEvent, ITurboFileTransferResult, ITurboFileTrashDevice, ITurboFileTrashItem, ITurboFileTrashOperationResult, ITurboFileWindowsDragItem, TurboFileFileType, TurboFileTransferDependency } from '../../../../platform/turbofile/common/turbofile.js';
+import { ITurboFileJournalService } from '../../../../platform/turbofile/common/turbofileJournal.js';
 import { withTurboFileTimeout } from '../../../../platform/turbofile/common/turbofileTimeout.js';
 import { resolveTransferPlan } from '../../../../platform/turbofile/common/turbofileTransferPlan.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -59,6 +60,7 @@ import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboF
 import { ILabelService } from '../../../../platform/label/common/label.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
+import { TurboFileJournalView } from './turbofileJournalView.js';
 import { applyTurboFileDocumentTabAffinity, ensureTurboFileTransferTabsLeft, getTurboFileDocumentTargetIndex } from './turbofileDocumentTabAffinity.js';
 import { getTurboFileRecycleBinIcon } from './turbofileRecycleBinIcons.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -923,6 +925,7 @@ export class TurboFileEditor extends EditorPane {
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IPathService private readonly pathService: IPathService,
 		@ITurboFileSshService private readonly sshService: ITurboFileSshService,
+		@ITurboFileJournalService private readonly journalService: ITurboFileJournalService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 		@IFileService private readonly fileService: IFileService,
 		@IModelService private readonly modelService: IModelService,
@@ -2226,7 +2229,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private renderDevicesPage(): HTMLElement {
-		const page = $('.turbofile-full-page');
+		const page = $('.turbofile-full-page.turbofile-devices-page');
 		page.appendChild(this.renderPageHeader(Codicon.server, '设备管理', localize('turbofile.devicesPageDescription', "拖动卡片调整设备顺序，可编辑、删除和测试连接。"), [
 			this.createPageButton(Codicon.refresh, '刷新设备', () => void this.refreshDevicesFromStore()),
 			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm())
@@ -3504,32 +3507,15 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private renderTasksPage(): HTMLElement {
-		const page = $('.turbofile-full-page');
-		const stats = this.getTaskStats();
-		page.appendChild(this.renderPageHeader(Codicon.history, '任务日志', '查看传输、删除、压缩、解压、终端和同步任务的执行记录。', [
-			this.createPageButton(Codicon.trash, '清空已完成', () => this.clearFinishedTasks()),
-			this.createPageButton(Codicon.remoteExplorer, '返回传输页', () => this.setActivePage('transfer'), true)
-		]));
+		return this.createJournalView(false);
+	}
 
-		const summary = $('.turbofile-task-summary-grid');
-		summary.appendChild(this.renderSummaryCard('运行中', String(stats.running), Codicon.sync));
-		summary.appendChild(this.renderSummaryCard('成功', String(stats.success), Codicon.pass));
-		summary.appendChild(this.renderSummaryCard('失败', String(stats.error), Codicon.error));
-		summary.appendChild(this.renderSummaryCard('取消', String(stats.canceled), Codicon.circleSlash));
-		page.appendChild(summary);
-
-		const list = $('.turbofile-task-log-list.is-page-list');
-		if (!this.tasks.length) {
-			const empty = $('.turbofile-task-log-empty');
-			empty.textContent = '暂无任务记录';
-			list.appendChild(empty);
-		} else {
-			for (const task of this.tasks) {
-				list.appendChild(this.renderTaskRow(task));
-			}
-		}
-		page.appendChild(list);
-		return page;
+	private createJournalView(compact: boolean): HTMLElement {
+		const view = this.renderDisposables.add(new TurboFileJournalView(this.journalService, {
+			compact,
+			back: () => this.setActivePage('transfer')
+		}));
+		return view.element;
 	}
 
 	private renderPageHeader(icon: ThemeIcon, title: string, subtitle: string, actions: HTMLElement[] = []): HTMLElement {
@@ -3551,18 +3537,6 @@ export class TurboFileEditor extends EditorPane {
 			header.appendChild(actionBar);
 		}
 		return header;
-	}
-
-	private renderSummaryCard(label: string, value: string, icon: ThemeIcon): HTMLElement {
-		const card = $('.turbofile-page-card.turbofile-summary-card');
-		const top = $('.turbofile-summary-card-top');
-		top.append(label);
-		top.appendChild(renderIcon(icon));
-		const number = $('strong');
-		number.textContent = value;
-		card.appendChild(top);
-		card.appendChild(number);
-		return card;
 	}
 
 	private renderInfoLine(label: string, value: string): HTMLElement {
@@ -5471,19 +5445,8 @@ export class TurboFileEditor extends EditorPane {
 		header.appendChild(title);
 		header.appendChild(close.element);
 
-		const list = $('.turbofile-task-log-list');
-		if (!this.tasks.length) {
-			const empty = $('.turbofile-task-log-empty');
-			empty.textContent = '暂无任务记录';
-			list.appendChild(empty);
-		} else {
-			for (const task of this.tasks) {
-				list.appendChild(this.renderTaskRow(task));
-			}
-		}
-
 		panel.appendChild(header);
-		panel.appendChild(list);
+		panel.appendChild(this.createJournalView(true));
 		overlay.appendChild(panel);
 		overlay.addEventListener('click', event => {
 			if (event.target === overlay) {

@@ -5,7 +5,7 @@
 
 import { IpcMainEvent, MessagePortMain } from 'electron';
 import { validatedIpcMain } from '../../../base/parts/ipc/electron-main/ipcMain.js';
-import { Barrier, DeferredPromise } from '../../../base/common/async.js';
+import { Barrier, DeferredPromise, raceTimeout } from '../../../base/common/async.js';
 import { Disposable, IDisposable } from '../../../base/common/lifecycle.js';
 import { IEnvironmentMainService } from '../../environment/electron-main/environmentMainService.js';
 import { ILifecycleMainService } from '../../lifecycle/electron-main/lifecycleMainService.js';
@@ -27,6 +27,7 @@ export class SharedProcess extends Disposable {
 
 	private utilityProcess: UtilityProcess | undefined = undefined;
 	private utilityProcessLogListener: IDisposable | undefined = undefined;
+	private shutdownBarrier: (() => Promise<void>) | undefined;
 
 	private readonly _onDidCrash = this._register(new Emitter<void>());
 	readonly onDidCrash = this._onDidCrash.event;
@@ -56,7 +57,7 @@ export class SharedProcess extends Disposable {
 		validatedIpcMain.on(SharedProcessRawConnection.request, (e, nonce: string) => this.onWindowConnection(e, nonce, SharedProcessRawConnection.response));
 
 		// Lifecycle
-		this._register(this.lifecycleMainService.onWillShutdown(() => this.onWillShutdown()));
+		this._register(this.lifecycleMainService.onWillShutdown(e => e.join('sharedProcess', this.onWillShutdown())));
 	}
 
 	private async onWindowConnection(e: IpcMainEvent, nonce: string, responseChannel: string): Promise<void> {
@@ -91,8 +92,13 @@ export class SharedProcess extends Disposable {
 		e.sender.postMessage(responseChannel, nonce, [port]);
 	}
 
-	private onWillShutdown(): void {
+	/** Allows a channel owner to drain queued IPC before the shared process is told to exit. */
+	setShutdownBarrier(barrier: () => Promise<void>): void { this.shutdownBarrier = barrier; }
+
+	private async onWillShutdown(): Promise<void> {
 		this.logService.trace('[SharedProcess] onWillShutdown');
+		try { await raceTimeout(this.shutdownBarrier?.() ?? Promise.resolve(), 1500); }
+		catch (error) { this.logService.warn('[SharedProcess] Shutdown barrier failed', error); }
 
 		this.utilityProcess?.postMessage(SharedProcessLifecycle.exit);
 		this.utilityProcess = undefined;
