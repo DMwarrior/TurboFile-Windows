@@ -92,6 +92,7 @@ try {
 			'windows-x64': {
 				url: `https://github.com/${githubRepository}/releases/download/${tag}/${installerName}`,
 				sha256: fullSha256,
+				size: statSync(installerPath).size,
 				parts: uploadedParts,
 			}
 		}

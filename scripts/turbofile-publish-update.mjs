@@ -5,7 +5,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
 
@@ -35,6 +35,12 @@ if (repositoryInfo.visibility !== 'PUBLIC') {
 
 const tag = `v${version}`;
 const sha256 = await sha256File(installerPath);
+const domesticManifestPath = resolve(process.env.TURBOFILE_UPDATE_DOMESTIC_MANIFEST ?? 'updater/update.json');
+const domesticManifest = JSON.parse(readFileSync(domesticManifestPath, 'utf8'));
+const domesticPlatform = domesticManifest.platforms?.['windows-x64'];
+if (domesticManifest.version !== version || domesticPlatform?.sha256 !== sha256 || !domesticPlatform.parts?.length || domesticPlatform.parts.some(part => !/^https:\/\/gitee\.com\//i.test(part.url) || !Number.isSafeInteger(part.size) || part.size <= 0 || !/^[a-f0-9]{64}$/i.test(part.sha256)) || domesticPlatform.parts.reduce((sum, part) => sum + part.size, 0) !== statSync(installerPath).size) {
+	throw new Error('Publish and anonymously verify the matching Gitee installer parts first; set TURBOFILE_UPDATE_DOMESTIC_MANIFEST to that generated manifest. GitHub-only update feeds are not permitted.');
+}
 const releaseNotes = notesPath && existsSync(notesPath)
 	? readFileSync(notesPath, 'utf8')
 	: `极速传 ${version} Windows x64 正式版本。\n\n安装包：${installerName}\n\nSHA-256：${sha256}`;
@@ -53,6 +59,8 @@ try {
 
 	ensureRelease(tag, `极速传 ${version}`, releaseNotesPath, true);
 	runGh(['release', 'upload', tag, installerPath, checksumPath, '--repo', repository, '--clobber']);
+	const release = JSON.parse(runGh(['api', `repos/${repository}/releases/tags/${tag}`], true));
+	const asset = release.assets.find(item => item.name === installerName);
 
 	const downloadUrl = `https://github.com/${repository}/releases/download/${tag}/${installerName}`;
 	const manifest = {
@@ -64,6 +72,9 @@ try {
 			'windows-x64': {
 				url: downloadUrl,
 				sha256,
+				size: statSync(installerPath).size,
+				parts: domesticPlatform.parts,
+				...(asset?.url ? { mirrors: [asset.url] } : {}),
 			},
 		},
 	};

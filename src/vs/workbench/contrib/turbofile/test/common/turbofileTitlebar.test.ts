@@ -36,7 +36,7 @@ suite('TurboFileTitlebar', () => {
 	test('keeps the TurboFile update button compact in the custom titlebar', () => {
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 
-		assert.ok(css.includes('min-width: 24px;'));
+		assert.ok(css.includes('min-width: 42px;'));
 		assert.ok(css.includes('.turbofile-update-hover-notes'));
 	});
 

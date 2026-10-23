@@ -40,6 +40,8 @@ export interface ITurboFileUserSetupAdminDisablementOptions {
 
 export interface ITurboFileUpdateManifestPlatform {
 	readonly url?: string;
+	readonly size?: number;
+	readonly mirrors?: readonly string[];
 	readonly sha256?: string;
 	readonly sha256hash?: string;
 	readonly signature?: string;
@@ -193,6 +195,12 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 		url: platform.url,
 		...(typeof manifest.notes === 'string' && manifest.notes ? { releaseNotes: manifest.notes.slice(0, 12000) } : {}),
 	};
+	if (typeof platform.size === 'number' && Number.isSafeInteger(platform.size) && platform.size > 0) {
+		update.size = platform.size;
+	}
+	if (Array.isArray(platform.mirrors)) {
+		update.mirrors = platform.mirrors.filter((url): url is string => typeof url === 'string' && /^https:\/\//i.test(url)).slice(0, 3);
+	}
 	if (parts.length) {
 		update.parts = parts;
 	}

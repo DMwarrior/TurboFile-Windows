@@ -1631,7 +1631,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
 		} else {
 			name = tabLabel.name;
 			namePrefix = options.showTabIndex && !suppressTabIndex ? `${this.toEditorIndex(tabIndex) + 1}: ` : undefined;
-			description = tabLabel.description || '';
+			const hidePathDescription = this.tabsContainer?.ownerDocument.body.classList.contains('turbofile-shell')
+				&& (suppressTabIndex || editor.resource?.scheme === 'file' || editor.resource?.scheme === 'turbofile-remote');
+			description = hidePathDescription ? '' : tabLabel.description || '';
 		}
 
 		if (tabLabel.ariaLabel) {

@@ -10,6 +10,14 @@ import { resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromMani
 import { UpdateType } from '../../common/update.js';
 
 suite('TurboFile GitHub Updates', () => {
+	test('preserves bounded fallback URLs and package size alongside domestic parts', () => {
+		const update = resolveTurboFileUpdateFromManifest({ version: '1.173.0', platforms: { 'windows-x64': {
+			url: 'https://github.com/backup', size: 100,
+			mirrors: ['file:///bad', 'https://api.github.com/asset'],
+			parts: [{ url: 'https://gitee.com/domestic', size: 100 }]
+		} } }, '1.172.0');
+		assert.deepStrictEqual({ size: update?.size, mirrors: update?.mirrors, firstPart: update?.parts?.[0].url }, { size: 100, mirrors: ['https://api.github.com/asset'], firstPart: 'https://gitee.com/domestic' });
+	});
 	test('resolves newer Windows installer from static manifest', () => {
 		const update = resolveTurboFileUpdateFromManifest({
 			version: '1.123.0',
@@ -109,8 +117,8 @@ suite('TurboFile GitHub Updates', () => {
 
 		assert.ok(downloadPackage.indexOf('downloadUpdateParts') < downloadPackage.indexOf('downloadSingleUpdatePackage'));
 		assert.ok(downloadPackage.includes('falling back to the complete package'));
-		assert.ok(downloadParts.includes('part.sha256hash'));
-		assert.ok(downloadParts.includes('part.size !== undefined && partBytes !== part.size'));
+		assert.ok(downloadParts.includes('sha256: part.sha256hash'));
+		assert.ok(downloadParts.includes('size: part.size'));
 		assert.ok(downloadParts.includes('await checksum(downloadPath, update.sha256hash)'));
 		assert.ok(downloadParts.includes("createWriteStream(downloadPath, { flags: index === 0 ? 'w' : 'a' })"));
 	});

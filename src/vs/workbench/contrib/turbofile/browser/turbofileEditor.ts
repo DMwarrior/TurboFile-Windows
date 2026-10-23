@@ -801,6 +801,8 @@ export class TurboFileEditor extends EditorPane {
 
 	private readonly renderDisposables = this._register(new DisposableStore());
 	private readonly titlebarUpdateDisposables = this._register(new DisposableStore());
+	private titlebarUpdateButton: HTMLButtonElement | undefined;
+	private titlebarUpdateHoverHeading: HTMLElement | undefined;
 	private container: HTMLElement | undefined;
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
@@ -2394,7 +2396,17 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private ensureTitlebarAppMenu(retry = 0): void {
-		if (!document.body.classList.contains('turbofile-shell')) {
+		if (!this.isEditorVisible || !document.body.classList.contains('turbofile-shell')) {
+			return;
+		}
+		const kind = getTurboFileTitlebarUpdateActionKind(this.updateService.state);
+		if (this.titlebarUpdateButton?.isConnected && this.titlebarUpdateButton.dataset.updateKind === kind && this.titlebarUpdateButton.dataset.updateVersion === this.getTitlebarUpdateVersionLabel()) {
+			const label = this.getTitlebarUpdateLabel(kind);
+			const caption = this.titlebarUpdateButton.querySelector('.turbofile-titlebar-update-label');
+			if (caption) { caption.textContent = label; }
+			const heading = `${this.getTitlebarUpdateTitle(kind)} · ${label}`;
+			this.titlebarUpdateButton.setAttribute('aria-label', heading);
+			if (this.titlebarUpdateHoverHeading) { this.titlebarUpdateHoverHeading.textContent = heading; }
 			return;
 		}
 		this.removeTitlebarAppMenu();
@@ -2420,6 +2432,8 @@ export class TurboFileEditor extends EditorPane {
 
 	private removeTitlebarAppMenu(): void {
 		this.titlebarUpdateDisposables.clear();
+		this.titlebarUpdateButton = undefined;
+		this.titlebarUpdateHoverHeading = undefined;
 		for (const menu of Array.from(document.querySelectorAll('.turbofile-titlebar-menu'))) {
 			menu.remove();
 		}
@@ -2776,18 +2790,22 @@ export class TurboFileEditor extends EditorPane {
 		const button = $('button.turbofile-titlebar-update-button') as HTMLButtonElement;
 		button.type = 'button';
 		button.classList.add(`turbofile-titlebar-update-button-${kind}`);
+		button.dataset.updateKind = kind;
+		this.titlebarUpdateButton = button;
 		const title = this.getTitlebarUpdateTitle(kind);
 		const label = this.getTitlebarUpdateLabel(kind);
 		button.setAttribute('aria-label', `${title} · ${label}`);
 		button.setAttribute('aria-disabled', String(!this.canRunTitlebarUpdateAction(kind)));
-		button.appendChild(renderIcon(kind === 'restart' ? Codicon.refresh : kind === 'install' ? Codicon.check : Codicon.download));
+		button.appendChild($('span.turbofile-titlebar-update-label', undefined, label));
 		const state = this.updateService.state;
 		const version = this.getTitlebarUpdateVersionLabel();
+		button.dataset.updateVersion = version;
 		const notes = 'update' in state ? state.update?.releaseNotes : undefined;
 		const knownRelease = turboFileReleaseNotes.find(release => release.version === version);
 		const summary = summarizeTurboFileReleaseNotes(notes) || knownRelease?.changes.map(change => `• ${change}`).join('\n') || localize('turbofile.updateNoNotes', "此版本未提供更新说明。");
 		const hover = $('.turbofile-update-hover');
-		hover.appendChild($('strong', undefined, `${title} · ${label}`));
+		this.titlebarUpdateHoverHeading = $('strong', undefined, `${title} · ${label}`);
+		hover.appendChild(this.titlebarUpdateHoverHeading);
 		hover.appendChild($('div.turbofile-update-hover-notes', undefined, summary));
 		this.titlebarUpdateDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), button, hover));
 		button.addEventListener('click', event => {
@@ -2855,7 +2873,7 @@ export class TurboFileEditor extends EditorPane {
 			return `${Math.max(0, Math.min(100, Math.floor((state.downloadedBytes / state.totalBytes) * 100)))}%`;
 		}
 
-		return '...';
+		return state.type === StateType.Downloading && state.downloadedBytes ? formatSize(state.downloadedBytes) : '0%';
 	}
 
 	private getTitlebarInstallProgressLabel(): string {
@@ -2864,7 +2882,7 @@ export class TurboFileEditor extends EditorPane {
 			return `${Math.max(0, Math.min(100, Math.floor((state.currentProgress / state.maxProgress) * 100)))}%`;
 		}
 
-		return '...';
+		return localize('turbofile.updatePreparing', "准备中");
 	}
 
 	private canRunTitlebarUpdateAction(kind: TurboFileTitlebarUpdateActionKind): boolean {

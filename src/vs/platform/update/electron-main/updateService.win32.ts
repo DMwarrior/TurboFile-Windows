@@ -35,6 +35,7 @@ import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate as shouldAutoInstallTurboFileSetupUpdatePolicy, shouldDisableWindowsUserSetupUpdatesAsAdmin } from '../common/turbofileUpdate.js';
+import { downloadTurboFileUpdateFile } from '../node/turbofileUpdateDownload.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
 
@@ -315,7 +316,7 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 				}
 
 				const startTime = Date.now();
-				this.setState(State.Downloading(update, explicit, this._overwrite, 0, undefined, startTime));
+				this.setState(State.Downloading(update, explicit, this._overwrite, 0, update.size, startTime));
 
 				return this.cleanup(update.version).then(() => {
 					return this.getUpdatePackagePath(update.version).then(updatePackagePath => {
@@ -580,37 +581,10 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		}
 
 		const downloadPath = `${updatePackagePath}.tmp`;
-		const context = await this.requestService.request({ url: update.url, callSite: 'updateService.win32.downloadTurboFileGitHubUpdate' }, CancellationToken.None);
-		if (context.res.statusCode && context.res.statusCode >= 400) {
-			throw new Error(`Complete update download returned HTTP ${context.res.statusCode}.`);
-		}
-
-		const contentLengthHeader = context.res.headers['content-length'];
-		const contentLength = typeof contentLengthHeader === 'string' ? contentLengthHeader : undefined;
-		const totalBytes = contentLength ? parseInt(contentLength, 10) : undefined;
-
-		let downloadedBytes = 0;
-		const progressDelayer = new Delayer<void>(500);
-		const progressStream = transform<VSBuffer, VSBuffer>(
-			context.stream,
-			{
-				data: data => {
-					downloadedBytes += data.byteLength;
-					progressDelayer.trigger(() => {
-						this.setState(State.Downloading(update, explicit, this._overwrite, downloadedBytes, totalBytes, startTime));
-					});
-					return data;
-				}
-			},
-			chunks => VSBuffer.concat(chunks)
-		);
-
-		await this.fileService.writeFile(URI.file(downloadPath), progressStream)
-			.finally(() => progressDelayer.dispose());
-
-		if (update.sha256hash) {
-			await checksum(downloadPath, update.sha256hash);
-		}
+		await downloadTurboFileUpdateFile(this.requestService, downloadPath, {
+			urls: [...(update.mirrors ?? []), update.url], size: update.size, sha256: update.sha256hash,
+			onProgress: (bytes, total) => this.setState(State.Downloading(update, explicit, this._overwrite, bytes, total, startTime))
+		});
 
 		await pfs.Promises.rename(downloadPath, updatePackagePath, false /* no retry */);
 		return updatePackagePath;
@@ -627,36 +601,18 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 			? parts.reduce((total, part) => total + (part.size ?? 0), 0)
 			: undefined;
 		let completedBytes = 0;
+		let complete = false;
 
 		try {
 			for (const [index, part] of parts.entries()) {
-				const context = await this.requestService.request({ url: part.url, callSite: 'updateService.win32.downloadTurboFileGiteeUpdatePart' }, CancellationToken.None);
-				if (context.res.statusCode && context.res.statusCode >= 400) {
-					throw new Error(`Update part ${index + 1} returned HTTP ${context.res.statusCode}.`);
-				}
-				const declaredSize = (part.size ?? Number(context.res.headers['content-length'] ?? 0)) || undefined;
 				let partBytes = 0;
-				const progressDelayer = new Delayer<void>(500);
-				const progressStream = transform<VSBuffer, VSBuffer>(
-					context.stream,
-					{
-						data: data => {
-							partBytes += data.byteLength;
-							progressDelayer.trigger(() => {
-								this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes + partBytes, totalBytes ?? (completedBytes + (declaredSize ?? 0)), startTime));
-							});
-							return data;
-						}
-					},
-					chunks => VSBuffer.concat(chunks)
-				);
-				await this.fileService.writeFile(URI.file(partPaths[index]), progressStream).finally(() => progressDelayer.dispose());
-				if (part.size !== undefined && partBytes !== part.size) {
-					throw new Error(`Update part ${index + 1} size mismatch (expected ${part.size}, actual ${partBytes}).`);
-				}
-				if (part.sha256hash) {
-					await checksum(partPaths[index], part.sha256hash);
-				}
+				await downloadTurboFileUpdateFile(this.requestService, partPaths[index], {
+					urls: [part.url], size: part.size, sha256: part.sha256hash,
+					onProgress: (bytes, total) => {
+						partBytes = bytes;
+						this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes + bytes, totalBytes ?? (parts.length === 1 ? total : undefined), startTime));
+					}
+				});
 				completedBytes += partBytes;
 				this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes, totalBytes, startTime));
 			}
@@ -668,9 +624,10 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 				await checksum(downloadPath, update.sha256hash);
 			}
 			await pfs.Promises.rename(downloadPath, updatePackagePath, false /* no retry */);
+			complete = true;
 			return updatePackagePath;
 		} finally {
-			await Promise.all(partPaths.map(partPath => this.unlink(partPath)));
+			if (complete) { await Promise.all(partPaths.map(partPath => this.unlink(partPath))); }
 		}
 	}
 
@@ -680,7 +637,7 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	private async cleanup(exceptVersion: string | null = null): Promise<void> {
-		const filter = exceptVersion ? (one: string) => !(new RegExp(`${this.productService.quality}-${exceptVersion}\\.exe$`).test(one)) : () => true;
+		const filter = exceptVersion ? (one: string) => !one.startsWith(`CodeSetup-${this.productService.quality}-${exceptVersion}.exe`) : () => true;
 
 		const cachePath = await this.cachePath;
 		const versions = await pfs.Promises.readdir(cachePath);

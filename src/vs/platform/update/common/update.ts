@@ -14,6 +14,9 @@ export interface IUpdate {
 	url?: string;
 	sha256hash?: string;
 	parts?: readonly IUpdatePart[];
+	size?: number;
+	/** Ordered complete-package mirrors, after domestic multipart downloads. */
+	mirrors?: readonly string[];
 	/** Plain release notes supplied by the update feed. */
 	releaseNotes?: string;
 }

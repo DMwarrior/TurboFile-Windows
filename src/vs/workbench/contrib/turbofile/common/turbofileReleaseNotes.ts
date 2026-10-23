@@ -8,6 +8,17 @@ import { localize } from '../../../../nls.js';
 /** Keep released versions here so the installed application can show its history offline. */
 export const turboFileReleaseNotes: readonly { readonly version: string; readonly date: string; readonly changes: readonly string[] }[] = [
 	{
+		version: '1.173.0',
+		date: '2026-10-23',
+		changes: [
+			localize('turbofile.release173.tabs', "同名文件标签仅显示文件名，不再追加长路径；完整路径仍可通过悬停查看。"),
+			localize('turbofile.release173.button', "恢复文字更新按钮，下载时持续显示真实百分比，保留悬停版本与更新内容。"),
+			localize('turbofile.release173.progress', "修复持续下载时进度被反复推迟刷新的问题，更新进度时保留按钮及悬停内容。"),
+			localize('turbofile.release173.download', "更新下载优先国内分片，增加断点续传、已完成分片复用、有限重试和停滞超时；仍执行大小与 SHA-256 校验。"),
+			localize('turbofile.release173.publish', "发布流程要求同版本国内安装包验证通过后再更新 GitHub 自动更新清单，防止误发仅含海外下载地址的版本。")
+		]
+	},
+	{
 		version: '1.172.0',
 		date: '2026-10-23',
 		changes: [
