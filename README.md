@@ -99,7 +99,7 @@ This design keeps fast paths fast without assuming every NAS or edge device expo
 
 ## Get started
 
-1. Use the [Gitee release](https://gitee.com/fkwarrior/TurboFile-Windows/releases/tag/v1.173.0) for China downloads: the provided PowerShell installer downloads, verifies and combines both parts. The [complete installer on GitHub](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe) is available as a fallback.
+1. Use the [Gitee release](https://gitee.com/fkwarrior/TurboFile-Windows/releases/tag/v1.173.0) for China downloads: the [revised PowerShell installer](https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/%E5%AE%89%E8%A3%85%E6%9E%81%E9%80%9F%E4%BC%A0-1.173.0-%E5%9B%BD%E5%86%85%E6%BA%90-r2.ps1) downloads, verifies and combines all four parts. The [complete installer on GitHub](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe) is available as a fallback.
 2. Install and launch TurboFile on Windows x64.
 3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
 4. Open endpoints in the left and right panes.
@@ -127,7 +127,7 @@ For the full upstream development prerequisites and platform notes, see the buil
 
 ## Project status
 
-- Current public release: **v1.173.0**
+- Current public release: **v1.173.0 (revised 2026-10-23)**
 - Current installer target: **Windows x64**
 - Primary branch: **`main`**
 - Issues and reproducible bug reports are welcome in [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues).

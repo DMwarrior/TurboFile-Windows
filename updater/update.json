@@ -1,27 +1,38 @@
 {
   "version": "1.173.0",
-  "name": "极速传 1.173.0",
-  "notes": "# 极速传 1.173.0\n\n- 修复同名文件标签追加长路径的问题，恢复只显示文件名，悬停仍可查看完整路径。\n- 恢复文字更新按钮，下载时显示实际百分比；服务器未提供总大小时显示已下载容量，避免只显示省略号。\n- 保留 1.172.0 的悬停更新内容与离线版本历史。\n- 修复持续下载时进度更新被反复推迟的问题，刷新进度时保留按钮和悬停内容。\n- 更新下载优先使用国内分片，增加断点续传、已完成分片复用、有限重试与停滞超时；网络恢复后减少重复下载。\n- 保留大小与 SHA-256 校验，以及应用原有代理配置；每次只使用一个更新下载连接。\n- 发布流程要求国内安装包验证通过后，再发布包含国内分片的更新清单；GitHub 作为备用源。\n\n这些修改仅作用于编辑器标签和应用更新下载，不调整 SSH/SFTP/SCP/Tar/Rsync 文件传输数据路径。\n",
-  "pub_date": "2026-10-23T05:49:22.410Z",
+  "revision": "r2",
+  "name": "极速传 1.173.0 修订版",
+  "notes": "# 极速传 1.173.0 修订版\n\n- 下载进度按真实字节每 250 毫秒刷新，显示一位小数；悬停可查看已下载和总容量。\n- 优先国内源，32 MiB 分片最多两路下载；取消时结束实际连接，保留校验、重试和已完成分片复用。\n- 修复安装和启动时强制关闭 Windows 桌面及资源管理器窗口的问题，拖拽扩展按版本隔离。\n- 同名文件标签仅显示文件名，恢复文字更新按钮，保留悬停版本说明和离线更新历史。\n- 复用已下载安装包前重新校验，避免同版本修订使用旧缓存。\n\n版本号保持 1.173.0。已安装旧 1.173.0 的用户请重新下载安装修订包。",
+  "pub_date": "2026-10-23T09:58:13.901Z",
   "platforms": {
     "windows-x64": {
       "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe",
-      "sha256": "3704ead852db85f5a384260ec4f8c7d030c2f8f5df4903cd6e226e321b72b826",
-      "size": 114525628,
+      "sha256": "46b2d28b4233226ea26056b665e36f10437eab55c4309c88d66a90404b5c0b69",
+      "size": 114520508,
       "parts": [
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe.part001",
-          "size": 94371840,
-          "sha256": "aced523cb4d6935d6ea4e43b498cba666993583425f642194243adbb1b72ead6"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part001",
+          "size": 33554432,
+          "sha256": "9df5d9afa809dc1e8ac192ccac76a02f469222e5126edb7690645ec35813fe29"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe.part002",
-          "size": 20153788,
-          "sha256": "48f35a16bcc50358bce7ff0ccc41e2aabf18c4173cb301e23ddeff2eb27f26c7"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part002",
+          "size": 33554432,
+          "sha256": "56f194e7476b3d861c3450c7109744c613f6e33be9730cf95bbbcfdf1322cd63"
+        },
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part003",
+          "size": 33554432,
+          "sha256": "14c10fe8b010fe0931ea686fe7ff2b3ed84b7e1dad7cb97214d6bdb79c1cc92e"
+        },
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part004",
+          "size": 13857212,
+          "sha256": "fe9765b43ad80ffd2655c7848149665cb68cee1cf0e49da7b5509cb7fc046f4b"
         }
       ],
       "mirrors": [
-        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/667939144"
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/668660999"
       ]
     }
   }

@@ -99,7 +99,7 @@
 
 ## 快速开始
 
-1. 优先从 [Gitee 国内发行版](https://gitee.com/fkwarrior/TurboFile-Windows/releases/tag/v1.173.0) 下载国内源安装脚本，脚本会下载两个分片、校验并合并安装包；也可从 [GitHub 备用源](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe) 下载完整安装包。
+1. 优先从 [Gitee 国内发行版](https://gitee.com/fkwarrior/TurboFile-Windows/releases/tag/v1.173.0) 下载[修订版国内源安装脚本](https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/%E5%AE%89%E8%A3%85%E6%9E%81%E9%80%9F%E4%BC%A0-1.173.0-%E5%9B%BD%E5%86%85%E6%BA%90-r2.ps1)，脚本会下载四个分片、校验并合并安装包；也可从 [GitHub 备用源](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe) 下载完整安装包。
 2. 在 Windows x64 上安装并启动极速传。
 3. 添加 SSH/NAS/边缘设备，或选择 Windows 本地磁盘。
 4. 在左右面板分别打开源端和目标端。
@@ -127,7 +127,7 @@ $env:VSCODE_SKIP_PRELAUNCH='1'
 
 ## 项目状态
 
-- 当前公开版本：**v1.173.0**
+- 当前公开版本：**v1.173.0（2026-10-23 修订版）**
 - 当前安装包平台：**Windows x64**
 - 唯一主分支：**`main`**
 - 欢迎通过 [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues) 提交可复现的问题和建议。
