@@ -1,24 +1,12 @@
 {
-  "version": "1.170.0",
-  "name": "极速传 1.170.0",
-  "notes": "极速传 1.170.0 Windows x64 用户版。\n\n速度、时间和已传输量统一每500ms同步刷新；首批数据、恢复及结束立即显示。修复同机复制、剪切、批量文件夹进度异常；按真实字节平滑显示速度，不增加目录总大小预扫描。优化SSH目录下载预连接，保留原传输通道、缓冲区和并发设置。修复进入无权限目录后无法返回；优化拖拽扩展升级，避免强制关闭Windows桌面进程。\n\nGitee国内分片更新，GitHub备用。\n\nSHA-256：99965ceb99f9cc2950c6c718b69a1539a2099218f789445d47e7d2fd84ea4bd2",
-  "pub_date": "2026-09-17T07:25:00.000Z",
+  "version": "1.172.0",
+  "name": "极速传 1.172.0",
+  "notes": "# 极速传 1.172.0\n\n发布日期：2026-10-23\n\n- 任务日志持久保存复制、传输和删除记录，关闭页面和重启后仍可查看；精简摘要、限制容量，恢复顶部状态统计。\n- 底部新增轻量设备监控，跟随当前面板显示 CPU、内存及当前目录所在磁盘的已用和总容量，固定数据区域以减少跳动。\n- 统一左侧栏宽度和设备图标，修复设备、日志页面底部留白；设备下拉列表充分利用可用高度。\n- 改善浅色模式文字和图标的可读性，恢复默认“新标签页”名称。\n- 安装器默认勾选创建桌面快捷方式。\n- “帮助”右侧改用更新图标，悬停显示可更新版本及主要改动；“帮助 → 更新日志”从本版本开始保留版本记录。\n- GitHub、Gitee 统一公开完整源码和安装包入口，不再分别维护源码仓库和展示仓库。\n\n设备监控使用独立采集连接、缓存和超时退避；本次更新入口仅复用已有更新检查结果。未增加传输数据路径中的日志或监控处理。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
+  "pub_date": "2026-10-23T03:00:46.311Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe",
-      "sha256": "99965ceb99f9cc2950c6c718b69a1539a2099218f789445d47e7d2fd84ea4bd2",
-      "parts": [
-        {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe.part001",
-          "size": 94371840,
-          "sha256": "49a08cd5fc44b300ff8a926a3bf180a891414605c47b70a0c2e2206295a21adb"
-        },
-        {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe.part002",
-          "size": 20121727,
-          "sha256": "650fb3be29dfbec38fe2733ee324dc234e82d1263183b134fc62d456c61858d3"
-        }
-      ]
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.172.0/TurboFileSetup-win32-x64-1.172.0.exe",
+      "sha256": "6087073865d3ef8c6b1dc8013997c1e19297f048091c645ffed8991af2a433a4"
     }
   }
 }
