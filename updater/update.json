@@ -1,12 +1,28 @@
 {
-  "version": "1.172.0",
-  "name": "极速传 1.172.0",
-  "notes": "# 极速传 1.172.0\n\n发布日期：2026-10-23\n\n- 任务日志持久保存复制、传输和删除记录，关闭页面和重启后仍可查看；精简摘要、限制容量，恢复顶部状态统计。\n- 底部新增轻量设备监控，跟随当前面板显示 CPU、内存及当前目录所在磁盘的已用和总容量，固定数据区域以减少跳动。\n- 统一左侧栏宽度和设备图标，修复设备、日志页面底部留白；设备下拉列表充分利用可用高度。\n- 改善浅色模式文字和图标的可读性，恢复默认“新标签页”名称。\n- 安装器默认勾选创建桌面快捷方式。\n- “帮助”右侧改用更新图标，悬停显示可更新版本及主要改动；“帮助 → 更新日志”从本版本开始保留版本记录。\n- GitHub、Gitee 统一公开完整源码和安装包入口，不再分别维护源码仓库和展示仓库。\n\n设备监控使用独立采集连接、缓存和超时退避；本次更新入口仅复用已有更新检查结果。未增加传输数据路径中的日志或监控处理。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
-  "pub_date": "2026-10-23T03:00:46.311Z",
+  "version": "1.173.0",
+  "name": "极速传 1.173.0",
+  "notes": "# 极速传 1.173.0\n\n- 修复同名文件标签追加长路径的问题，恢复只显示文件名，悬停仍可查看完整路径。\n- 恢复文字更新按钮，下载时显示实际百分比；服务器未提供总大小时显示已下载容量，避免只显示省略号。\n- 保留 1.172.0 的悬停更新内容与离线版本历史。\n- 修复持续下载时进度更新被反复推迟的问题，刷新进度时保留按钮和悬停内容。\n- 更新下载优先使用国内分片，增加断点续传、已完成分片复用、有限重试与停滞超时；网络恢复后减少重复下载。\n- 保留大小与 SHA-256 校验，以及应用原有代理配置；每次只使用一个更新下载连接。\n- 发布流程要求国内安装包验证通过后，再发布包含国内分片的更新清单；GitHub 作为备用源。\n\n这些修改仅作用于编辑器标签和应用更新下载，不调整 SSH/SFTP/SCP/Tar/Rsync 文件传输数据路径。\n",
+  "pub_date": "2026-10-23T05:49:22.410Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.172.0/TurboFileSetup-win32-x64-1.172.0.exe",
-      "sha256": "6087073865d3ef8c6b1dc8013997c1e19297f048091c645ffed8991af2a433a4"
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe",
+      "sha256": "3704ead852db85f5a384260ec4f8c7d030c2f8f5df4903cd6e226e321b72b826",
+      "size": 114525628,
+      "parts": [
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe.part001",
+          "size": 94371840,
+          "sha256": "aced523cb4d6935d6ea4e43b498cba666993583425f642194243adbb1b72ead6"
+        },
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe.part002",
+          "size": 20153788,
+          "sha256": "48f35a16bcc50358bce7ff0ccc41e2aabf18c4173cb301e23ddeff2eb27f26c7"
+        }
+      ],
+      "mirrors": [
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/667939144"
+      ]
     }
   }
 }

@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest"><strong>Download the latest Windows installer</strong></a>
+  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases/latest"><strong>Download from Gitee (China first)</strong></a> · <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest">GitHub fallback</a>
 </p>
 
 ![TurboFile dual-pane workspace](docs/assets/screenshots/turbofile-home.png)
@@ -99,7 +99,7 @@ This design keeps fast paths fast without assuming every NAS or edge device expo
 
 ## Get started
 
-1. Download [`TurboFileSetup-win32-x64-1.172.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.172.0/TurboFileSetup-win32-x64-1.172.0.exe).
+1. Use the [Gitee release](https://gitee.com/fkwarrior/TurboFile-Windows/releases/tag/v1.173.0) for China downloads: the provided PowerShell installer downloads, verifies and combines both parts. The [complete installer on GitHub](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe) is available as a fallback.
 2. Install and launch TurboFile on Windows x64.
 3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
 4. Open endpoints in the left and right panes.
@@ -109,7 +109,7 @@ The release page also contains a SHA-256 checksum for installer verification.
 
 ## Build from source
 
-Source code and installers are published together in [GitHub](https://github.com/DMwarrior/TurboFile-Windows) and mirrored to [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows). See the [1.172.0 release notes](docs/releases/1.172.0.md).
+Source code and installers are published together in [GitHub](https://github.com/DMwarrior/TurboFile-Windows) and mirrored to [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows). See the [1.173.0 release notes](docs/releases/1.173.0.md).
 
 TurboFile is based on Code - OSS and uses the repository's existing Node.js and VS Code build toolchain.
 
@@ -127,7 +127,7 @@ For the full upstream development prerequisites and platform notes, see the buil
 
 ## Project status
 
-- Current public release: **v1.172.0**
+- Current public release: **v1.173.0**
 - Current installer target: **Windows x64**
 - Primary branch: **`main`**
 - Issues and reproducible bug reports are welcome in [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues).
