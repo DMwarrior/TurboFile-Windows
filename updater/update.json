@@ -1,0 +1,24 @@
+{
+  "version": "1.170.0",
+  "name": "极速传 1.170.0",
+  "notes": "极速传 1.170.0 Windows x64 用户版。\n\n速度、时间和已传输量统一每500ms同步刷新；首批数据、恢复及结束立即显示。修复同机复制、剪切、批量文件夹进度异常；按真实字节平滑显示速度，不增加目录总大小预扫描。优化SSH目录下载预连接，保留原传输通道、缓冲区和并发设置。修复进入无权限目录后无法返回；优化拖拽扩展升级，避免强制关闭Windows桌面进程。\n\nGitee国内分片更新，GitHub备用。\n\nSHA-256：99965ceb99f9cc2950c6c718b69a1539a2099218f789445d47e7d2fd84ea4bd2",
+  "pub_date": "2026-09-17T07:25:00.000Z",
+  "platforms": {
+    "windows-x64": {
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe",
+      "sha256": "99965ceb99f9cc2950c6c718b69a1539a2099218f789445d47e7d2fd84ea4bd2",
+      "parts": [
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe.part001",
+          "size": 94371840,
+          "sha256": "49a08cd5fc44b300ff8a926a3bf180a891414605c47b70a0c2e2206295a21adb"
+        },
+        {
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.170.0/TurboFileSetup-win32-x64-1.170.0.exe.part002",
+          "size": 20121727,
+          "sha256": "650fb3be29dfbec38fe2733ee324dc234e82d1263183b134fc62d456c61858d3"
+        }
+      ]
+    }
+  }
+}

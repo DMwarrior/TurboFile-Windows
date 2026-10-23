@@ -8,6 +8,8 @@ import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { $, clearNode, Dimension, getWindow, IDomPosition } from '../../../../base/browser/dom.js';
 import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
 import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
+import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
+import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { decodeBase64, encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
@@ -61,6 +63,7 @@ import { ILabelService } from '../../../../platform/label/common/label.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
 import { TurboFileJournalView } from './turbofileJournalView.js';
+import { ITurboFileDeviceMonitorContext, TurboFileDeviceMonitorView } from './turbofileDeviceMonitorView.js';
 import { applyTurboFileDocumentTabAffinity, ensureTurboFileTransferTabsLeft, getTurboFileDocumentTargetIndex } from './turbofileDocumentTabAffinity.js';
 import { getTurboFileRecycleBinIcon } from './turbofileRecycleBinIcons.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
@@ -78,6 +81,7 @@ import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImage
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
 import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
+import { getTurboFileReleaseHistory, summarizeTurboFileReleaseNotes, turboFileReleaseNotes } from '../common/turbofileReleaseNotes.js';
 import { aggregateTurboFileTransferProgress, chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, isTurboFileTransferProgressQuiet, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, trimTurboFileTaskHistory, TurboFileTransferMetricsDisplay, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
@@ -796,6 +800,7 @@ export class TurboFileEditor extends EditorPane {
 	static readonly ID: string = TurboFileEditorInput.EDITOR_ID;
 
 	private readonly renderDisposables = this._register(new DisposableStore());
+	private readonly titlebarUpdateDisposables = this._register(new DisposableStore());
 	private container: HTMLElement | undefined;
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
@@ -852,6 +857,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly paneDeviceSnapshots = new Map<string, TurboFilePaneDeviceSnapshot>();
 	private activePage: TurboFileWorkbenchPage = 'transfer';
 	private activeFilePaneSide: 'left' | 'right' = 'left';
+	private deviceMonitorView: TurboFileDeviceMonitorView | undefined;
 	private isTaskLogVisible = false;
 	private localWindowsDevice: TurboFileDevice;
 	private readonly paneStates: Record<'left' | 'right', TurboFilePaneState>;
@@ -927,6 +933,7 @@ export class TurboFileEditor extends EditorPane {
 		@ITurboFileSshService private readonly sshService: ITurboFileSshService,
 		@ITurboFileJournalService private readonly journalService: ITurboFileJournalService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IHoverService private readonly hoverService: IHoverService,
 		@IFileService private readonly fileService: IFileService,
 		@IModelService private readonly modelService: IModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
@@ -988,6 +995,7 @@ export class TurboFileEditor extends EditorPane {
 		this.acquireEditorGroupClassReference();
 		this.container = $('.turbofile-workbench');
 		parent.appendChild(this.container);
+		this.deviceMonitorView = this._register(new TurboFileDeviceMonitorView(() => this.getDeviceMonitorContext(), this.container));
 		this.deviceStore = this._register(this.instantiationService.createInstance(TurboFileDeviceStore));
 		this._register(this.deviceStore.onDidChangeDeviceSecret(() => {
 			this.invalidatePreparedTransferPair();
@@ -1155,11 +1163,13 @@ export class TurboFileEditor extends EditorPane {
 		// The image-grid body width is derived from the viewport, so drop its cache on resize.
 		this.invalidateAllImageGridLayoutCaches();
 		this.schedulePaneSplitImageGridReflow();
+		this.layoutOpenDeviceSelectMenu();
 	}
 
 	override setVisible(visible: boolean): void {
 		super.setVisible(visible);
 		this.isEditorVisible = visible;
+		this.deviceMonitorView?.refresh();
 		this.syncGlobalEditorVisibility();
 		if (visible) {
 			void this.syncActiveTerminalForCurrentPage();
@@ -1255,6 +1265,7 @@ export class TurboFileEditor extends EditorPane {
 		this.registerWorkbenchKeyboardShortcuts();
 		this.registerWindowFileDropInterceptor();
 		this.ensureTitlebarChrome();
+		this.deviceMonitorView?.refresh();
 
 		const previewState = this.getActiveImageGridPreviewState();
 		if (previewState) {
@@ -1710,6 +1721,22 @@ export class TurboFileEditor extends EditorPane {
 
 	private setActiveFilePaneSide(side: 'left' | 'right'): void {
 		this.activeFilePaneSide = side;
+		this.deviceMonitorView?.refresh();
+	}
+
+	private getDeviceMonitorContext(): ITurboFileDeviceMonitorContext | undefined {
+		if (!this.isEditorVisible || this.activePage !== 'transfer' || !this.shouldShowTaskbar() || this.editorService.activeEditor !== this.currentInput) { return undefined; }
+		const side = this.activeFilePaneSide;
+		const state = this.paneStates[side];
+		const device = this.getDeviceById(state.deviceId);
+		if (!device) { return undefined; }
+		const path = state.path;
+		return {
+			key: `${side}:${device.id}:${device.host}:${device.port}:${device.username}:${path}`,
+			label: localize('turbofile.monitorDevice', "{0} · {1}", this.getSideLabel(side), device.name),
+			busy: this.tasks.some(task => task.kind === 'transfer' && task.status === 'running'),
+			read: async () => this.sshService.getDeviceMonitorSnapshot(await this.toTransferEndpoint(device, path))
+		};
 	}
 
 	private getClipboardShortcutKey(event: KeyboardEvent): string {
@@ -2392,6 +2419,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private removeTitlebarAppMenu(): void {
+		this.titlebarUpdateDisposables.clear();
 		for (const menu of Array.from(document.querySelectorAll('.turbofile-titlebar-menu'))) {
 			menu.remove();
 		}
@@ -2734,7 +2762,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private showReleaseNotes(): void {
-		this.showDialogInfo(localize('turbofile.releaseNotes', "更新日志"), localize('turbofile.releaseNotesMessage', "当前版本：{0}\n\n可在新版本安装包随附的更新说明中查看完整变更。", this.productService.version));
+		this.showDialogInfo(localize('turbofile.releaseNotes', "更新日志"), localize('turbofile.releaseNotesVersion', "当前版本：{0}", this.productService.version), getTurboFileReleaseHistory());
 	}
 
 	private async openThirdPartyNotices(): Promise<void> {
@@ -2749,11 +2777,19 @@ export class TurboFileEditor extends EditorPane {
 		button.type = 'button';
 		button.classList.add(`turbofile-titlebar-update-button-${kind}`);
 		const title = this.getTitlebarUpdateTitle(kind);
-		button.title = title;
-		button.setAttribute('aria-label', title);
-		button.disabled = !this.canRunTitlebarUpdateAction(kind);
 		const label = this.getTitlebarUpdateLabel(kind);
-		button.appendChild($('span.turbofile-titlebar-update-label', undefined, label));
+		button.setAttribute('aria-label', `${title} · ${label}`);
+		button.setAttribute('aria-disabled', String(!this.canRunTitlebarUpdateAction(kind)));
+		button.appendChild(renderIcon(kind === 'restart' ? Codicon.refresh : kind === 'install' ? Codicon.check : Codicon.download));
+		const state = this.updateService.state;
+		const version = this.getTitlebarUpdateVersionLabel();
+		const notes = 'update' in state ? state.update?.releaseNotes : undefined;
+		const knownRelease = turboFileReleaseNotes.find(release => release.version === version);
+		const summary = summarizeTurboFileReleaseNotes(notes) || knownRelease?.changes.map(change => `• ${change}`).join('\n') || localize('turbofile.updateNoNotes', "此版本未提供更新说明。");
+		const hover = $('.turbofile-update-hover');
+		hover.appendChild($('strong', undefined, `${title} · ${label}`));
+		hover.appendChild($('div.turbofile-update-hover-notes', undefined, summary));
+		this.titlebarUpdateDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), button, hover));
 		button.addEventListener('click', event => {
 			event.preventDefault();
 			event.stopPropagation();
@@ -2767,19 +2803,19 @@ export class TurboFileEditor extends EditorPane {
 	private getTitlebarUpdateTitle(kind: TurboFileTitlebarUpdateActionKind): string {
 		switch (kind) {
 			case 'checking':
-				return 'Checking for updates';
+				return localize('turbofile.updateChecking', "正在检查更新");
 			case 'download':
-				return 'Download update';
+				return localize('turbofile.updateAvailable', "有可用更新，点击下载");
 			case 'downloading':
-				return 'Downloading update';
+				return localize('turbofile.updateDownloading', "正在下载更新");
 			case 'install':
-				return 'Install update';
+				return localize('turbofile.updateInstall', "更新已下载，点击安装");
 			case 'installing':
-				return 'Installing update';
+				return localize('turbofile.updateInstalling', "正在安装更新");
 			case 'restart':
-				return 'Restart to update';
+				return localize('turbofile.updateRestart', "点击重启并更新");
 			default:
-				return 'Update';
+				return localize('turbofile.update', "更新");
 		}
 	}
 
@@ -2806,6 +2842,7 @@ export class TurboFileEditor extends EditorPane {
 			case StateType.Downloaded:
 			case StateType.Updating:
 			case StateType.Ready:
+			case StateType.Overwriting:
 				return update?.productVersion ?? update?.version ?? '';
 			default:
 				return '';
@@ -2980,7 +3017,6 @@ export class TurboFileEditor extends EditorPane {
 			}
 			this.beginDeviceOrderDrag(card, device, event);
 		});
-		card.classList.add(`is-tone-${this.getDeviceCardTone(device)}`);
 		const title = $('.turbofile-page-card-title');
 		title.appendChild(this.renderDevicePageIcon(device));
 		const titleText = $('span');
@@ -3036,15 +3072,6 @@ export class TurboFileEditor extends EditorPane {
 			default:
 				return '离线';
 		}
-	}
-
-	private getDeviceCardTone(device: TurboFileDevice): number {
-		const seed = `${device.host}:${device.port || 22}:${device.name}`;
-		let hash = 0;
-		for (let i = 0; i < seed.length; i++) {
-			hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-		}
-		return Math.abs(hash) % 6;
 	}
 
 	private getDeviceTransferProtocolLabel(device: TurboFileDevice): string {
@@ -3587,6 +3614,10 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
+	get needsNativeStatusBar(): boolean {
+		return this.activePage !== 'devices' && this.activePage !== 'tasks';
+	}
+
 	private setActivePage(page: TurboFileWorkbenchPage): void {
 		if (page !== this.activePage) {
 			this.closeDeviceSelect(undefined, false);
@@ -4108,6 +4139,7 @@ export class TurboFileEditor extends EditorPane {
 			button.setAttribute('aria-expanded', String(nextOpen));
 			if (nextOpen) {
 				this.pendingRenderAfterDeviceSelectClose = false;
+				this.layoutOpenDeviceSelectMenu();
 				const selected = menu.querySelector<HTMLElement>('.turbofile-device-select-option.is-selected') ?? menu.querySelector<HTMLElement>('.turbofile-device-select-option');
 				selected?.focus();
 			} else {
@@ -4129,6 +4161,7 @@ export class TurboFileEditor extends EditorPane {
 			}
 		});
 		const window = getWindow(select);
+		const handleWindowResize = () => this.layoutOpenDeviceSelectMenu();
 		const handleWindowClick = (event: MouseEvent) => {
 			if (!select.contains(event.target as Node | null)) {
 				this.closeDeviceSelect(side);
@@ -4143,12 +4176,25 @@ export class TurboFileEditor extends EditorPane {
 		};
 		window.addEventListener('click', handleWindowClick);
 		window.addEventListener('keydown', handleWindowKeydown);
+		window.addEventListener('resize', handleWindowResize);
 		this.renderDisposables.add({ dispose: () => window.removeEventListener('click', handleWindowClick) });
 		this.renderDisposables.add({ dispose: () => window.removeEventListener('keydown', handleWindowKeydown) });
+		this.renderDisposables.add({ dispose: () => window.removeEventListener('resize', handleWindowResize) });
 
 		select.appendChild(button);
 		select.appendChild(menu);
 		return select;
+	}
+
+	/** Use the space below the selector instead of imposing a fixed number of visible devices. */
+	private layoutOpenDeviceSelectMenu(): void {
+		if (!this.openDeviceSelectSide || !this.container) { return; }
+		const select = this.container.querySelector<HTMLElement>(`.turbofile-device-select[data-turbofile-side="${this.openDeviceSelectSide}"].is-open`);
+		const menu = select?.querySelector<HTMLElement>('.turbofile-device-select-menu');
+		const pane = select?.closest<HTMLElement>('.turbofile-pane');
+		if (!select || !menu || !pane) { return; }
+		const bottom = Math.min(getWindow(select).innerHeight, pane.getBoundingClientRect().bottom);
+		menu.style.maxHeight = `${Math.max(0, Math.floor(bottom - menu.getBoundingClientRect().top - 6))}px`;
 	}
 
 	private shouldDeferRenderForOpenDeviceSelect(): boolean {
@@ -5164,7 +5210,6 @@ export class TurboFileEditor extends EditorPane {
 		const runningTransfers = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
 		const runningTasks = this.tasks.filter(task => task.status === 'running');
 		const latest = this.tasks[0];
-		const stats = this.getTaskStats();
 		if (runningTransfers.length) {
 			taskbar.classList.add('has-live-transfer');
 		}
@@ -5193,8 +5238,6 @@ export class TurboFileEditor extends EditorPane {
 		taskbar.appendChild(progress);
 
 		const content = $('.turbofile-statusbar-content');
-		const left = $('.turbofile-statusbar-section.is-left');
-		left.appendChild(this.renderStatusbarItem(Codicon.history, `运行 ${stats.running} · 成功 ${stats.success} · 失败 ${stats.error} · 取消 ${stats.canceled}`));
 
 		const message = $('.turbofile-statusbar-message');
 		const title = $('.turbofile-statusbar-message-title');
@@ -5240,7 +5283,10 @@ export class TurboFileEditor extends EditorPane {
 			right.appendChild(this.renderStatusbarItem(Codicon.info, '任务日志'));
 		}
 
-		content.appendChild(left);
+		if (this.deviceMonitorView) {
+			content.classList.add('has-device-monitor');
+			content.appendChild(this.deviceMonitorView.element);
+		}
 		content.appendChild(message);
 		content.appendChild(right);
 		taskbar.appendChild(content);
@@ -6206,27 +6252,6 @@ export class TurboFileEditor extends EditorPane {
 				list.prepend(this.renderTaskRow(task));
 			}
 		}
-
-		if (this.activePage !== 'tasks') {
-			return;
-		}
-		const stats = this.getTaskStats();
-		const summaryValues = [stats.running, stats.success, stats.error, stats.canceled];
-		const summaryNumbers = this.container.querySelectorAll<HTMLElement>('.turbofile-task-summary-grid .turbofile-summary-card strong');
-		summaryNumbers.forEach((number, index) => {
-			const value = summaryValues[index];
-			if (value !== undefined) {
-				number.textContent = String(value);
-			}
-		});
-	}
-
-	private getTaskStats(): { running: number; success: number; error: number; canceled: number } {
-		const stats = { running: 0, success: 0, error: 0, canceled: 0 };
-		for (const task of this.tasks) {
-			stats[task.status]++;
-		}
-		return stats;
 	}
 
 	private formatTaskLine(task: TurboFileTask): string {
@@ -15927,12 +15952,9 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private renderDevicePageIcon(device: TurboFileDevice): HTMLElement {
-		if (!this.isWindowsDevice(device)) {
-			return renderIcon(Codicon.server);
-		}
-		const icon = $('span.turbofile-device-page-icon');
+		const icon = renderIcon(this.isWindowsDevice(device) ? Codicon.deviceDesktop : Codicon.server);
+		icon.classList.add('turbofile-device-page-icon');
 		icon.setAttribute('aria-hidden', 'true');
-		icon.appendChild(renderTurboFileDeviceMonitorIcon());
 		return icon;
 	}
 

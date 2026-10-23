@@ -32,6 +32,7 @@ suite('TurboFile GitHub Updates', () => {
 			productVersion: '1.123.0',
 			url: 'https://example.com/TurboFileSetup-win32-x64-1.123.0.exe',
 			sha256hash: 'fa2686f937f3fecb5bd430e33cd1ccf2df3bca6997930eb276f4915178279716',
+			releaseNotes: 'Fix updates',
 		});
 	});
 

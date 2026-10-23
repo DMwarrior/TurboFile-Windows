@@ -25,6 +25,7 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IEditorPaneRegistry, EditorPaneDescriptor } from '../../../browser/editor.js';
+import { ActivitybarPart } from '../../../browser/parts/activitybar/activitybarPart.js';
 import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
@@ -93,15 +94,11 @@ const TURBOFILE_ACTIVITY_ENTRIES: TurboFileActivityEntry[] = [
 
 const TURBOFILE_VISIBLE_ACTIVITY_ENTRIES = TURBOFILE_ACTIVITY_ENTRIES.filter(entry => entry.page !== 'settings');
 
-// Use the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54): requesting a narrower
-// size is clamped to 54, which would leave the nav/taskbar (pinned to the requested width) 6px
-// off from the file-browser boundary. Matching it keeps everything aligned when collapsed.
-const TURBOFILE_NAV_COLLAPSED_WIDTH = 54;
-const TURBOFILE_NAV_EXPANDED_WIDTH = 152;
+// Match VS Code's standard activity bar; the sidebar host permits the same minimum width.
+const TURBOFILE_NAV_WIDTH = ActivitybarPart.ACTIVITYBAR_WIDTH;
 
 let turboFileTransferPageSequence = 1;
 let turboFileActivePage: TurboFileWorkbenchPage = 'transfer';
-let turboFileNavigationExpanded = false;
 
 function createTurboFileTransferEditorInput(instantiationService: IInstantiationService): TurboFileEditorInput {
 	const ordinal = turboFileTransferPageSequence++;
@@ -219,6 +216,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		}));
 		this._register(turboFileWorkbenchBridge.onDidChangeActivePage(event => {
 			this.activePagesByInstanceId.set(event.instanceId, event.page);
+			this.syncStatusBarVisibility();
 			const activeInput = this.getActiveTurboFileEditorInput();
 			if (activeInput?.instanceId === event.instanceId) {
 				turboFileActivePage = event.page;
@@ -231,6 +229,7 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			this.activateTurboFileShell();
 			this.renderNavigation();
 		}));
+		this._register(this.editorService.onDidVisibleEditorsChange(() => this.syncStatusBarVisibility()));
 		this._register(this.editorService.onDidEditorsChange(event => {
 			if (event.event.kind !== GroupModelChangeKind.EDITOR_OPEN && event.event.kind !== GroupModelChangeKind.EDITOR_MOVE) {
 				return;
@@ -256,14 +255,19 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
 		}
-		// Keep the native statusbar layout slot visible even when an older TurboFile profile persisted
-		// `workbench.statusBar.visible: false`. The fixed taskbar occupies this exact 22px region; without
-		// the slot, the panel and xterm extend behind it and the terminal's last row is obscured.
-		if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window)) {
-			void this.configurationService.updateValue('workbench.statusBar.visible', true, ConfigurationTarget.MEMORY);
-		}
+		this.syncStatusBarVisibility();
 		this.resizeTurboFileSideBar();
 		this.layoutService.layout();
+	}
+
+	private syncStatusBarVisibility(): void {
+		const editors = this.editorService.visibleEditorPanes;
+		// Full device/log pages fill the window. Retain the native 22px slot whenever a transfer or
+		// document editor is visible, including another split group, so the taskbar never covers xterm.
+		const visible = !editors.length || editors.some(editor => !(editor instanceof TurboFileEditor) || editor.needsNativeStatusBar);
+		if (this.configurationService.getValue<boolean>('workbench.statusBar.visible') !== visible) {
+			void this.configurationService.updateValue('workbench.statusBar.visible', visible, ConfigurationTarget.MEMORY);
+		}
 	}
 
 	private async openTurboFilePage(page: TurboFileWorkbenchPage, _hideSideBar: boolean): Promise<void> {
@@ -318,9 +322,11 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	}
 
 	private resizeTurboFileSideBar(): void {
+		// Keep the native layout, navigation buttons and taskbar aligned to one width on every page.
+		document.body.style.setProperty('--turbofile-page-nav-width', `${TURBOFILE_NAV_WIDTH}px`);
 		const currentSize = this.layoutService.getSize(Parts.SIDEBAR_PART);
 		this.layoutService.setSize(Parts.SIDEBAR_PART, {
-			width: turboFileNavigationExpanded ? TURBOFILE_NAV_EXPANDED_WIDTH : TURBOFILE_NAV_COLLAPSED_WIDTH,
+			width: TURBOFILE_NAV_WIDTH,
 			height: currentSize.height
 		});
 	}
@@ -338,9 +344,6 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 
 		const nav = $('nav.turbofile-page-nav.turbofile-app-nav');
 		nav.setAttribute('aria-label', '极速传 页面导航');
-		if (turboFileNavigationExpanded) {
-			nav.classList.add('is-nav-expanded');
-		}
 
 		const activeInput = this.getActiveTurboFileEditorInput();
 		const activePage = activeInput ? this.activePagesByInstanceId.get(activeInput.instanceId) ?? 'transfer' : turboFileActivePage;
@@ -350,15 +353,13 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 		for (const entry of TURBOFILE_VISIBLE_ACTIVITY_ENTRIES) {
 			const button = $('button.turbofile-page-nav-item') as HTMLButtonElement;
 			button.type = 'button';
-			button.title = `打开${entry.title.value}`;
+			button.title = localize('turbofile.openPage', "打开{0}", entry.title.value);
+			button.setAttribute('aria-label', button.title);
 			if (activePage === entry.page) {
 				button.classList.add('is-active');
 				button.setAttribute('aria-current', 'page');
 			}
 			button.appendChild(renderIcon(entry.icon));
-			const label = $('span.turbofile-page-nav-label');
-			label.textContent = entry.title.value;
-			button.appendChild(label);
 			button.addEventListener('click', () => {
 				void this.openTurboFilePage(entry.page, false);
 			});
@@ -368,21 +369,6 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 			}
 		}
 		nav.appendChild(list);
-
-		const toggle = $('button.turbofile-page-nav-toggle') as HTMLButtonElement;
-		toggle.type = 'button';
-		toggle.title = turboFileNavigationExpanded ? '收起侧边栏' : '展开侧边栏';
-		toggle.appendChild(renderIcon(turboFileNavigationExpanded ? Codicon.chevronLeft : Codicon.chevronRight));
-		const toggleText = $('span.turbofile-page-nav-label');
-		toggleText.textContent = turboFileNavigationExpanded ? '收起侧边栏' : '展开侧边栏';
-		toggle.appendChild(toggleText);
-		toggle.addEventListener('click', () => {
-			turboFileNavigationExpanded = !turboFileNavigationExpanded;
-			this.resizeTurboFileSideBar();
-			this.layoutService.layout();
-			this.renderNavigation();
-		});
-		nav.appendChild(toggle);
 
 		sideBar.appendChild(nav);
 	}
@@ -401,11 +387,9 @@ class TurboFileStartupContribution extends Disposable implements IWorkbenchContr
 	private renderNewTransferButton(): HTMLButtonElement {
 		const button = $('button.turbofile-page-nav-item.turbofile-page-nav-new-transfer') as HTMLButtonElement;
 		button.type = 'button';
-		button.title = '新建传输页';
+		button.title = localize('turbofile.newTransferPage', "新建传输页");
+		button.setAttribute('aria-label', button.title);
 		button.appendChild(renderIcon(Codicon.add));
-		const label = $('span.turbofile-page-nav-label');
-		label.textContent = '新建传输';
-		button.appendChild(label);
 		button.addEventListener('click', () => {
 			void this.openNewTransferPage();
 		});

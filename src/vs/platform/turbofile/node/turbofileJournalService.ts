@@ -11,7 +11,7 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { dirname, join } from '../../../base/common/path.js';
 import { INativeEnvironmentService } from '../../environment/common/environment.js';
 import { ILogService } from '../../log/common/log.js';
-import { isTurboFileJournalKind, ITurboFileJournalPage, ITurboFileJournalQuery, ITurboFileJournalRecord, ITurboFileJournalService, ITurboFileJournalWrite, normalizeTurboFileJournalWrite, TurboFileJournalBuffer, TURBOFILE_JOURNAL_PAGE_SIZE, TURBOFILE_JOURNAL_RECORD_LIMIT } from '../common/turbofileJournal.js';
+import { isTurboFileJournalKind, ITurboFileJournalPage, ITurboFileJournalQuery, ITurboFileJournalRecord, ITurboFileJournalService, ITurboFileJournalWrite, normalizeTurboFileJournalWrite, TurboFileJournalBuffer, TurboFileJournalStatus, TURBOFILE_JOURNAL_PAGE_SIZE, TURBOFILE_JOURNAL_RECORD_LIMIT } from '../common/turbofileJournal.js';
 
 interface SummaryRow { seq: number; summary: string }
 
@@ -158,7 +158,10 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 				const db = await this.connect();
 				const before = Number.isFinite(query.before) ? query.before! : Number.MAX_SAFE_INTEGER;
 				const rows = await this.all<SummaryRow>(db, `SELECT seq,summary FROM operations WHERE seq<? ORDER BY seq DESC LIMIT ${TURBOFILE_JOURNAL_PAGE_SIZE + 1}`, [before]);
-				return { records: rows.slice(0, TURBOFILE_JOURNAL_PAGE_SIZE).map(row => JSON.parse(row.summary) as ITurboFileJournalRecord), next: rows.length > TURBOFILE_JOURNAL_PAGE_SIZE ? rows[TURBOFILE_JOURNAL_PAGE_SIZE - 1].seq : undefined, warning: this.warning };
+				const totals = await this.all<{ status: TurboFileJournalStatus; count: number }>(db, 'SELECT status,COUNT(*) AS count FROM operations GROUP BY status');
+				const counts: Record<TurboFileJournalStatus, number> = { running: 0, success: 0, partial: 0, error: 0, canceled: 0, interrupted: 0 };
+				for (const row of totals) { if (Object.hasOwn(counts, row.status)) { counts[row.status] = row.count; } }
+				return { records: rows.slice(0, TURBOFILE_JOURNAL_PAGE_SIZE).map(row => JSON.parse(row.summary) as ITurboFileJournalRecord), counts, next: rows.length > TURBOFILE_JOURNAL_PAGE_SIZE ? rows[TURBOFILE_JOURNAL_PAGE_SIZE - 1].seq : undefined, warning: this.warning };
 			} catch { return { records: [], warning: 'read-failed' }; }
 		});
 	}

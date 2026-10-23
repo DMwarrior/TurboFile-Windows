@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { State, StateType, UpdateType } from '../../../../../platform/update/common/update.js';
 import { getTurboFileTitlebarUpdateActionKind } from '../../common/turbofileTitlebar.js';
+import { getTurboFileReleaseHistory, summarizeTurboFileReleaseNotes } from '../../common/turbofileReleaseNotes.js';
 
 suite('TurboFileTitlebar', () => {
 	test('shows update button only when an update action is available', () => {
@@ -35,10 +36,8 @@ suite('TurboFileTitlebar', () => {
 	test('keeps the TurboFile update button compact in the custom titlebar', () => {
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 
-		assert.ok(css.includes('height: 20px;'));
-		assert.ok(css.includes('min-width: 42px;'));
-		assert.ok(css.includes('padding: 0 9px;'));
-		assert.ok(css.includes('font-size: 12px;'));
+		assert.ok(css.includes('min-width: 24px;'));
+		assert.ok(css.includes('.turbofile-update-hover-notes'));
 	});
 
 	test('places the TurboFile update button after Help and labels it with the target version', () => {
@@ -49,7 +48,17 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(helpMenuIndex >= 0);
 		assert.ok(updateButtonIndex > helpMenuIndex);
 		assert.ok(editor.includes('private getTitlebarUpdateVersionLabel(): string'));
-		assert.ok(editor.includes("return version ? `更新 ${version}` : '更新';"));
+		assert.ok(editor.includes('this.hoverService.setupManagedHover'));
+		assert.ok(editor.includes('this.titlebarUpdateDisposables.clear()'));
+	});
+
+	test('shows offline release history and bounds feed summaries without interpreting markup', () => {
+		assert.deepStrictEqual({
+			summary: summarizeTurboFileReleaseNotes('# 1.172.0\n\n- 改善更新入口\nSHA256: abc\n<script>alert(1)</script>\n末行', 3),
+			empty: summarizeTurboFileReleaseNotes(undefined),
+			bounded: summarizeTurboFileReleaseNotes('x'.repeat(20000)).length,
+			history: getTurboFileReleaseHistory().includes('1.172.0 · 2026-10-23')
+		}, { summary: '1.172.0\n• 改善更新入口\n<script>alert(1)</script>', empty: '', bounded: 241, history: true });
 	});
 
 	test('uses a short TurboFile update check interval while the app stays open', () => {
@@ -70,9 +79,10 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(editor.includes('const PANE_DIRECTORY_PREFETCH_CONCURRENCY = 3;'));
 	});
 
-	test('reserves the native statusbar slot without adding blank space to the transfer page', () => {
+	test('reserves the native statusbar for transfers while full device and log pages can fill the window', () => {
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 		const contribution = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofile.contribution.ts'), 'utf8');
+		const editor = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts'), 'utf8');
 		const activateShell = contribution.slice(contribution.indexOf('private activateTurboFileShell(): void'), contribution.indexOf('private async openTurboFilePage'));
 		const transferPage = css.slice(css.indexOf('.turbofile-transfer-page {'), css.indexOf('.turbofile-transfer-page.has-live-transfer {'));
 
@@ -82,15 +92,17 @@ suite('TurboFileTitlebar', () => {
 			transferPageHasDuplicateBottomSpace: transferPage.includes('padding-bottom:'),
 			patchesIntegratedTerminalPadding: css.includes('.part.panel.bottom .pane-body.integrated-terminal'),
 			hidesNativeStatusbar: activateShell.includes('setPartHidden(true, Parts.STATUSBAR_PART)'),
-			checksNativeStatusbarVisibility: activateShell.includes('if (!this.layoutService.isVisible(Parts.STATUSBAR_PART, window))'),
-			usesMemoryOnlyStatusbarOverride: activateShell.includes("this.configurationService.updateValue('workbench.statusBar.visible', true, ConfigurationTarget.MEMORY)")
+			checksVisibleEditorGroups: activateShell.includes('this.editorService.visibleEditorPanes') && activateShell.includes('editor.needsNativeStatusBar'),
+			releasesOnlyDeviceAndLogPages: editor.includes("return this.activePage !== 'devices' && this.activePage !== 'tasks';"),
+			usesMemoryOnlyStatusbarOverride: activateShell.includes("this.configurationService.updateValue('workbench.statusBar.visible', visible, ConfigurationTarget.MEMORY)")
 		}, {
 			hasNativeTaskbarHeight: true,
 			usesNativeTaskbarHeight: true,
 			transferPageHasDuplicateBottomSpace: false,
 			patchesIntegratedTerminalPadding: false,
 			hidesNativeStatusbar: false,
-			checksNativeStatusbarVisibility: true,
+			checksVisibleEditorGroups: true,
+			releasesOnlyDeviceAndLogPages: true,
 			usesMemoryOnlyStatusbarOverride: true
 		});
 	});

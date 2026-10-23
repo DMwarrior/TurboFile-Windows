@@ -11,6 +11,7 @@ export interface ITurboFileGitHubAsset {
 }
 
 export interface ITurboFileGitHubRelease {
+	readonly body?: string;
 	readonly tag_name?: string;
 	readonly name?: string;
 	readonly draft?: boolean;
@@ -157,6 +158,7 @@ export function resolveTurboFileUpdateFromGitHubRelease(release: ITurboFileGitHu
 		version,
 		productVersion: version,
 		url: asset.browser_download_url,
+		...(typeof release.body === 'string' && release.body ? { releaseNotes: release.body.slice(0, 12000) } : {}),
 	};
 }
 
@@ -189,6 +191,7 @@ export function resolveTurboFileUpdateFromManifest(manifest: ITurboFileUpdateMan
 		version,
 		productVersion: version,
 		url: platform.url,
+		...(typeof manifest.notes === 'string' && manifest.notes ? { releaseNotes: manifest.notes.slice(0, 12000) } : {}),
 	};
 	if (parts.length) {
 		update.parts = parts;

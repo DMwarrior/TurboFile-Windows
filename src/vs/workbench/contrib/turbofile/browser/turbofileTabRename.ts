@@ -16,7 +16,7 @@ export async function renameTurboFileEditorInput(
 	const currentTitle = input.getName();
 	const title = await quickInputService.input({
 		title: localize('turbofile.renameTab.title', '重命名标签页'),
-		prompt: localize('turbofile.renameTab.prompt', '留空将恢复为“新标签页”'),
+		prompt: localize('turbofile.renameTab.prompt', "留空将恢复为“新标签页”"),
 		value: currentTitle,
 		valueSelection: [0, currentTitle.length],
 		validateInput: async value => isTurboFileTabTitleTooLong(value)

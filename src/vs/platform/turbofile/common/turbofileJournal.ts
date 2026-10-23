@@ -41,6 +41,7 @@ export interface ITurboFileJournalWrite { readonly record: ITurboFileJournalReco
 export interface ITurboFileJournalQuery { readonly before?: number }
 export interface ITurboFileJournalPage {
 	readonly records: readonly ITurboFileJournalRecord[];
+	readonly counts?: Readonly<Record<TurboFileJournalStatus, number>>;
 	readonly next?: number;
 	readonly warning?: string;
 }

@@ -55,6 +55,17 @@ suite('TurboFile compact persistent journal', () => {
 		for (let index = 0; index < 123; index++) { await store.append(fixture(`file-${index}`)); }
 		const first = await store.query({}); const second = await store.query({ before: first.next }); const third = await store.query({ before: second.next });
 		assert.deepStrictEqual([[first.records.length, second.records.length, third.records.length], new Set([...first.records, ...second.records, ...third.records].map(record => record.id)).size, third.next], [[50, 50, 23], 123, undefined]);
+		assert.deepStrictEqual([first.counts?.success, second.counts?.success, third.counts?.success], [123, 123, 123]);
+	});
+
+	test('counts stored task states globally and replaces running counts with final results', async () => {
+		await store.query({});
+		for (const status of ['running', 'success', 'partial', 'error', 'canceled', 'interrupted'] as const) { await store.append(fixture(status, status)); }
+		assert.deepStrictEqual((await store.query({})).counts, { running: 1, success: 1, partial: 1, error: 1, canceled: 1, interrupted: 1 });
+		await store.append(fixture('running', 'success'));
+		assert.deepStrictEqual((await store.query({})).counts, { running: 0, success: 2, partial: 1, error: 1, canceled: 1, interrupted: 1 });
+		await store.close(); store.dispose(); store = createStore();
+		assert.strictEqual((await store.query({})).counts?.success, 2);
 	});
 
 	test('retains a short redacted failure reason', async () => {

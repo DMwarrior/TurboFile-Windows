@@ -5,6 +5,7 @@
 
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Event } from '../../../base/common/event.js';
+import { ITurboFileDeviceMonitorSnapshot } from './turbofileDeviceMonitor.js';
 
 export const ITurboFileSshService = createDecorator<ITurboFileSshService>('turboFileSshService');
 
@@ -13,6 +14,7 @@ export interface ITurboFileSshService {
 	onDynamicSshTerminalData(sessionId: string): Event<string>;
 	onDynamicSshTerminalExit(sessionId: string): Event<number | undefined>;
 	onDynamicTransferProgress(progressId: string): Event<ITurboFileTransferProgressEvent>;
+	getDeviceMonitorSnapshot(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileDeviceMonitorSnapshot>;
 	testConnection(options: ITurboFileSshConnectionOptions): Promise<ITurboFileSshConnectionResult>;
 	detectCapabilities(options: ITurboFileSshConnectionOptions): Promise<ITurboFileRemoteCapabilitiesResult>;
 	installTransferDependencies(options: ITurboFileSshConnectionOptions, packages: readonly TurboFileTransferDependency[]): Promise<ITurboFileDependencyInstallResult>;

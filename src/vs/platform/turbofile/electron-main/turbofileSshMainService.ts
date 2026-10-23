@@ -30,6 +30,8 @@ import { TurboFileKeyedGeneration } from '../common/turbofileKeyedGeneration.js'
 import { readTurboFileImageDimensions } from '../common/turbofileImageMetadata.js';
 import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetadataBatch.js';
 import { ITurboFilePreparedDirectRouteSnapshot, TurboFilePreparedDirectRouteCache } from '../common/turbofilePreparedDirectRouteCache.js';
+import { ITurboFileDeviceMonitorSnapshot } from '../common/turbofileDeviceMonitor.js';
+import { TurboFileDeviceMonitor } from '../node/turbofileDeviceMonitor.js';
 import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
 import { coordinateTurboFileDirectRouteProbe, TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS } from '../common/turbofileDirectRouteProbe.js';
 import { createTurboFileRsyncMappedGroups, createTurboFileRsyncSourceGroups } from '../common/turbofileRsyncBatchPlan.js';
@@ -661,6 +663,21 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	// channels free for directory/SFTP work) while still loading several images in parallel.
 	private imageReadActiveCount = 0;
 	private readonly imageReadWaiters: Array<() => void> = [];
+
+	private readonly deviceMonitor = new TurboFileDeviceMonitor(async (endpoint, created, canceled) => {
+		if (!endpoint.connection) { throw new Error('Monitor connection is missing.'); }
+		const result = await this.createConnectConfig(endpoint.connection);
+		if (!result.ok) { throw new Error(result.message); }
+		if (canceled()) { throw new Error('Monitor released.'); }
+		return this.connect({ ...result.config, readyTimeout: 3000 }, undefined, created, canceled);
+	}, quotePosixShellArg);
+
+	getDeviceMonitorSnapshot(endpoint: ITurboFileTransferEndpoint): Promise<ITurboFileDeviceMonitorSnapshot> {
+		const key = endpoint.kind === 'local' ? 'local' : endpoint.connection ? getDirectScpProbeConnectionKey(endpoint.connection) : '';
+		return key ? this.deviceMonitor.sample(key, endpoint) : Promise.resolve({ sampledAt: 0, unavailable: true });
+	}
+
+	dispose(): void { this.deviceMonitor.dispose(); }
 
 	constructor(@IStateService private readonly stateService: IStateService) {
 		this.restorePersistedDirectRoutes();

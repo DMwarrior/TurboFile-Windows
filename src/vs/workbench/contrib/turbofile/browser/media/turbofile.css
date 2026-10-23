@@ -81,14 +81,14 @@
 	--tf-surface: #ffffff;
 	--tf-surface-muted: #f7f7f7;
 	--tf-text: #1a1a1a;
-	--tf-text-muted: #616161;
-	--tf-text-weak: #8a8a8a;
+	--tf-text-muted: #4b5563;
+	--tf-text-weak: #616161;
 	--tf-brand-blue: #0078d4;
 	--tf-brand-blue-dark: #1a1a1a;
 	--tf-accent-yellow: #e1ff25;
 	--tf-accent-pink: #ff64da;
-	--tf-success: #22c55e;
-	--tf-danger: #ef4444;
+	--tf-success: #13795b;
+	--tf-danger: #b91c1c;
 	--tf-border: #e5e5e5;
 	--tf-card-shadow: none;
 	--tf-card-shadow-hover: none;
@@ -127,18 +127,9 @@ body.turbofile-theme-switching .turbofile-workbench * {
 }
 
 body.turbofile-shell {
-	/* Match the sidebar part's minimum width (sidebarPart.ts minimumWidth = 54). Requesting a
-	   narrower sidebar gets clamped to 54, so pinning the collapsed nav/taskbar to that same width
-	   keeps the nav, the expand/collapse toggle and the bottom taskbar aligned exactly with the
-	   file-browser (editor) boundary. */
-	--turbofile-page-nav-width: 54px;
 	/* Use VS Code's native 22px statusbar slot. The taskbar must not resize the integrated terminal
 	   pane because xterm calculates its rows from the unpadded panel height. */
 	--turbofile-taskbar-height: 22px;
-}
-
-body.turbofile-shell:has(.turbofile-page-nav.is-nav-expanded) {
-	--turbofile-page-nav-width: 152px;
 }
 
 .turbofile-editor-content {
@@ -373,27 +364,34 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	min-height: 0;
 	box-sizing: border-box;
 	display: grid;
-	grid-template-rows: minmax(0, 1fr) 24px;
+	grid-template-rows: minmax(0, 1fr);
 	border-right: 0;
 	background: var(--turbofile-unified-background);
 	overflow: hidden;
 }
 
 .turbofile-page-nav-list {
+	width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	align-content: start;
 	gap: 0;
 	padding: 0;
 	overflow: hidden;
 }
 
-.turbofile-page-nav-item,
-.turbofile-page-nav-toggle {
+.turbofile-page-nav-item {
 	width: 100%;
+	min-width: 0;
+	max-width: 100%;
 	height: 48px;
 	box-sizing: border-box;
 	display: flex;
 	align-items: center;
+	justify-content: center;
+	padding: 0;
 	gap: 10px;
 	border: 0;
 	border-radius: 0;
@@ -405,34 +403,13 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	opacity: 1;
 }
 
-/* Suppress the default blue focus outline on the side-nav buttons (incl. the expand/collapse
-   toggle) so clicking them does not leave a blue ring around the button. */
+/* Suppress the default blue focus outline so clicking side-nav buttons does not leave a ring. */
 .turbofile-page-nav-item:focus,
-.turbofile-page-nav-item:focus-visible,
-.turbofile-page-nav-toggle:focus,
-.turbofile-page-nav-toggle:focus-visible {
+.turbofile-page-nav-item:focus-visible {
 	outline: none !important;
 }
 
-.turbofile-page-nav-item {
-	justify-content: center;
-	padding: 0;
-}
-
-.turbofile-editor-shell.is-nav-expanded .turbofile-page-nav-item {
-	justify-content: flex-start;
-	padding: 0 12px;
-	height: 48px;
-}
-
-.turbofile-page-nav.is-nav-expanded .turbofile-page-nav-item {
-	justify-content: flex-start;
-	padding: 0 12px;
-	height: 48px;
-}
-
-.turbofile-page-nav-item:hover,
-.turbofile-page-nav-toggle:hover {
+.turbofile-page-nav-item:hover {
 	background: var(--vscode-list-hoverBackground);
 	color: color-mix(in srgb, var(--vscode-activityBar-inactiveForeground, var(--vscode-sideBar-foreground)) 88%, var(--vscode-activityBar-foreground, var(--vscode-foreground)));
 }
@@ -442,13 +419,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	box-shadow: inset 2px 0 0 var(--vscode-activityBar-activeBorder, var(--vscode-focusBorder));
 }
 
-.turbofile-page-nav.is-nav-expanded .turbofile-page-nav-item.is-active {
-	background: var(--vscode-list-hoverBackground);
-	color: var(--vscode-list-activeSelectionForeground);
-}
-
 .turbofile-page-nav-item .codicon,
-.turbofile-page-nav-toggle .codicon,
 .turbofile-nav-sun-icon {
 	flex: 0 0 24px;
 	color: var(--vscode-icon-foreground, currentColor);
@@ -459,8 +430,7 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 }
 
 .turbofile-page-nav-item:hover .codicon,
-.turbofile-page-nav-item:hover .turbofile-nav-sun-icon,
-.turbofile-page-nav-toggle:hover .codicon {
+.turbofile-page-nav-item:hover .turbofile-nav-sun-icon {
 	opacity: 0.9;
 }
 
@@ -479,44 +449,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	stroke-linecap: round;
 	stroke-linejoin: round;
 	stroke-width: 2;
-}
-
-.turbofile-page-nav-label {
-	min-width: 0;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	display: none;
-}
-
-.turbofile-editor-shell.is-nav-expanded .turbofile-page-nav-label {
-	display: inline;
-}
-
-.turbofile-page-nav.is-nav-expanded .turbofile-page-nav-label {
-	display: inline;
-}
-
-.turbofile-page-nav-toggle {
-	justify-content: center;
-	height: 24px;
-	border-top: 1px solid var(--vscode-panel-border);
-	border-radius: 0;
-	padding: 0;
-}
-
-.turbofile-editor-shell.is-nav-expanded .turbofile-page-nav-toggle {
-	justify-content: flex-start;
-	padding: 0 12px;
-	height: 24px;
-	color: var(--vscode-sideBar-foreground);
-}
-
-.turbofile-page-nav.is-nav-expanded .turbofile-page-nav-toggle {
-	justify-content: flex-start;
-	padding: 0 12px;
-	height: 24px;
-	color: var(--vscode-sideBar-foreground);
 }
 
 .turbofile-full-page {
@@ -690,11 +622,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	overflow: hidden;
 }
 
-.turbofile-device-page-card.is-tone-0 {
-	--turbofile-device-card-accent: #5b8dff;
-	--turbofile-device-card-accent-2: #44c7de;
-}
-
 .turbofile-device-page-card[draggable="true"] {
 	cursor: grab;
 }
@@ -735,31 +662,6 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	bottom: 0;
 }
 
-.turbofile-device-page-card.is-tone-1 {
-	--turbofile-device-card-accent: #16a085;
-	--turbofile-device-card-accent-2: #5ee0a0;
-}
-
-.turbofile-device-page-card.is-tone-2 {
-	--turbofile-device-card-accent: #8b74ff;
-	--turbofile-device-card-accent-2: #57a7ff;
-}
-
-.turbofile-device-page-card.is-tone-3 {
-	--turbofile-device-card-accent: #f0a545;
-	--turbofile-device-card-accent-2: #ffd166;
-}
-
-.turbofile-device-page-card.is-tone-4 {
-	--turbofile-device-card-accent: #39b5d8;
-	--turbofile-device-card-accent-2: #8fd8ff;
-}
-
-.turbofile-device-page-card.is-tone-5 {
-	--turbofile-device-card-accent: #d88545;
-	--turbofile-device-card-accent-2: #ffb26b;
-}
-
 .turbofile-device-page-card::before {
 	display: none;
 }
@@ -770,22 +672,15 @@ body.turbofile-shell.turbofile-main-editor-visible .monaco-workbench .part.title
 	flex-wrap: wrap;
 }
 
-.turbofile-device-page-card .turbofile-page-card-title .codicon,
-.turbofile-device-page-icon {
+.turbofile-device-page-card .turbofile-page-card-title .turbofile-device-page-icon {
+	flex: 0 0 36px;
 	width: 36px;
 	height: 36px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	border-radius: 9px;
-	color: #ffffff;
-	background: linear-gradient(135deg, var(--turbofile-device-card-accent, #6d78ff), var(--turbofile-device-card-accent-2, #3fb6d8));
-	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
-}
-
-.turbofile-device-page-icon {
-	color: inherit;
-	padding: 5px;
+	font-size: 24px;
+	color: var(--vscode-icon-foreground, var(--vscode-foreground));
 }
 
 .turbofile-device-page-card .turbofile-page-card-actions {
@@ -1268,12 +1163,10 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	top: 35px;
 	bottom: 0;
 	width: var(--turbofile-page-nav-width);
+	min-width: var(--turbofile-page-nav-width);
+	max-width: var(--turbofile-page-nav-width);
 	z-index: 20;
 	height: auto;
-}
-
-body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
-	width: var(--turbofile-page-nav-width);
 }
 
 .turbofile-route-nav {
@@ -1553,12 +1446,13 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 .turbofile-device-select-menu {
 	position: absolute;
+	box-sizing: border-box;
 	z-index: 50;
 	top: calc(100% + 3px);
 	left: 0;
 	right: 0;
 	display: none;
-	max-height: 280px;
+	max-height: calc(100vh - 100px);
 	padding: 4px 0;
 	border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
 	border-radius: 4px;
@@ -2376,7 +2270,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 	min-width: 0;
 	min-height: 0;
 	display: grid;
-	grid-template-columns: auto minmax(0, 1fr) auto;
+	grid-template-columns: minmax(0, 1fr) auto;
 	gap: 12px;
 	align-items: center;
 	padding: 0 8px;
@@ -2470,7 +2364,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav.is-nav-expanded {
 
 @media (max-width: 980px) {
 	.turbofile-statusbar-content {
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto;
 	}
 
 	.turbofile-statusbar-section.is-right .turbofile-statusbar-item:not(:first-child) {
@@ -4443,37 +4337,40 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .turbofile-titlebar-update-button {
-	height: 20px;
-	min-width: 42px;
-	padding: 0 9px;
+	height: 24px;
+	width: 24px;
+	min-width: 24px;
+	padding: 0;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 3px;
 	border-radius: 999px;
 	color: #ffffff;
-	background: #168bd8;
+	background: #3b82f6;
 }
 
 .turbofile-titlebar-update-button .codicon {
-	font-size: 12px;
+	font-size: 16px;
 	line-height: 1;
 }
 
 .turbofile-titlebar-update-button-checking,
 .turbofile-titlebar-update-button-downloading,
 .turbofile-titlebar-update-button-installing {
-	width: auto;
-	min-width: 42px;
-	padding: 0 9px;
 	cursor: default;
 }
 
-.turbofile-titlebar-update-label {
-	font-size: 12px;
-	font-weight: 600;
-	line-height: 20px;
-	white-space: nowrap;
+.turbofile-update-hover {
+	max-width: min(440px, calc(100vw - 32px));
+	padding: 6px 8px;
+	line-height: 1.6;
+}
+
+.turbofile-update-hover-notes {
+	margin-top: 6px;
+	white-space: pre-line;
+	overflow-wrap: anywhere;
 }
 
 .turbofile-titlebar-menu-button:hover,
@@ -4484,17 +4381,21 @@ body.turbofile-shell .turbofile-theme-toggle {
 
 .turbofile-titlebar-update-button:hover,
 .turbofile-titlebar-update-button:focus-visible {
-	background: #1f9ff2;
+	background: #5091fa;
 	box-shadow: none;
 }
 
-.turbofile-titlebar-update-button:disabled,
-.turbofile-titlebar-update-button:disabled:hover,
-.turbofile-titlebar-update-button:disabled:focus-visible {
-	background: #168bd8;
+.turbofile-titlebar-update-button[aria-disabled="true"] {
+	background: #3b82f6;
 	box-shadow: none;
 	color: #ffffff;
 	opacity: 0.88;
+}
+
+.turbofile-dialog-detail {
+	white-space: pre-wrap;
+	max-height: 55vh;
+	overflow-y: auto;
 }
 
 .turbofile-about-overlay {
@@ -4668,14 +4569,18 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .vs .turbofile-page-nav-item,
-.vs .turbofile-page-nav-toggle,
 .vs .turbofile-route-nav-item,
 .vs .turbofile-route-collapse {
-	color: var(--tf-text-muted);
+	color: var(--vscode-activityBar-inactiveForeground, var(--vscode-icon-foreground));
+}
+
+/* The shared dark-theme opacity makes neutral icons look washed out on the light rail. */
+.vs .turbofile-page-nav-item .codicon {
+	color: inherit;
+	opacity: 1;
 }
 
 .vs .turbofile-page-nav-item:hover,
-.vs .turbofile-page-nav-toggle:hover,
 .vs .turbofile-route-nav-item:hover,
 .vs .turbofile-route-collapse:hover {
 	color: var(--tf-brand-blue-dark);
@@ -4684,7 +4589,7 @@ body.turbofile-shell .turbofile-theme-toggle {
 
 .vs .turbofile-page-nav-item.is-active,
 .vs .turbofile-route-nav-item.is-active {
-	color: var(--tf-brand-blue-dark);
+	color: var(--vscode-activityBar-foreground, var(--vscode-foreground));
 	background: var(--tf-windows-selected-neutral, var(--tf-bg-secondary));
 }
 
@@ -4762,12 +4667,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 	bottom: 18px;
 	width: 3px;
 	background: var(--tf-brand-blue);
-}
-
-.vs .turbofile-device-page-card .turbofile-page-card-title .codicon {
-	color: var(--tf-brand-blue);
-	background: var(--tf-brand-soft);
-	box-shadow: none;
 }
 
 .vs .turbofile-device-card-status {
@@ -4863,6 +4762,48 @@ body.turbofile-shell .turbofile-theme-toggle {
 .vs .turbofile-primary-button {
 	color: #ffffff;
 	background: var(--tf-brand-blue);
+}
+
+/* Use darker semantic colors on white surfaces; retain the existing font metrics and dark palette. */
+.turbofile-workbench.is-turbofile-light .turbofile-text-primary,
+.turbofile-workbench.is-turbofile-light .turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy {
+	color: #1d4ed8;
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-text-success,
+.turbofile-workbench.is-turbofile-light .turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy {
+	color: var(--tf-success);
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-toolbar-button .turbofile-text-warning {
+	color: #8a5a00;
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-text-info {
+	color: #0e7490;
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-text-danger,
+.turbofile-workbench.is-turbofile-light .turbofile-drag-operation-button.is-move {
+	color: var(--tf-danger);
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-text-secondary,
+.turbofile-workbench.is-turbofile-light .turbofile-toolbar-button .codicon,
+.turbofile-workbench.is-turbofile-light .turbofile-file-meta,
+.turbofile-workbench.is-turbofile-light .turbofile-browser-item-count,
+.turbofile-workbench.is-turbofile-light .turbofile-summary-card-top,
+.turbofile-workbench.is-turbofile-light .turbofile-journal-record time,
+.turbofile-workbench.is-turbofile-light .turbofile-journal-metrics {
+	color: var(--tf-text-muted);
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-pathbar-primary {
+	--turbofile-path-color: #1d4ed8;
+}
+
+.turbofile-workbench.is-turbofile-light .turbofile-pathbar-success {
+	--turbofile-path-color: var(--tf-success);
 }
 
 .vs .turbofile-browser-toolbar,
@@ -5103,8 +5044,8 @@ body.turbofile-shell .turbofile-theme-toggle {
 	--tf-image-surface-muted: #f7f7f7;
 	--tf-image-border: #e5e5e5;
 	--tf-image-text: #1a1a1a;
-	--tf-image-muted: #616161;
-	--tf-image-subtle: #8a8a8a;
+	--tf-image-muted: #4b5563;
+	--tf-image-subtle: #616161;
 	--tf-image-brand: #0078d4;
 	--tf-image-hover-bg: #f0f0f0;
 	--tf-image-selected-bg: #e5f3ff;
@@ -6163,7 +6104,43 @@ body.turbofile-shell .turbofile-theme-toggle {
 	background: var(--turbofile-file-surface-final, var(--tf-file-surface, var(--vscode-editor-background)));
 	border-left: 1px solid var(--turbofile-pane-border, var(--vscode-panel-border));
 }
+
+.turbofile-statusbar-content.has-device-monitor:has(> .turbofile-device-monitor:not([hidden])) {
+	grid-template-columns: minmax(440px, 470px) minmax(0, 1fr) auto;
+}
+.turbofile-device-monitor {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 7em 12em 14.5em;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	border-right: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+	padding-right: 6px;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+	cursor: default;
+}
+.turbofile-device-monitor[hidden] { display: none; }
+.turbofile-device-monitor-metric { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.turbofile-device-monitor-metric > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.turbofile-device-monitor-metric > .codicon { width: 16px; font-size: 13px; flex-shrink: 0; }
+.turbofile-device-monitor-metric > svg { width: 16px; height: 14px; flex-shrink: 0; }
+.turbofile-device-monitor-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.turbofile-device-monitor.is-unavailable { opacity: 0.65; }
+.turbofile-device-monitor-disk.is-warning { color: var(--vscode-editorWarning-foreground); }
+.turbofile-device-monitor-disk.is-critical { color: var(--vscode-errorForeground); font-weight: 700; }
+@media (max-width: 1100px) {
+	.turbofile-statusbar-content.has-device-monitor:has(> .turbofile-device-monitor:not([hidden])) { grid-template-columns: minmax(300px, 330px) minmax(0, 1fr) auto; }
+	.turbofile-device-monitor { grid-template-columns: minmax(0, 1fr) 7em 14.5em; }
+	.turbofile-device-monitor-memory { display: none; }
+}
+@media (max-width: 699px) {
+	.turbofile-statusbar-content.has-device-monitor:has(> .turbofile-device-monitor:not([hidden])) { grid-template-columns: minmax(0, 1fr) auto; }
+	.turbofile-device-monitor { display: none; }
+}
+
 .turbofile-journal > .turbofile-page-header { align-items: center; }
+.turbofile-journal > .turbofile-task-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .turbofile-journal-notice { color: var(--vscode-descriptionForeground); }
 .turbofile-journal-record {
 	display: grid;
@@ -6188,5 +6165,6 @@ body.turbofile-shell .turbofile-theme-toggle {
 .turbofile-task-log-panel .turbofile-journal { overflow: auto; min-height: 0; padding: 14px; }
 
 @media (max-width: 650px) {
+	.turbofile-journal > .turbofile-task-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.turbofile-journal-record { grid-template-columns: minmax(0, 1fr); }
 }

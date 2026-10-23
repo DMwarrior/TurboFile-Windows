@@ -18,18 +18,7 @@ const apiBase = process.env.GITEE_API_URL ?? 'https://gitee.com/api/v5';
 const githubRepository = process.env.TURBOFILE_UPDATE_REPOSITORY ?? 'DMwarrior/TurboFile-Windows';
 const installerPath = resolve(process.argv[2] ?? process.env.TURBOFILE_UPDATE_INSTALLER ?? '');
 const notesPath = process.argv[3] ? resolve(process.argv[3]) : process.env.TURBOFILE_UPDATE_NOTES ? resolve(process.env.TURBOFILE_UPDATE_NOTES) : undefined;
-const publicPresentationFiles = [
-	'LICENSE.txt',
-	'ThirdPartyNotices.txt',
-	'docs/assets/performance-comparison-cn.svg',
-	'docs/assets/performance-comparison-en.svg',
-	'docs/assets/screenshots/device-manager.png',
-	'docs/assets/screenshots/dual-image-grid.png',
-	'docs/assets/screenshots/integrated-terminal.png',
-	'docs/assets/screenshots/remote-image-grid.png',
-	'docs/assets/screenshots/transfer-speed-114mbps.png',
-	'docs/assets/screenshots/turbofile-home.png',
-];
+
 
 if (!token) {
 	throw new Error('Missing GITEE_TOKEN');
@@ -52,7 +41,7 @@ if (repository.private || repository.public === false) {
 	throw new Error(`Gitee update repository must be public: ${owner}/${repo}`);
 }
 await ensureMainBranch(repository);
-await syncPublicRepositoryPresentation();
+// Source and documentation are synchronized by Git; publishing must not replace them.
 
 const tag = `v${version}`;
 const fullSha256 = await sha256File(installerPath);
@@ -110,7 +99,11 @@ try {
 
 	// This is intentionally the final mutation: clients never observe a manifest until every part is
 	// anonymously downloadable and all integrity metadata has been produced.
-	await putRepositoryFile('updater/update.json', `${JSON.stringify(manifest, null, 2)}\n`, `发布极速传 ${version} 更新清单`);
+	if (process.env.TURBOFILE_UPDATE_MANIFEST_OUTPUT) {
+		writeFileSync(resolve(process.env.TURBOFILE_UPDATE_MANIFEST_OUTPUT), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+	} else {
+		await putRepositoryFile('updater/update.json', `${JSON.stringify(manifest, null, 2)}\n`, `发布极速传 ${version} 更新清单`);
+	}
 
 	console.log(`Published TurboFile ${version} multipart update to https://gitee.com/${owner}/${repo}/releases/tag/${tag}`);
 	console.log(`Parts: ${uploadedParts.length} (maximum ${PART_BYTES} bytes each)`);
@@ -168,7 +161,7 @@ async function ensurePublicRepository() {
 		method: 'POST',
 		body: {
 			name: repo,
-			description: '极速传（TurboFile）— 面向 Windows、SSH、NAS 与边缘设备的高速双栏文件工作台。此公开仓库仅用于产品展示和软件更新。',
+			description: '极速传（TurboFile）— 面向 Windows、SSH、NAS 与边缘设备的高速双栏文件工作台。完整源码与安装包统一开源。',
 			private: false,
 			auto_init: true,
 			default_branch: 'main',
@@ -196,40 +189,6 @@ async function ensureMainBranch(repository) {
 			body: { name: repo, default_branch: 'main', private: false }
 		});
 	}
-}
-
-async function syncPublicRepositoryPresentation() {
-	const readmes = [
-		['README.md', createPublicReadme(readFileSync(resolve('README.md'), 'utf8'), false)],
-		['README_CN.md', createPublicReadme(readFileSync(resolve('README_CN.md'), 'utf8'), true)],
-	];
-	for (const [filePath, content] of readmes) {
-		await putRepositoryFile(filePath, content, `更新极速传 ${version} 产品介绍`);
-	}
-	for (const filePath of publicPresentationFiles) {
-		const absolutePath = resolve(filePath);
-		if (!existsSync(absolutePath)) {
-			throw new Error(`Public presentation file not found: ${absolutePath}`);
-		}
-		await putRepositoryFile(filePath.replace(/\\/g, '/'), readFileSync(absolutePath), `更新极速传 ${version} 产品展示资源`);
-	}
-}
-
-function createPublicReadme(source, chinese) {
-	const releasesUrl = `https://gitee.com/${owner}/${repo}/releases`;
-	const issuesUrl = `https://gitee.com/${owner}/${repo}/issues`;
-	let result = source
-		.replaceAll('https://github.com/DMwarrior/TurboFile-Windows/releases/latest', releasesUrl)
-		.replace(/https:\/\/github\.com\/DMwarrior\/TurboFile-Windows\/releases\/download\/v[^/]+\/TurboFileSetup-win32-x64-[^)]+\.exe/g, releasesUrl)
-		.replaceAll('https://github.com/DMwarrior/TurboFile-Windows/issues', issuesUrl)
-		.replace(/<a href="https:\/\/gitee\.com\/[^\"]+\/releases"><img alt="[^"]+" src="https:\/\/img\.shields\.io\/github\/v\/release\/DMwarrior\/TurboFile-Windows\?[^\"]+"><\/a>/g,
-			`<a href="${releasesUrl}"><img alt="${chinese ? '最新版本' : 'Latest release'}" src="https://img.shields.io/badge/version-${version}-2563eb?style=flat-square"></a>`)
-		.replace(/TurboFileSetup-win32-x64-\d+\.\d+\.\d+\.exe/g, `TurboFileSetup-win32-x64-${version}.exe`)
-		.replace(/v\d+\.\d+\.\d+/g, `v${version}`);
-	result = result.replace(chinese
-		? /\n## 从源码运行[\s\S]*?(?=\n## 项目状态)/
-		: /\n## Build from source[\s\S]*?(?=\n## Project status)/, '');
-	return `${result.trim()}\n`;
 }
 
 async function getOrCreateRelease(tagName, name, body) {

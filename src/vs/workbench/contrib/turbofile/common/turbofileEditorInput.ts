@@ -64,7 +64,7 @@ export class TurboFileEditorInput extends EditorInput implements IEditorCloseHan
 	}
 
 	override getName(): string {
-		return this.customTitle ?? localize('turbofile.newTab', '新标签页');
+		return this.customTitle ?? localize('turbofile.newTab', "新标签页");
 	}
 
 	override getTitle(_verbosity?: Verbosity): string {

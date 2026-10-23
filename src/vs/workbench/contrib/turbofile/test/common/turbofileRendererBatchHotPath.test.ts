@@ -115,7 +115,7 @@ suite('TurboFileRendererBatchHotPath', () => {
 		const finishTask = editor.slice(finishStart, editor.indexOf('private refreshVisibleTaskLogEntry', finishStart));
 		const normalizedFinishTask = finishTask.replace(/\r\n/g, '\n');
 		const refreshStart = editor.indexOf('private refreshVisibleTaskLogEntry');
-		const refreshVisibleTaskLogEntry = editor.slice(refreshStart, editor.indexOf('private getTaskStats', refreshStart));
+		const refreshVisibleTaskLogEntry = editor.slice(refreshStart, editor.indexOf('private formatTaskLine', refreshStart));
 
 		assert.ok(renderTaskRow.includes('row.dataset.taskId = String(task.id);'));
 		assert.ok(normalizedFinishTask.includes([
@@ -129,7 +129,7 @@ suite('TurboFileRendererBatchHotPath', () => {
 		assert.ok(refreshVisibleTaskLogEntry.includes("this.activePage !== 'tasks' && !this.isTaskLogVisible"));
 		assert.ok(refreshVisibleTaskLogEntry.includes("querySelectorAll<HTMLElement>('.turbofile-task-log-list')"));
 		assert.ok(refreshVisibleTaskLogEntry.includes('current.replaceWith(this.renderTaskRow(task));'));
-		assert.ok(refreshVisibleTaskLogEntry.includes("'.turbofile-task-summary-grid .turbofile-summary-card strong'"));
+		assert.ok(!refreshVisibleTaskLogEntry.includes('.turbofile-task-summary-grid'), 'page-local tasks must not overwrite the persistent journal totals');
 		assert.ok(!refreshVisibleTaskLogEntry.includes('this.render();'));
 	});
 

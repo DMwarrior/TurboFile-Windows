@@ -14,6 +14,8 @@ export interface IUpdate {
 	url?: string;
 	sha256hash?: string;
 	parts?: readonly IUpdatePart[];
+	/** Plain release notes supplied by the update feed. */
+	releaseNotes?: string;
 }
 
 export interface IUpdatePart {

@@ -93,7 +93,7 @@ interface IEditorHarness {
 function createHarness(): IEditorHarness {
 	const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 	const source = ts.createSourceFile(editorPath, fs.readFileSync(editorPath, 'utf8'), ts.ScriptTarget.Latest, true);
-	const names = new Set(['beginTask', 'finishTask', 'getTaskStats', 'renderTaskbar', 'renderStatusbarItem', 'refreshTaskbar', 'refreshTaskbarMetrics', 'updateTransferProgress', 'getLiveTransferAggregate', 'calculateTransferSpeed', 'resetTransferSpeedSample', 'appendTransferSpeedSample', 'getSmoothedTransferSpeed']);
+	const names = new Set(['beginTask', 'finishTask', 'renderTaskbar', 'renderStatusbarItem', 'refreshTaskbar', 'refreshTaskbarMetrics', 'updateTransferProgress', 'getLiveTransferAggregate', 'calculateTransferSpeed', 'resetTransferSpeedSample', 'appendTransferSpeedSample', 'getSmoothedTransferSpeed']);
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) {

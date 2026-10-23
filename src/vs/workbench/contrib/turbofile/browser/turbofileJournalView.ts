@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { $, addDisposableListener, EventType } from '../../../../base/browser/dom.js';
+import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { RunOnceScheduler } from '../../../../base/common/async.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { ITurboFileJournalPage, ITurboFileJournalRecord, ITurboFileJournalService, TurboFileJournalStatus } from '../../../../platform/turbofile/common/turbofileJournal.js';
@@ -35,6 +37,7 @@ export class TurboFileJournalView extends Disposable {
 	readonly element = $('.turbofile-full-page.turbofile-journal');
 	private readonly rows = $('.turbofile-journal-results');
 	private readonly notice = $('.turbofile-journal-notice');
+	private readonly summaryValues = new Map<TurboFileJournalStatus, HTMLElement>();
 	private readonly rowDisposables = this._register(new DisposableStore());
 	private readonly reloadScheduler = this._register(new RunOnceScheduler(() => { void this.load(); }, 300));
 	private before: number | undefined;
@@ -50,6 +53,17 @@ export class TurboFileJournalView extends Disposable {
 			const back = document.createElement('button'); back.type = 'button'; back.className = 'turbofile-page-button'; back.textContent = localize('journal.back', "返回传输页");
 			this._register(addDisposableListener(back, EventType.CLICK, options.back));
 			header.append(title, back); this.element.append(header);
+			const summary = $('.turbofile-task-summary-grid');
+			for (const [status, icon] of [['running', Codicon.sync], ['success', Codicon.pass], ['error', Codicon.error], ['canceled', Codicon.circleSlash]] as const) {
+				const card = $('.turbofile-page-card.turbofile-summary-card');
+				const top = $('.turbofile-summary-card-top');
+				const label = $('span'); label.textContent = statusLabel(status);
+				top.append(label, renderIcon(icon));
+				const value = $('strong'); value.textContent = '—';
+				if (status === 'error') { card.title = localize('journal.failureCount', "只统计失败任务；部分成功和结果未确认请查看每条日志。"); }
+				this.summaryValues.set(status, value); card.append(top, value); summary.append(card);
+			}
+			this.element.append(summary);
 		}
 		this.notice.hidden = true; this.notice.setAttribute('role', 'status');
 		this.element.append(this.notice, this.rows);
@@ -67,6 +81,9 @@ export class TurboFileJournalView extends Disposable {
 	}
 
 	private renderPage(page: ITurboFileJournalPage): void {
+		for (const [status, value] of this.summaryValues) {
+			value.textContent = page.counts ? String(page.counts[status]) : '—';
+		}
 		this.rowDisposables.clear(); this.rows.replaceChildren();
 		this.notice.hidden = !page.warning;
 		this.notice.textContent = page.warning ? localize('journal.incomplete', "部分日志未能保存，文件操作不受影响。") : '';
