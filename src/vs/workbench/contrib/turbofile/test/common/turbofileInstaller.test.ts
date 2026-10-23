@@ -8,14 +8,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 suite('TurboFile Windows Installer', () => {
-	test('lets Restart Manager replace the Explorer-loaded drag extension during user upgrades', () => {
+	test('keeps the desktop and File Explorer windows open while replacing a locked drag extension', () => {
 		const installer = fs.readFileSync(path.resolve(process.cwd(), 'build/win32/code.iss'), 'utf8');
 		const filters = installer.match(/^CloseApplicationsFilter=.*$/gm) ?? [];
 
 		assert.ok(installer.includes('CloseApplications=force'));
 		assert.ok(filters.length > 0);
-		assert.ok(filters.every(filter => filter.includes('explorer.exe')));
-		assert.match(installer, /drag-ext\\\*";[^\r\n]*Flags:[^\r\n]*restartreplace[^\r\n]*uninsrestartdelete/);
+		assert.ok(filters.every(filter => !filter.includes('explorer.exe') && !filter.includes('*.exe')));
+		assert.ok(!/taskkill[^\r\n]*explorer|Stop-Process[^\r\n]*explorer/i.test(installer));
+		assert.match(installer, /drag-ext\\\*"; DestDir: "\{app\}\\shell\\drag-ext\\\{#Version\}";[^\r\n]*Flags:[^\r\n]*onlyifdoesntexist[^\r\n]*uninsrestartdelete/);
 	});
 
 	test('migrates the opposite install scope and repairs shortcuts after upgrades', () => {

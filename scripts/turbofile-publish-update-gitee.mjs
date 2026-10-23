@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
 
 const INSTALLER_PATTERN = /^TurboFileSetup-win32-x64-(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.exe$/i;
-const PART_BYTES = 90 * 1024 * 1024;
+const PART_BYTES = 32 * 1024 * 1024;
 const token = process.env.GITEE_TOKEN;
 const owner = process.env.GITEE_OWNER ?? 'fkwarrior';
 const repo = process.env.GITEE_REPO ?? 'TurboFile-Windows';

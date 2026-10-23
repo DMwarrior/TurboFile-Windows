@@ -51,6 +51,11 @@ export interface IRequestOptions {
 	 */
 	disableCache?: boolean;
 	/**
+	 * Preserve native response backpressure and cancellation until the body is
+	 * consumed. Intended for large downloads through the native request service.
+	 */
+	streamResponse?: boolean;
+	/**
 	 * Identifies the call site making this request, used for telemetry.
 	 * Use "NO_FETCH_TELEMETRY" to opt out of request telemetry.
 	 */

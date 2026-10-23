@@ -29,6 +29,24 @@ suite('TurboFileSshMainServiceStatic', () => {
 	const servicePath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 	const batchTransferFlowPath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/common/turbofileBatchTransferFlow.ts');
 
+	test('registers Windows drag support without terminating or relaunching the shell', () => {
+		const service = fs.readFileSync(servicePath(), 'utf8');
+		const registration = methodBlock(service, 'private async registerWindowsDragCopyHook', 'private resolveWindowsDragCopyHookDllPath');
+		const resolution = methodBlock(service, 'private resolveWindowsDragCopyHookDllPath', 'async readFile');
+
+		assert.deepStrictEqual({
+			notifiesShell: registration.includes('createWindowsShellAssociationChangedScript()'),
+			usesInstalledVersion: resolution.includes("join(dirname(app.getPath('exe')), 'shell', 'drag-ext', app.getVersion(), 'x64', 'TurboFileDragExt.dll')"),
+			terminatesShell: /(?:taskkill|Stop-Process)[^\r\n]*explorer/i.test(service),
+			restartsShell: service.includes('restartWindowsExplorer') || service.includes('Start-Process explorer.exe')
+		}, {
+			notifiesShell: true,
+			usesInstalledVersion: true,
+			terminatesShell: false,
+			restartsShell: false
+		});
+	});
+
 	test('keeps remote directory retries and cache generations safe', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const listCoreIndex = service.indexOf('private async listRemoteDirectoryCore');

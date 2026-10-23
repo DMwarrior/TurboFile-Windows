@@ -5,9 +5,10 @@
 
 import type * as http from 'http';
 import type * as https from 'https';
+import { Transform } from 'stream';
 import { parse as parseUrl } from 'url';
 import { Promises, timeout } from '../../../base/common/async.js';
-import { streamToBufferReadableStream } from '../../../base/common/buffer.js';
+import { streamToBufferReadableStream, VSBuffer } from '../../../base/common/buffer.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { CancellationError, getErrorMessage } from '../../../base/common/errors.js';
 import * as streams from '../../../base/common/stream.js';
@@ -172,6 +173,26 @@ async function getNodeRequest(options: IRequestOptions): Promise<IRawRequestFunc
 	return module.request;
 }
 
+/** Preserve native flow control while retaining errors until the consumer subscribes. */
+function nativeDownloadStream(source: Transform): streams.ReadableStream<VSBuffer> {
+	let destroyed = false;
+	let emittedError: Error | undefined;
+	source.on('error', error => { emittedError = error; });
+	return {
+		on(event: 'data' | 'error' | 'end', callback: ((data: VSBuffer) => void) | ((error: Error) => void) | (() => void)): void {
+			source.on(event, callback);
+			if (event === 'error' && emittedError) {
+				const error = emittedError;
+				queueMicrotask(() => { if (!destroyed && source.listeners(event).includes(callback)) { (callback as (error: Error) => void)(error); } });
+			}
+		},
+		pause: () => { source.pause(); },
+		resume: () => { source.resume(); },
+		destroy: () => { destroyed = true; source.destroy(); },
+		removeListener: (event, callback) => { source.removeListener(event, callback as () => void); }
+	};
+}
+
 export async function nodeRequest(options: NodeRequestOptions, token: CancellationToken): Promise<IRequestContext> {
 	const maxRetries = 3;
 	let lastError: Error | undefined;
@@ -223,16 +244,18 @@ async function nodeRequestAttempt(options: NodeRequestOptions, token: Cancellati
 			opts.cache = 'no-store';
 		}
 
+		let responseStream: Transform | undefined;
 		const req = rawRequest(opts, (res: http.IncomingMessage) => {
 			const followRedirects: number = isNumber(options.followRedirects) ? options.followRedirects : 3;
 			if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && followRedirects > 0 && res.headers['location']) {
+				if (options.streamResponse) { res.resume(); }
 				nodeRequest({
 					...options,
 					url: res.headers['location'],
 					followRedirects: followRedirects - 1
 				}, token).then(resolve, reject);
 			} else {
-				let stream: streams.ReadableStreamEvents<Uint8Array> = res;
+				let stream: http.IncomingMessage | ReturnType<typeof createGunzip> = res;
 
 				// Responses from Electron net module should be treated as response
 				// from browser, which will apply gzip filter and decompress the response
@@ -243,11 +266,35 @@ async function nodeRequestAttempt(options: NodeRequestOptions, token: Cancellati
 					stream = res.pipe(createGunzip());
 				}
 
-				resolve({ res, stream: streamToBufferReadableStream(stream) } satisfies IRequestContext);
+				if (options.streamResponse) {
+					// Electron's IncomingMessage is a Node Readable too. A bounded native
+					// transform keeps pause/resume connected to the actual response body.
+					const downloadStream = responseStream = new Transform({
+						readableObjectMode: true,
+						readableHighWaterMark: 1,
+						writableHighWaterMark: 256 * 1024,
+						transform: (chunk: Uint8Array, _encoding, callback) => callback(null, VSBuffer.wrap(chunk))
+					});
+					let responseEnded = false;
+					res.once('end', () => { responseEnded = true; });
+					res.once('aborted', () => downloadStream.destroy(new Error('Response body aborted')));
+					res.once('error', error => downloadStream.destroy(error));
+					if (stream !== res) { stream.once('error', error => downloadStream.destroy(error)); }
+					downloadStream.once('end', () => cancellationListener.dispose());
+					downloadStream.once('close', () => {
+						cancellationListener.dispose();
+						stream.destroy();
+						if (!responseEnded) { req.abort(); }
+					});
+					stream.pipe(downloadStream);
+					resolve({ res, stream: nativeDownloadStream(downloadStream) } satisfies IRequestContext);
+				} else {
+					resolve({ res, stream: streamToBufferReadableStream(stream) } satisfies IRequestContext);
+				}
 			}
 		});
 
-		req.on('error', reject);
+		req.on('error', error => { responseStream?.destroy(error); reject(error); });
 
 		// Handle timeout
 		if (options.timeout) {
@@ -285,12 +332,14 @@ async function nodeRequestAttempt(options: NodeRequestOptions, token: Cancellati
 
 		const cancellationListener = token.onCancellationRequested(() => {
 			cancellationListener.dispose();
+			responseStream?.destroy(new CancellationError());
 			req.abort();
 
 			reject(new CancellationError());
 		});
 
-		req.on('response', () => cancellationListener.dispose());
+		if (!options.streamResponse) { req.on('response', () => cancellationListener.dispose()); }
+		if (options.streamResponse) { req.on('close', () => cancellationListener.dispose()); }
 		req.on('error', () => cancellationListener.dispose());
 	});
 }

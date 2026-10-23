@@ -35,7 +35,7 @@ import { asJson, IRequestService } from '../../request/common/request.js';
 import { IApplicationStorageMainService } from '../../storage/electron-main/storageMainService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { ITurboFileGitHubRelease, ITurboFileUpdateManifest, resolveTurboFileUpdateFromGitHubRelease, resolveTurboFileUpdateFromManifest, shouldAutoInstallTurboFileSetupUpdate as shouldAutoInstallTurboFileSetupUpdatePolicy, shouldDisableWindowsUserSetupUpdatesAsAdmin } from '../common/turbofileUpdate.js';
-import { downloadTurboFileUpdateFile } from '../node/turbofileUpdateDownload.js';
+import { downloadTurboFileUpdateFile, downloadTurboFileUpdateFiles } from '../node/turbofileUpdateDownload.js';
 import { AvailableForDownload, DisablementReason, IUpdate, State, StateType, UpdateType } from '../common/update.js';
 import { AbstractUpdateService, createUpdateURL, getUpdateRequestHeaders, IUpdateURLOptions, UpdateErrorClassification } from './abstractUpdateService.js';
 
@@ -526,11 +526,20 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		}
 
 		const startTime = Date.now();
-		this.setState(State.Downloading(update, explicit, this._overwrite, 0, undefined, startTime));
+		this.setState(State.Downloading(update, explicit, this._overwrite, 0, update.size, startTime));
 
 		await this.cleanup(update.version);
 		const updatePackagePath = await this.getUpdatePackagePath(update.version);
-		const packagePath = await pfs.Promises.exists(updatePackagePath)
+		let cached = await pfs.Promises.exists(updatePackagePath);
+		if (cached && update.sha256hash) {
+			try {
+				await checksum(updatePackagePath, update.sha256hash);
+			} catch {
+				cached = false;
+				await this.unlink(updatePackagePath);
+			}
+		}
+		const packagePath = cached
 			? updatePackagePath
 			: await this.downloadUpdatePackage(update, updatePackagePath, explicit, startTime);
 
@@ -597,25 +606,12 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 		}
 		const downloadPath = `${updatePackagePath}.tmp`;
 		const partPaths = parts.map((_, index) => `${downloadPath}.part-${String(index + 1).padStart(3, '0')}`);
-		const totalBytes = parts.every(part => typeof part.size === 'number')
-			? parts.reduce((total, part) => total + (part.size ?? 0), 0)
-			: undefined;
-		let completedBytes = 0;
 		let complete = false;
 
 		try {
-			for (const [index, part] of parts.entries()) {
-				let partBytes = 0;
-				await downloadTurboFileUpdateFile(this.requestService, partPaths[index], {
-					urls: [part.url], size: part.size, sha256: part.sha256hash,
-					onProgress: (bytes, total) => {
-						partBytes = bytes;
-						this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes + bytes, totalBytes ?? (parts.length === 1 ? total : undefined), startTime));
-					}
-				});
-				completedBytes += partBytes;
-				this.setState(State.Downloading(update, explicit, this._overwrite, completedBytes, totalBytes, startTime));
-			}
+			await downloadTurboFileUpdateFiles(this.requestService, parts.map((part, index) => ({
+				destination: partPaths[index], urls: [part.url], size: part.size, sha256: part.sha256hash
+			})), (bytes, total) => this.setState(State.Downloading(update, explicit, this._overwrite, bytes, total ?? update.size, startTime)));
 
 			for (const [index, partPath] of partPaths.entries()) {
 				await pipeline(createReadStream(partPath), createWriteStream(downloadPath, { flags: index === 0 ? 'w' : 'a' }));

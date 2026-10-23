@@ -39,13 +39,13 @@ WizardStyle=modern
 // to shutdown VS Code. We rely on the fact that the update signals
 // that VS Code is ready to be shutdown, so we're good to use `force` here.
 CloseApplications=force
-// Explorer loads TurboFileDragExt.dll as a CopyHook. Include explorer.exe so Restart Manager can
-// close and restore the process during an in-place upgrade instead of failing to replace the DLL
-// with error code 5. Keep the filter narrow so unrelated applications are never closed.
+// Check only our executables for locks. Explorer can hold the drag CopyHook DLL open, but
+// closing the shell loses the user's taskbar and File Explorer windows. Locked shell extension
+// files live in immutable version directories below and must never cause another process to close.
 #ifdef ProxyExeBasename
-CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe,{#ProxyExeBasename}.exe,new_{#ProxyExeBasename}.exe,explorer.exe
+CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe,{#ProxyExeBasename}.exe,new_{#ProxyExeBasename}.exe
 #else
-CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe,explorer.exe
+CloseApplicationsFilter={#ExeBasename}.exe,new_{#ExeBasename}.exe
 #endif
 
 #ifdef Sign
@@ -107,12 +107,14 @@ Name: "runcode"; Description: "{cm:RunAfter,{#NameShort}}"; GroupDescription: "{
 Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
-Source: "*"; Excludes: "\CodeSignSummary*.md,\tools,\tools\*,\policies,\policies\*,\appx,\appx\*,\resources\app\product.json,\resources\app\resources\turbofile\drag-ext,\resources\app\resources\turbofile\drag-ext\*,\{#ExeBasename}.exe,{#ifdef ProxyExeBasename}\{#ProxyExeBasename}.exe,{#endif}\{#ExeBasename}.VisualElementsManifest.xml,\bin,\bin\*"; DestDir: "{code:GetDestDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Explorer can keep the drag CopyHook DLL loaded. If it is locked, schedule replacement instead of prompting the user to skip the file.
+Source: "*"; Excludes: "\CodeSignSummary*.md,\tools,\tools\*,\policies,\policies\*,\appx,\appx\*,\resources\app\product.json,resources\app\resources\turbofile\drag-ext,resources\app\resources\turbofile\drag-ext\*,\{#ExeBasename}.exe,{#ifdef ProxyExeBasename}\{#ProxyExeBasename}.exe,{#endif}\{#ExeBasename}.VisualElementsManifest.xml,\bin,\bin\*"; DestDir: "{code:GetDestDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Never overwrite a CopyHook DLL loaded by Explorer. Keep each release outside the application
+; resources tree so background replacement/cleanup cannot touch it. Reinstalling the same release
+; reuses the immutable files, including in a non-elevated user installation.
 #if VersionedResourcesFolder != ""
-Source: "{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext\*"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
+Source: "{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext\*"; DestDir: "{app}\shell\drag-ext\{#Version}"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist uninsrestartdelete
 #else
-Source: "resources\app\resources\turbofile\drag-ext\*"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
+Source: "resources\app\resources\turbofile\drag-ext\*"; DestDir: "{app}\shell\drag-ext\{#Version}"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist uninsrestartdelete
 #endif
 Source: "{#ExeBasename}.exe"; DestDir: "{code:GetDestDir}"; DestName: "{code:GetExeBasename}"; Flags: ignoreversion
 Source: "{#ExeBasename}.VisualElementsManifest.xml"; DestDir: "{code:GetDestDir}"; DestName: "{code:GetVisualElementsManifest}"; Flags: ignoreversion
@@ -1621,53 +1623,10 @@ end;
 
 var
 	ShouldRestartTunnelService: Boolean;
-	ExplorerWasStoppedForInstall: Boolean;
 #ifdef ProxyMutex
 	ProxyWasRunning: Boolean;
 	AppWasRunning: Boolean;
 #endif
-
-function StopExplorerForInstall(): Boolean;
-var
-	ResultCode: Integer;
-	DragExtensionPath: String;
-begin
-	ExplorerWasStoppedForInstall := False;
-	DragExtensionPath := ExpandConstant('{app}\{#VersionedResourcesFolder}\resources\app\resources\turbofile\drag-ext\x64\TurboFileDragExt.dll');
-	if not FileExists(DragExtensionPath) then begin
-		Result := True;
-		exit;
-	end;
-
-	// Explorer may keep the CopyHook DLL loaded in a shell/COM instance that is not
-	// released by Restart Manager. Stop it explicitly before replacing the DLL.
-	if not Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM explorer.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
-		Result := False;
-		exit;
-	end;
-	Sleep(500);
-	ExplorerWasStoppedForInstall := True;
-	Result := True;
-end;
-
-procedure RestartExplorerAfterInstall();
-var
-	ResultCode: Integer;
-begin
-	if not ExplorerWasStoppedForInstall then begin
-		exit;
-	end;
-	ExplorerWasStoppedForInstall := False;
-	if not Exec(ExpandConstant('{sys}\explorer.exe'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then begin
-		Log('Unable to restart Explorer after installation: ' + IntToStr(ResultCode));
-	end;
-end;
-
-procedure DeinitializeSetup();
-begin
-	// Restore the shell even when setup is cancelled or aborted after Explorer was stopped.
-	RestartExplorerAfterInstall();
-end;
 
 function StopTunnelOtherProcesses(): Boolean;
 var
@@ -1731,9 +1690,6 @@ begin
 
   if IsNotBackgroundUpdate() and not StopTunnelOtherProcesses() then
     Result := '{#NameShort} is still running a tunnel process. Please stop the tunnel before installing.';
-
-  if (Result = '') and not StopExplorerForInstall() then
-    Result := 'Unable to close Windows Explorer before replacing the drag extension. Please close Explorer windows and try again.';
 
   if (Result = '') and not MigrateIncompatibleInstallation() then
     Result := 'Unable to remove the existing {#NameShort} installation. Installation was stopped to prevent two copies from being installed. Please approve the administrator prompt and try again.';
@@ -2126,7 +2082,6 @@ begin
 
     RepairMigratedShortcuts();
     CleanupLegacyVersionedResources();
-	RestartExplorerAfterInstall();
 
     if ShouldRestartTunnelService then
     begin

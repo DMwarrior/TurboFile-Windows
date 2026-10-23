@@ -80,7 +80,7 @@ import { getTurboFileImageGridBaseCardWidth, getTurboFileImageGridCardSize, getT
 import { createTurboFileImagePreviewReadOptions } from '../common/turbofileImagePreview.js';
 import { createTurboFileImageGridResourceOptions, createTurboFileImagePreviewResourceOptions } from '../common/turbofileImageResource.js';
 import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsAttributes, TurboFileSortDirection, TurboFileSortKey } from '../common/turbofileFileSort.js';
-import { getTurboFileTitlebarUpdateActionKind, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
+import { getTurboFileTitlebarUpdateActionKind, getTurboFileUpdateDownloadPercent, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { getTurboFileReleaseHistory, summarizeTurboFileReleaseNotes, turboFileReleaseNotes } from '../common/turbofileReleaseNotes.js';
 import { aggregateTurboFileTransferProgress, chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, isTurboFileTransferProgressQuiet, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, trimTurboFileTaskHistory, TurboFileTransferMetricsDisplay, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
@@ -803,6 +803,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly titlebarUpdateDisposables = this._register(new DisposableStore());
 	private titlebarUpdateButton: HTMLButtonElement | undefined;
 	private titlebarUpdateHoverHeading: HTMLElement | undefined;
+	private titlebarUpdateHoverProgress: HTMLElement | undefined;
 	private container: HTMLElement | undefined;
 	private deviceStore: TurboFileDeviceStore | undefined;
 	private devices: TurboFileDevice[] = [];
@@ -2407,6 +2408,7 @@ export class TurboFileEditor extends EditorPane {
 			const heading = `${this.getTitlebarUpdateTitle(kind)} · ${label}`;
 			this.titlebarUpdateButton.setAttribute('aria-label', heading);
 			if (this.titlebarUpdateHoverHeading) { this.titlebarUpdateHoverHeading.textContent = heading; }
+			if (this.titlebarUpdateHoverProgress) { this.titlebarUpdateHoverProgress.textContent = this.getTitlebarDownloadDetails(); }
 			return;
 		}
 		this.removeTitlebarAppMenu();
@@ -2434,6 +2436,7 @@ export class TurboFileEditor extends EditorPane {
 		this.titlebarUpdateDisposables.clear();
 		this.titlebarUpdateButton = undefined;
 		this.titlebarUpdateHoverHeading = undefined;
+		this.titlebarUpdateHoverProgress = undefined;
 		for (const menu of Array.from(document.querySelectorAll('.turbofile-titlebar-menu'))) {
 			menu.remove();
 		}
@@ -2806,6 +2809,8 @@ export class TurboFileEditor extends EditorPane {
 		const hover = $('.turbofile-update-hover');
 		this.titlebarUpdateHoverHeading = $('strong', undefined, `${title} · ${label}`);
 		hover.appendChild(this.titlebarUpdateHoverHeading);
+		this.titlebarUpdateHoverProgress = $('div', undefined, this.getTitlebarDownloadDetails());
+		hover.appendChild(this.titlebarUpdateHoverProgress);
 		hover.appendChild($('div.turbofile-update-hover-notes', undefined, summary));
 		this.titlebarUpdateDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), button, hover));
 		button.addEventListener('click', event => {
@@ -2869,11 +2874,18 @@ export class TurboFileEditor extends EditorPane {
 
 	private getTitlebarDownloadProgressLabel(): string {
 		const state = this.updateService.state;
-		if (state.type === StateType.Downloading && typeof state.downloadedBytes === 'number' && typeof state.totalBytes === 'number' && state.totalBytes > 0) {
-			return `${Math.max(0, Math.min(100, Math.floor((state.downloadedBytes / state.totalBytes) * 100)))}%`;
-		}
+		return getTurboFileUpdateDownloadPercent(state) ?? (state.type === StateType.Downloading && state.downloadedBytes ? formatSize(state.downloadedBytes) : '0.0%');
+	}
 
-		return state.type === StateType.Downloading && state.downloadedBytes ? formatSize(state.downloadedBytes) : '0%';
+	private getTitlebarDownloadDetails(): string {
+		const state = this.updateService.state;
+		if (state.type !== StateType.Downloading) {
+			return '';
+		}
+		const downloaded = formatSize(Math.max(0, state.downloadedBytes ?? 0));
+		return state.totalBytes && state.totalBytes > 0
+			? localize('turbofile.updateDownloadedTotal', "已下载 {0} / {1}", downloaded, formatSize(state.totalBytes))
+			: localize('turbofile.updateDownloadedBytes', "已下载 {0}", downloaded);
 	}
 
 	private getTitlebarInstallProgressLabel(): string {

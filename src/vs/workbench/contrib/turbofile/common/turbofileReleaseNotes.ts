@@ -13,8 +13,9 @@ export const turboFileReleaseNotes: readonly { readonly version: string; readonl
 		changes: [
 			localize('turbofile.release173.tabs', "同名文件标签仅显示文件名，不再追加长路径；完整路径仍可通过悬停查看。"),
 			localize('turbofile.release173.button', "恢复文字更新按钮，下载时持续显示真实百分比，保留悬停版本与更新内容。"),
-			localize('turbofile.release173.progress', "修复持续下载时进度被反复推迟刷新的问题，更新进度时保留按钮及悬停内容。"),
-			localize('turbofile.release173.download', "更新下载优先国内分片，增加断点续传、已完成分片复用、有限重试和停滞超时；仍执行大小与 SHA-256 校验。"),
+			localize('turbofile.release173.progress', "下载进度按真实字节每 250 毫秒刷新，显示一位小数，悬停可查看已下载和总容量。"),
+			localize('turbofile.release173.download', "更新下载优先国内源，32 MiB 分片最多两路下载；取消时结束网络连接，保留校验和已完成分片复用。"),
+			localize('turbofile.release173.shell', "修复安装和启动时强制关闭 Windows 资源管理器的问题，拖拽扩展按版本隔离存放，保留任务栏和已打开的窗口。"),
 			localize('turbofile.release173.publish', "发布流程要求同版本国内安装包验证通过后再更新 GitHub 自动更新清单，防止误发仅含海外下载地址的版本。")
 		]
 	},

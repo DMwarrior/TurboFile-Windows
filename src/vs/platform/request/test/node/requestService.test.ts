@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import * as http from 'http';
+import { DeferredPromise, timeout } from '../../../../base/common/async.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../log/common/log.js';
 import { IRawRequestFunction, lookupKerberosAuthorization, nodeRequest } from '../../node/requestService.js';
@@ -13,6 +15,86 @@ import { CancellationError } from '../../../../base/common/errors.js';
 
 suite('Request Service', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	async function withDownloadServer(run: (url: string, closed: Promise<void>) => Promise<void>): Promise<void> {
+		const closed = new DeferredPromise<void>();
+		const chunk = Buffer.alloc(64 * 1024, 1);
+		const server = http.createServer((_request, response) => {
+			response.writeHead(200);
+			let blocked = false;
+			response.on('drain', () => { blocked = false; });
+			const timer = setInterval(() => { if (!blocked) { blocked = !response.write(chunk); } }, 2);
+			response.once('close', () => { clearInterval(timer); closed.complete(); });
+		});
+		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+		const address = server.address();
+		assert.ok(address && typeof address !== 'string');
+		try {
+			await run(`http://127.0.0.1:${address.port}/download`, closed.p);
+		} finally {
+			server.closeAllConnections();
+			await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+		}
+	}
+
+	test('streaming download cancellation closes the HTTP response after headers', async () => {
+		await withDownloadServer(async (url, closed) => {
+			const source = store.add(new CancellationTokenSource());
+			const context = await nodeRequest({ url, streamResponse: true, callSite: 'requestService.test.streamCancellation' }, source.token);
+			const first = new DeferredPromise<void>();
+			const failure = new DeferredPromise<Error>();
+			context.stream.on('error', error => failure.complete(error));
+			context.stream.on('data', () => first.complete());
+			await first.p;
+			source.cancel();
+			await closed;
+			assert.ok(await failure.p instanceof CancellationError);
+		});
+	});
+
+	test('destroying a streaming download aborts its HTTP connection', async () => {
+		await withDownloadServer(async (url, closed) => {
+			const context = await nodeRequest({ url, streamResponse: true, callSite: 'requestService.test.streamDestroy' }, CancellationToken.None);
+			context.stream.destroy();
+			await closed;
+		});
+	});
+
+	test('streaming download retains cancellation errors until the consumer subscribes', async () => {
+		await withDownloadServer(async (url, closed) => {
+			const source = store.add(new CancellationTokenSource());
+			const context = await nodeRequest({ url, streamResponse: true, callSite: 'requestService.test.streamEarlyCancellation' }, source.token);
+			source.cancel();
+			await timeout(0);
+			const failure = new DeferredPromise<Error>();
+			context.stream.on('error', error => failure.complete(error));
+			await closed;
+			assert.ok(await failure.p instanceof CancellationError);
+		});
+	});
+
+	test('streaming download pause reaches the HTTP response and bounds its buffer', async () => {
+		await withDownloadServer(async (url, closed) => {
+			let response: http.IncomingMessage | undefined;
+			const rawRequest: IRawRequestFunction = (options, callback) => http.request(options, incoming => { response = incoming; callback?.(incoming); });
+			const context = await nodeRequest({ url, streamResponse: true, getRawRequest: () => rawRequest, callSite: 'requestService.test.streamPause' }, CancellationToken.None);
+			const paused = new DeferredPromise<void>();
+			const resumed = new DeferredPromise<void>();
+			let chunks = 0;
+			context.stream.on('error', () => { });
+			context.stream.on('data', () => {
+				if (++chunks === 1) { context.stream.pause(); paused.complete(); }
+				else { resumed.complete(); }
+			});
+			await paused.p;
+			await timeout(100);
+			assert.deepStrictEqual({ chunks, paused: response?.isPaused(), bounded: (response?.readableLength ?? Infinity) <= 128 * 1024 }, { chunks: 1, paused: true, bounded: true });
+			context.stream.resume();
+			await resumed.p;
+			context.stream.destroy();
+			await closed;
+		});
+	});
 
 	// Kerberos module fails to load on local macOS and Linux CI.
 	(isWindows ? test : test.skip)('Kerberos lookup', async () => {

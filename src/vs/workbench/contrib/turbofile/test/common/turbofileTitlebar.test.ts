@@ -7,10 +7,15 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import { State, StateType, UpdateType } from '../../../../../platform/update/common/update.js';
-import { getTurboFileTitlebarUpdateActionKind } from '../../common/turbofileTitlebar.js';
+import { getTurboFileTitlebarUpdateActionKind, getTurboFileUpdateDownloadPercent } from '../../common/turbofileTitlebar.js';
 import { getTurboFileReleaseHistory, summarizeTurboFileReleaseNotes } from '../../common/turbofileReleaseNotes.js';
 
 suite('TurboFileTitlebar', () => {
+	test('shows small byte changes without rounding an incomplete download to complete', () => {
+		assert.deepStrictEqual([0, 150, 1250, 99999, 100000].map(bytes => getTurboFileUpdateDownloadPercent(State.Downloading(undefined, true, false, bytes, 100000))), ['0.0%', '0.1%', '1.3%', '99.9%', '100.0%']);
+		assert.strictEqual(getTurboFileUpdateDownloadPercent(State.Downloading(undefined, true, false, 150)), undefined);
+	});
+
 	test('shows update button only when an update action is available', () => {
 		assert.deepStrictEqual([
 			getTurboFileTitlebarUpdateActionKind(State.Idle(UpdateType.Setup)),
@@ -115,12 +120,13 @@ suite('TurboFileTitlebar', () => {
 		assert.ok(css.includes('display: none !important;'));
 	});
 
-	test('packages the drag extension with deferred replacement without enabling win32 versioned update', () => {
+	test('packages immutable shell extensions without enabling win32 versioned update', () => {
 		const inno = fs.readFileSync(path.join(process.cwd(), 'build/win32/code.iss'), 'utf8');
 		const product = fs.readFileSync(path.join(process.cwd(), 'product.json'), 'utf8');
 
 		assert.ok(!product.includes('"win32VersionedUpdate": true'));
 		assert.ok(inno.includes('Source: "resources\\app\\resources\\turbofile\\drag-ext\\*"'));
-		assert.ok(inno.includes('Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete'));
+		assert.ok(inno.includes('DestDir: "{app}\\shell\\drag-ext\\{#Version}"'));
+		assert.ok(inno.includes('Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist uninsrestartdelete'));
 	});
 });

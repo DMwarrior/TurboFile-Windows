@@ -682,10 +682,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	constructor(@IStateService private readonly stateService: IStateService) {
 		this.restorePersistedDirectRoutes();
 		this.ensureTurboFileImageProtocolRegistered();
-		// A freshly-registered CopyHook handler is not picked up by the already-running Explorer
-		// until Explorer reloads (WinSCP documents the same: its dragext needs a logoff/restart to
-		// load). Prepare the handler eagerly at startup so the very first drag-to-Windows works,
-		// instead of failing once and only working after a manual retry.
+		// Register the CopyHook and notify the shell without interrupting the desktop or open
+		// File Explorer windows. A shell that cached its handler list picks it up on its next start.
 		if (platform() === 'win32') {
 			// Resolve the bundled/system tar dialect while the user opens the panes, so the first
 			// Windows-to-SSH archive does not pay a process launch on its critical path.
@@ -6823,42 +6821,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		await runLocalCommand('reg.exe', ['add', inprocKey, '/v', 'ThreadingModel', '/t', 'REG_SZ', '/d', 'Apartment', '/f']);
 		await runLocalCommand('reg.exe', ['add', handlerKey, '/ve', '/d', TURBOFILE_WINDOWS_DRAG_COPY_HOOK_CLSID, '/f']);
 		await runLocalPowerShellScript(createWindowsShellAssociationChangedScript());
-		await this.ensureWindowsExplorerLoadedDragCopyHook(dllPath);
-	}
-
-	/**
-	 * The running Explorer caches its CopyHook handler list, so a newly-registered handler is
-	 * ignored until Explorer reloads. We restart Explorer exactly once per DLL build (tracked by a
-	 * signature marker), so the handler becomes active without forcing the user to log off/restart.
-	 * Subsequent OS sessions load it on demand automatically because the registration is persistent.
-	 */
-	private async ensureWindowsExplorerLoadedDragCopyHook(dllPath: string): Promise<void> {
-		const signature = await this.getWindowsDragCopyHookDllSignature(dllPath);
-		const markerPath = join(this.getWindowsDragCopyHookRoot(), 'explorer-loaded.signature');
-		const stored = await fsp.readFile(markerPath, 'utf8').then(value => value.trim()).catch(() => '');
-		if (stored === signature) {
-			return;
-		}
-		await this.restartWindowsExplorer();
-		await fsp.mkdir(dirname(markerPath), { recursive: true }).catch(() => undefined);
-		await fsp.writeFile(markerPath, signature).catch(() => undefined);
-	}
-
-	private async getWindowsDragCopyHookDllSignature(dllPath: string): Promise<string> {
-		const stat = await fsp.stat(dllPath).catch(() => undefined);
-		return stat ? `${dllPath}|${stat.size}|${Math.round(stat.mtimeMs)}` : dllPath;
-	}
-
-	private async restartWindowsExplorer(): Promise<void> {
-		// Stop every Explorer shell instance and relaunch one so the new shell process reads the
-		// freshly-registered CopyHook handler. Best-effort: never let a shell hiccup fail a transfer.
-		await runLocalPowerShellScript('Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 400; if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }').catch(() => undefined);
-		await delay(1200);
 	}
 
 	private resolveWindowsDragCopyHookDllPath(): string {
 		const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
 		const candidates = [
+			// The installer keeps shell-loaded DLLs outside resources so an update can preserve
+			// Explorer's old mapping while registering this version for the next shell session.
+			join(dirname(app.getPath('exe')), 'shell', 'drag-ext', app.getVersion(), 'x64', 'TurboFileDragExt.dll'),
 			join(process.cwd(), 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragExt.dll'),
 			join(app.getAppPath(), 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragExt.dll'),
 			resourcesPath ? join(resourcesPath, 'app', 'resources', 'turbofile', 'drag-ext', 'x64', 'TurboFileDragExt.dll') : undefined,
