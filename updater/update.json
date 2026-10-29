@@ -1,37 +1,37 @@
 {
-  "version": "1.173.0",
-  "name": "极速传 1.173.0",
-  "notes": "# 极速传 1.173.0\n\n发布日期：2026-10-23\n\n- 修复同名文件标签显示长路径的问题，恢复仅显示文件名，悬停可查看完整路径。\n- 恢复文字更新按钮，保留悬停版本说明和离线更新历史。\n- 下载进度按真实字节每 250 毫秒刷新，显示一位小数，悬停可查看已下载和总容量。\n- 更新优先使用国内源，最多两路分片下载，支持已完成分片复用、有限重试和停滞超时。\n- 修复安装和启动时关闭 Windows 桌面、任务栏和资源管理器窗口的问题。\n- 下载安装包后执行大小与 SHA-256 校验，复用缓存前重新校验。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
-  "pub_date": "2026-10-23T09:58:13.901Z",
+  "version": "1.174.0",
+  "name": "极速传 1.174.0",
+  "notes": "# 极速传 1.174.0\n\n发布日期：2026-10-29\n\n- 设备管理新增“导入已有设备”按钮，自动扫描本机保存的 SSH 连接，选择需要的设备后批量添加。\n- 支持 OpenSSH 的 `.ssh/config` 和 `Include` 配置，以及 WinSCP、PuTTY/KiTTY 保存的 SSH 会话；列表显示地址、用户、端口、配置来源和凭据状态。\n- 支持迁移 WinSCP 普通保存密码及私钥路径，密码存入极速传加密凭据存储，不在列表或日志中显示明文。\n- 重复导入时保留现有设备和密码，仅补充缺失凭据；新设备凭据保存失败时不留下不完整配置。\n- 保留手动选择 WinSCP INI 文件入口，支持中文名称、非标准端口及默认目录。\n\n兼容性说明：WinSCP 主密码保护的凭据需单独填写。代理、跳板机、OpenSSH Match 条件和特殊 Agent/证书配置暂不自动迁移，会在导入结果中提示。`known_hosts` 不包含完整登录信息，不作为完整设备导入。识别过程不执行配置中的命令，也不读取私钥文件内容。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.174.0.exe`\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
+  "pub_date": "2026-10-29T07:02:17.307Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0.exe",
-      "sha256": "46b2d28b4233226ea26056b665e36f10437eab55c4309c88d66a90404b5c0b69",
-      "size": 114520508,
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe",
+      "sha256": "3f1dd40ffb041f80e890a73487c51576890a5d9d07b51bedaf2580c2d4e753cc",
+      "size": 113642607,
       "parts": [
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part001",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part001",
           "size": 33554432,
-          "sha256": "9df5d9afa809dc1e8ac192ccac76a02f469222e5126edb7690645ec35813fe29"
+          "sha256": "a4c1565433f1afb67dd95ece1fc1d0421f2824cd750e8c87c745cd546f04fde3"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part002",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part002",
           "size": 33554432,
-          "sha256": "56f194e7476b3d861c3450c7109744c613f6e33be9730cf95bbbcfdf1322cd63"
+          "sha256": "22a7a1e2db9a3d76ab8a12b567181df979578db2b613f7b13dad727e9cff99e8"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part003",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part003",
           "size": 33554432,
-          "sha256": "14c10fe8b010fe0931ea686fe7ff2b3ed84b7e1dad7cb97214d6bdb79c1cc92e"
+          "sha256": "c99d39e5c881183dc8cfc1a12204b7e02b87c196c10f6c06cccef347025c4755"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.173.0/TurboFileSetup-win32-x64-1.173.0-r2.exe.part004",
-          "size": 13857212,
-          "sha256": "fe9765b43ad80ffd2655c7848149665cb68cee1cf0e49da7b5509cb7fc046f4b"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part004",
+          "size": 12979311,
+          "sha256": "fdb2ab4acc2cb44815b1f22a448182f1235d05e2af5496a4b656716f37dad900"
         }
       ],
       "mirrors": [
-        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/668660999"
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/687641247"
       ]
     }
   }
