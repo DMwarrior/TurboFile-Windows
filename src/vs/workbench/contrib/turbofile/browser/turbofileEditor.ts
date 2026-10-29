@@ -42,6 +42,7 @@ import { ColorScheme } from '../../../../platform/theme/common/theme.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { IUpdateService, StateType } from '../../../../platform/update/common/update.js';
@@ -62,6 +63,8 @@ import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboF
 import { ILabelService } from '../../../../platform/label/common/label.js';
 import { TurboFileEditorInput } from '../common/turbofileEditorInput.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from './turbofileDeviceStore.js';
+import { getTurboFileImportedDeviceIdentity, parseTurboFileWinScpIni } from '../common/turbofileWinScpImport.js';
+import { ITurboFileSavedSshDiscovery, TurboFileWinScpSite } from '../../../../platform/turbofile/common/turbofileDeviceImport.js';
 import { TurboFileJournalView } from './turbofileJournalView.js';
 import { ITurboFileDeviceMonitorContext, TurboFileDeviceMonitorView } from './turbofileDeviceMonitorView.js';
 import { applyTurboFileDocumentTabAffinity, ensureTurboFileTransferTabsLeft, getTurboFileDocumentTargetIndex } from './turbofileDocumentTabAffinity.js';
@@ -822,6 +825,7 @@ export class TurboFileEditor extends EditorPane {
 	private readonly defaultImagePreviewSamplingMode: TurboFileImagePreviewSamplingMode = 'smooth';
 	private syncPreviewState: TurboFileSyncPreviewState | undefined;
 	private dialogState: TurboFileDialogState | undefined;
+	private isWinScpImportRunning = false;
 	private imageGridObserver: IntersectionObserver | undefined;
 	private liveTransferTicker: number | undefined;
 	private readonly transferMetricsDisplay = new TurboFileTransferMetricsDisplay();
@@ -948,6 +952,7 @@ export class TurboFileEditor extends EditorPane {
 		@ITerminalProfileService private readonly terminalProfileService: ITerminalProfileService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
 		@IUpdateService private readonly updateService: IUpdateService,
@@ -2262,6 +2267,7 @@ export class TurboFileEditor extends EditorPane {
 		const page = $('.turbofile-full-page.turbofile-devices-page');
 		page.appendChild(this.renderPageHeader(Codicon.server, '设备管理', localize('turbofile.devicesPageDescription', "拖动卡片调整设备顺序，可编辑、删除和测试连接。"), [
 			this.createPageButton(Codicon.refresh, '刷新设备', () => void this.refreshDevicesFromStore()),
+			this.createPageButton(Codicon.desktopDownload, localize('turbofile.importDevices', "导入已有设备"), () => void this.importWinScpDevices()),
 			this.createPageButton(Codicon.add, '添加 SSH 设备', () => this.showAddDeviceForm())
 		]));
 
@@ -2272,6 +2278,133 @@ export class TurboFileEditor extends EditorPane {
 		this.registerDeviceOrderDragInterceptor(grid);
 		page.appendChild(grid);
 		return page;
+	}
+
+	private async importWinScpDevices(manual = false): Promise<void> {
+		if (this.isWinScpImportRunning || !this.deviceStore) {
+			return;
+		}
+		this.isWinScpImportRunning = true;
+		this.isDeviceFormVisible = false;
+		try {
+			let result: ITurboFileSavedSshDiscovery;
+			if (manual) {
+				const files = await this.fileDialogService.showOpenDialog({
+					title: localize('turbofile.importWinScpSelect', "选择 WinSCP 导出的配置文件"),
+					canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+					filters: [{ name: 'WinSCP', extensions: ['ini'] }]
+				});
+				if (!files?.[0]) {
+					return;
+				}
+				const { value } = await this.fileService.readFile(files[0], { limits: { size: 10 * 1024 * 1024 } });
+				const bytes = value.buffer;
+				const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : bytes[0] === 0xfe && bytes[1] === 0xff ? 'utf-16be' : 'utf-8';
+				result = { ...parseTurboFileWinScpIni(new TextDecoder(encoding, { fatal: true }).decode(bytes)), warnings: [] };
+			} else {
+				this.statusMessage = localize('turbofile.importScanning', "正在识别本机保存的 SSH 设备…");
+				this.render();
+				result = await this.sshService.discoverSavedSshDevices();
+			}
+			this.statusMessage = localize('turbofile.importScanDone', "识别完成：找到 {0} 台 SSH 设备，等待选择。", result.sites.length);
+			this.render();
+			const skippedDetail = result.skipped.map(site => localize('turbofile.importWinScpSkippedSite', "{0}：{1}", site.name,
+				site.reason === 'conditional' ? localize('turbofile.importConditional', "包含 Match 条件、SSH Agent 或证书配置，暂不支持自动迁移") : site.reason === 'protocol' ? localize('turbofile.importWinScpProtocol', "不是 SSH/SFTP/SCP 站点") : site.reason === 'proxy' ? localize('turbofile.importWinScpProxy', "使用代理或跳板机，暂不支持迁移") : localize('turbofile.importWinScpInvalid', "地址、用户名、端口无效，或默认目录不是绝对路径"))).join('\n');
+			const existingIdentities = new Set(this.deviceStore.loadDevices().map(getTurboFileImportedDeviceIdentity));
+			const identities = new Set<string>();
+			let duplicates = 0;
+			const candidates = [...result.sites].sort((left, right) => Number(!!(right.password || right.passphrase)) - Number(!!(left.password || left.passphrase))).filter(site => {
+				const identity = getTurboFileImportedDeviceIdentity(site);
+				if (identities.has(identity) || (existingIdentities.has(identity) && !site.password && !site.passphrase)) {
+					duplicates++;
+					return false;
+				}
+				identities.add(identity);
+				return true;
+			});
+			if (!candidates.length) {
+				const message = localize('turbofile.importWinScpEmpty', "没有可新增的 SSH 设备。重复设备 {0} 个，不支持或无效的站点 {1} 个。", duplicates, result.skipped.length);
+				this.statusMessage = message;
+				if (!manual && await this.showDialogConfirm(localize('turbofile.importDevices', "导入已有设备"), message,
+					[result.warnings.join('\n'), skippedDetail, localize('turbofile.importManualFallback', "已检查 .ssh/config、WinSCP 和 PuTTY/KiTTY。也可以手动选择 WinSCP 导出的 INI 文件。")].filter(Boolean).join('\n\n'), false, localize('turbofile.importWinScpChoose', "选择配置文件"))) {
+					this.isWinScpImportRunning = false;
+					await this.importWinScpDevices(true);
+				} else if (manual) {
+					this.showDialogInfo(localize('turbofile.importDevices', "导入已有设备"), message, skippedDetail);
+				}
+				return;
+			}
+			const picker = this.quickInputService.createQuickPick<IQuickPickItem & { site: TurboFileWinScpSite }>();
+			const pickerDisposables = new DisposableStore();
+			pickerDisposables.add(picker);
+			picker.canSelectMany = true;
+			picker.ignoreFocusOut = true;
+			picker.matchOnDescription = true;
+			picker.matchOnDetail = true;
+			picker.title = localize('turbofile.importDevices', "导入已有设备");
+			picker.placeholder = localize('turbofile.importDetected', "已识别 {0} 台设备，请勾选后确认添加；跳过重复 {1} 台、不支持 {2} 台。", candidates.length, duplicates, result.skipped.length);
+			picker.description = localize('turbofile.importSelectionHint', "仅添加勾选的设备；已有密码不会被覆盖。右上角可手动选择配置文件。");
+			picker.buttons = [{ iconClass: ThemeIcon.asClassName(Codicon.folderOpened), tooltip: localize('turbofile.importWinScpChoose', "选择配置文件") }];
+			picker.items = candidates.map(site => ({
+				label: site.name, description: `${site.username}@${site.host}:${site.port}`,
+					detail: [site.source, site.defaultPath, site.credentialIssue === 'protected' ? localize('turbofile.importWinScpProtected', "主密码保护，凭据需单独填写") : site.credentialIssue === 'invalid' ? localize('turbofile.importWinScpInvalidCredential', "凭据无法读取，需单独填写") : site.password || site.passphrase ? localize('turbofile.importWinScpHasCredential', "包含已保存凭据") : site.privateKeyPath ? localize('turbofile.importHasKey', "使用本机密钥：{0}", site.privateKeyPath) : localize('turbofile.importWinScpNoCredential', "未保存凭据"),
+						existingIdentities.has(getTurboFileImportedDeviceIdentity(site)) ? localize('turbofile.importWinScpExisting', "已有设备，仅补充缺失凭据") : ''].filter(Boolean).join(' · '), site
+			}));
+			picker.selectedItems = [];
+			let selected: readonly TurboFileWinScpSite[] | 'manual' | undefined;
+			try {
+				selected = await new Promise<readonly TurboFileWinScpSite[] | 'manual' | undefined>(resolve => {
+					pickerDisposables.add(picker.onDidAccept(() => { resolve(picker.selectedItems.map(item => item.site)); picker.hide(); }));
+					pickerDisposables.add(picker.onDidHide(() => resolve(undefined)));
+					pickerDisposables.add(picker.onDidTriggerButton(() => { resolve('manual'); picker.hide(); }));
+					picker.show();
+				});
+			} finally { pickerDisposables.dispose(); }
+			if (selected === 'manual') {
+				this.isWinScpImportRunning = false;
+				await this.importWinScpDevices(true);
+				return;
+			}
+			if (!selected?.length) {
+				return;
+			}
+			let added = 0;
+			let credentialsUpdated = 0;
+			let credentialsImported = 0;
+			let failed = 0;
+			const credentialIssues: string[] = [];
+			for (const site of selected) {
+				try {
+					const outcome = await this.deviceStore.importDevice(site);
+					if (outcome === 'added') {
+						added++;
+					} else if (outcome === 'credentials') {
+						credentialsUpdated++;
+					} else {
+						duplicates++;
+					}
+					if (outcome !== 'duplicate' && (site.password || site.passphrase)) {
+						credentialsImported++;
+					}
+					if (outcome !== 'duplicate' && (site.credentialIssue || (site.authType === 'password' && !site.password))) {
+						credentialIssues.push(site.name);
+					}
+				} catch {
+					failed++;
+				}
+			}
+			this.devices = this.deviceStore.loadDevices();
+			this.invalidatePreparedTransferPair();
+			this.ensurePaneDeviceSelection();
+			this.activePage = 'devices';
+			this.statusMessage = localize('turbofile.importWinScpResult', "新增设备 {0} 个，补充已有设备凭据 {1} 个，迁移凭据 {2} 个，跳过重复设备 {3} 个，不支持或无效的站点 {4} 个，保存失败 {5} 个。", added, credentialsUpdated, credentialsImported, duplicates, result.skipped.length, failed);
+			this.showDialogInfo(localize('turbofile.importDevicesDone', "设备导入完成"), this.statusMessage,
+				[localize('turbofile.importWinScpCredentials', "已迁移的密码不会显示在设备列表中。密钥文件需要在本机存在且格式兼容。"), credentialIssues.length ? localize('turbofile.importWinScpCredentialIssues', "以下设备未保存凭据、受主密码保护或凭据无法读取，需要编辑设备单独填写：\n{0}", credentialIssues.join('\n')) : '', skippedDetail, result.warnings.join('\n')].filter(Boolean).join('\n\n'));
+		} catch {
+			this.showDialogInfo(localize('turbofile.importWinScpFailed', "WinSCP 导入失败"), localize('turbofile.importWinScpReadFailed', "无法读取配置文件。请选择 WinSCP 导出的 UTF-8 或 UTF-16 INI 文件（不超过 10 MB）。"));
+		} finally {
+			this.isWinScpImportRunning = false;
+		}
 	}
 
 	private beginDeviceOrderDrag(card: HTMLElement, device: TurboFileDevice, event: DragEvent): void {
@@ -16266,9 +16399,13 @@ export class TurboFileEditor extends EditorPane {
 				['wsl', 'WSL'],
 				['unknown', 'Unknown']
 			], editingDevice?.platform ?? 'linux');
-			this.appendHiddenInput(form, 'authType', 'password');
+			this.appendHiddenInput(form, 'authType', editingDevice?.authType ?? 'password');
 			this.appendProtocolField(form, editingDevice);
 			this.appendInputField(form, 'password', '密码', isEditing ? '留空保持原密码' : '', 'password', true);
+			if (editingDevice?.authType === 'privateKey') {
+				this.appendInputField(form, 'privateKeyPath', localize('turbofile.privateKeyPath', "私钥文件路径"), '', 'text', true, editingDevice.privateKeyPath);
+				this.appendInputField(form, 'passphrase', localize('turbofile.privateKeyPassphrase', "私钥口令"), localize('turbofile.keepPrivateKeyPassphrase', "留空保持原口令"), 'password', true);
+			}
 			this.appendInputField(form, 'defaultPath', '默认目录', '/home', 'text', true, editingDevice?.defaultPath);
 		}
 

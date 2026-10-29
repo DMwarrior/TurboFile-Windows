@@ -10,6 +10,7 @@ import { DeferredPromise } from '../../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { TurboFileDeviceDraft, TurboFileDeviceStore } from '../../browser/turbofileDeviceStore.js';
 import { defaultTurboFileDeviceCapabilities, TurboFileDevice } from '../../common/turbofileTypes.js';
+import { parseTurboFileWinScpIni } from '../../common/turbofileWinScpImport.js';
 
 class TestStorageService {
 	readonly values = new Map<string, string>();
@@ -96,6 +97,41 @@ function draft(overrides: Partial<TurboFileDeviceDraft> = {}): TurboFileDeviceDr
 
 suite('TurboFileDefaultDevices', () => {
 	const legacyDefaultPrefix = 'turbofile-' + 'default-';
+
+	test('imports WinSCP credentials only into secret storage and repeated imports preserve an existing password', async () => {
+		const { store, storage } = createStore([]);
+		const site = parseTurboFileWinScpIni('[Sessions\\Imported]\nHostName=example.test\nUserName=ubuntu\nPasswordPlain=example-imported-secret').sites[0];
+		assert.strictEqual(await store.importDevice(site), 'added');
+		const saved = store.loadDevices()[0];
+		assert.strictEqual(await store.getPassword(saved.id), 'example-imported-secret');
+		assert.ok(!storage.get('turbofile.devices', undefined, '').includes('example-imported-secret'));
+		assert.strictEqual(await store.importDevice({ ...site, password: 'example-replacement-secret' }), 'duplicate');
+		assert.deepStrictEqual([store.loadDevices().length, await store.getPassword(saved.id)], [1, 'example-imported-secret']);
+		store.dispose();
+	});
+
+	test('fills credentials for an earlier metadata-only import without changing its id, name or directory', async () => {
+		const { store } = createStore([device('existing-import', 'example.test', 'ubuntu', 'My existing name')]);
+		assert.strictEqual(await store.importDevice(draft({ name: 'WinSCP name', host: 'example.test', username: 'ubuntu', password: 'example-filled-secret' })), 'credentials');
+		assert.deepStrictEqual(store.loadDevices().map(saved => [saved.id, saved.name, saved.defaultPath]), [['existing-import', 'My existing name', '/']]);
+		assert.strictEqual(await store.getPassword('existing-import'), 'example-filled-secret');
+		store.dispose();
+	});
+
+	test('does not publish an imported device when encrypted credential storage fails', async () => {
+		const { store, secrets } = createStore([]);
+		secrets.set = async () => { throw new Error('Secret storage unavailable'); };
+		await assert.rejects(store.importDevice(draft({ password: 'example-secret' })), /Secret storage unavailable/);
+		assert.deepStrictEqual([store.loadDevices(), [...secrets.values]], [[], []]);
+		store.dispose();
+	});
+
+	test('does not attach a passphrase to an existing device using a different private key', async () => {
+		const { store } = createStore([device('different-key', 'example.test', 'ubuntu')]);
+		const outcome = await store.importDevice(draft({ host: 'example.test', username: 'ubuntu', authType: 'privateKey', privateKeyPath: 'C:\\other-key', passphrase: 'example-passphrase' }));
+		assert.deepStrictEqual([outcome, await store.getPassphrase('different-key')], ['duplicate', undefined]);
+		store.dispose();
+	});
 
 	test('public build does not embed default SSH devices or passwords', () => {
 		const source = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileDeviceStore.ts'), 'utf8');

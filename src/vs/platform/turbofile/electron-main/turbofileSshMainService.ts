@@ -32,6 +32,7 @@ import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetad
 import { ITurboFilePreparedDirectRouteSnapshot, TurboFilePreparedDirectRouteCache } from '../common/turbofilePreparedDirectRouteCache.js';
 import { ITurboFileDeviceMonitorSnapshot } from '../common/turbofileDeviceMonitor.js';
 import { TurboFileDeviceMonitor } from '../node/turbofileDeviceMonitor.js';
+import { discoverTurboFileSavedSshDevices } from '../node/turbofileSavedSsh.js';
 import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
 import { coordinateTurboFileDirectRouteProbe, TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS } from '../common/turbofileDirectRouteProbe.js';
 import { createTurboFileRsyncMappedGroups, createTurboFileRsyncSourceGroups } from '../common/turbofileRsyncBatchPlan.js';
@@ -6776,6 +6777,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			return join(process.env.USERPROFILE, 'Desktop');
 		}
 		return '';
+	}
+
+	/** Discovers local saved sessions only when the device import UI requests them. */
+	async discoverSavedSshDevices() {
+		return discoverTurboFileSavedSshDevices();
 	}
 
 	/**

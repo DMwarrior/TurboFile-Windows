@@ -6,6 +6,7 @@
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Event } from '../../../base/common/event.js';
 import { ITurboFileDeviceMonitorSnapshot } from './turbofileDeviceMonitor.js';
+import { ITurboFileSavedSshDiscovery } from './turbofileDeviceImport.js';
 
 export const ITurboFileSshService = createDecorator<ITurboFileSshService>('turboFileSshService');
 
@@ -40,6 +41,7 @@ export interface ITurboFileSshService {
 	 * string if it cannot be determined.
 	 */
 	getLocalDesktopPath(): Promise<string>;
+	discoverSavedSshDevices(): Promise<ITurboFileSavedSshDiscovery>;
 	prepareTransferPair(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint): Promise<void>;
 	transferFile(request: ITurboFileTransferRequest): Promise<ITurboFileTransferResult>;
 	transferBatch(request: ITurboFileBatchTransferRequest): Promise<ITurboFileBatchTransferResult>;

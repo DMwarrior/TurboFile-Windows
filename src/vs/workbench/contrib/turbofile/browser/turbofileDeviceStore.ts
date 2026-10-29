@@ -9,6 +9,7 @@ import { Emitter } from '../../../../base/common/event.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileDeviceCapabilities, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
+import { getTurboFileImportedDeviceIdentity } from '../common/turbofileWinScpImport.js';
 
 const TURBOFILE_DEVICES_STORAGE_KEY = 'turbofile.devices';
 const TURBOFILE_DEVICE_ORDER_STORAGE_KEY = 'turbofile.deviceOrder';
@@ -174,12 +175,33 @@ export class TurboFileDeviceStore extends Disposable {
 			preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
 		};
 
-		const devices = [...this.loadDevices(), device];
-		this.storeDevices(devices);
-
-		await this.storeDeviceSecrets(device.id, draft);
+		try {
+			await this.storeDeviceSecrets(device.id, draft);
+			this.storeDevices([...this.loadDevices(), device]);
+		} catch (error) {
+			await this.deleteDeviceSecrets(device.id).catch(() => undefined);
+			throw error;
+		}
 
 		return device;
+	}
+
+	/** Imports metadata and secrets, or fills missing credentials without replacing an existing login. */
+	async importDevice(draft: TurboFileDeviceDraft): Promise<'added' | 'credentials' | 'duplicate'> {
+		const identity = getTurboFileImportedDeviceIdentity(draft);
+		const existing = this.loadDevices().find(device => getTurboFileImportedDeviceIdentity(device) === identity);
+		if (!existing) {
+			await this.saveDevice(draft);
+			return 'added';
+		}
+		const password = draft.password && !await this.getPassword(existing.id) ? draft.password : undefined;
+		// An imported key passphrase must match the existing private key, not just the SSH login.
+		const passphrase = draft.passphrase && draft.privateKeyPath === existing.privateKeyPath && !await this.getPassphrase(existing.id) ? draft.passphrase : undefined;
+		if (!password && !passphrase) {
+			return 'duplicate';
+		}
+		await this.storeDeviceSecrets(existing.id, { password, passphrase });
+		return 'credentials';
 	}
 
 	async ensureDefaultDevices(): Promise<{ added: number; updated: number; removed: number }> {

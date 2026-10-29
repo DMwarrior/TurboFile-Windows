@@ -17,20 +17,22 @@ suite('TurboFileDeviceForm', () => {
 		return source.slice(startIndex, endIndex);
 	};
 
-	test('SSH device form exposes password authentication only', () => {
+	test('new SSH devices default to passwords while imported key devices retain editable key credentials', () => {
 		const source = readEditor();
 		const renderDeviceForm = methodBlock(source, 'private renderDeviceForm()', 'private bindDeviceFormEventIsolation');
 
 		assert.deepStrictEqual({
-			usesPasswordOnlyAuthentication: renderDeviceForm.includes("this.appendHiddenInput(form, 'authType', 'password');"),
+			preservesImportedAuthentication: renderDeviceForm.includes("this.appendHiddenInput(form, 'authType', editingDevice?.authType ?? 'password');"),
+			keyFieldsAreConditional: renderDeviceForm.includes("if (editingDevice?.authType === 'privateKey')"),
 			rendersAuthenticationSelect: renderDeviceForm.includes("this.appendSelectField(form, 'authType'"),
 			rendersPrivateKeyPath: renderDeviceForm.includes("this.appendInputField(form, 'privateKeyPath'"),
 			rendersPrivateKeyPassphrase: renderDeviceForm.includes("this.appendInputField(form, 'passphrase'")
 		}, {
-			usesPasswordOnlyAuthentication: true,
+			preservesImportedAuthentication: true,
+			keyFieldsAreConditional: true,
 			rendersAuthenticationSelect: false,
-			rendersPrivateKeyPath: false,
-			rendersPrivateKeyPassphrase: false
+			rendersPrivateKeyPath: true,
+			rendersPrivateKeyPassphrase: true
 		});
 	});
 

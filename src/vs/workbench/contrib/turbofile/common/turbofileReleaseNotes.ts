@@ -8,6 +8,17 @@ import { localize } from '../../../../nls.js';
 /** Keep released versions here so the installed application can show its history offline. */
 export const turboFileReleaseNotes: readonly { readonly version: string; readonly date: string; readonly changes: readonly string[] }[] = [
 	{
+		version: '1.174.0',
+		date: '2026-10-29',
+		changes: [
+			localize('turbofile.release174.import', "设备管理新增“导入已有设备”，自动识别本机保存的 SSH 连接，勾选后批量添加。"),
+			localize('turbofile.release174.sources', "支持 OpenSSH 的 .ssh/config 和 Include 配置，以及 WinSCP、PuTTY/KiTTY 保存的 SSH 会话，列表显示配置来源。"),
+			localize('turbofile.release174.credentials', "支持迁移 WinSCP 普通保存密码和密钥路径，凭据进入加密存储，界面不显示密码明文。"),
+			localize('turbofile.release174.duplicates', "重复导入保留已有设备，仅补充缺失凭据，不覆盖已保存的密码；保存失败不会留下不完整的新设备。"),
+			localize('turbofile.release174.compatibility', "保留手动选择 WinSCP 配置文件入口；主密码保护、代理、跳板机、Match 条件及特殊认证配置明确提示兼容性限制。")
+		]
+	},
+	{
 		version: '1.173.0',
 		date: '2026-10-23',
 		changes: [
