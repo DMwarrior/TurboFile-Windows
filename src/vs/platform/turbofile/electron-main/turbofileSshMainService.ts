@@ -33,6 +33,7 @@ import { parseTurboFileImageMetadataFrames } from '../common/turbofileImageMetad
 import { ITurboFilePreparedDirectRouteSnapshot, TurboFilePreparedDirectRouteCache } from '../common/turbofilePreparedDirectRouteCache.js';
 import { ITurboFileDeviceMonitorSnapshot } from '../common/turbofileDeviceMonitor.js';
 import { TurboFileDeviceMonitor } from '../node/turbofileDeviceMonitor.js';
+import { TurboFileSshHandshakeQueue } from '../node/turbofileSshHandshakeQueue.js';
 import { buildTurboFilePosixMoveCaptureCommand, buildTurboFilePosixMoveCleanupCommand, captureTurboFileLocalMoveSnapshots, captureTurboFileRemoteMoveSnapshots, decodeTurboFileRemoteMoveSnapshots, encodeTurboFileMoveCapturePaths, encodeTurboFileMoveCleanupSnapshot, ITurboFileMoveSnapshot } from '../node/turbofileMoveSafety.js';
 import { discoverTurboFileSavedSshDevices } from '../node/turbofileSavedSsh.js';
 import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
@@ -635,6 +636,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private readonly transferScheduler = new TurboFileTransferScheduler();
 	private readonly sftpOperationWatchdogs = new WeakMap<ISFTPWrapper, TurboFileOperationWatchdog>();
 	private readonly sshConnectionConfigs = new WeakMap<ISSHClient, ConnectConfig>();
+	private readonly sshHandshakeQueue = new TurboFileSshHandshakeQueue();
 	private readonly sftpConnectionConfigs = new WeakMap<ISFTPWrapper, ConnectConfig>();
 	private readonly directorySftpSessions = new Map<string, Promise<IRemoteDirectorySftpSession>>();
 	private readonly readyDirectorySftpSessions = new Map<string, IRemoteDirectorySftpSession>();
@@ -9412,49 +9414,62 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 
 	private async connect(config: ConnectConfig, progressId?: string, onClientCreated?: (client: ISSHClient) => void, shouldCancel?: () => boolean): Promise<ISSHClient> {
 		this.throwIfTransferCanceled(progressId);
-		const nativeRequire = await this.getNativeRequire();
-		const ssh2Module = nativeRequire('ssh2') as { Client: new () => ISSHClient };
-		const client = new ssh2Module.Client();
-		this.sshConnectionConfigs.set(client, config);
+		const queuedCancellation = new AbortController();
+		const unregisterQueuedCancel = this.registerTransferCancelHandler(progressId, async () => queuedCancellation.abort(new TurboFileTransferCanceledError()));
+		let releaseHandshake: (() => void) | undefined;
+		try {
+			if (shouldCancel?.()) { throw new TurboFileTransferCanceledError(); }
+			releaseHandshake = await this.sshHandshakeQueue.acquire(config.host ?? 'localhost', config.port ?? 22, queuedCancellation.signal);
+			const nativeRequire = await this.getNativeRequire();
+			this.throwIfTransferCanceled(progressId);
+			if (queuedCancellation.signal.aborted || shouldCancel?.()) { throw new TurboFileTransferCanceledError(); }
+			unregisterQueuedCancel();
+			const ssh2Module = nativeRequire('ssh2') as { Client: new () => ISSHClient };
+			const client = new ssh2Module.Client();
+			this.sshConnectionConfigs.set(client, config);
 
-		return new Promise<ISSHClient>((resolve, reject) => {
-			let settled = false;
-			let unregisterCancel: () => void = () => undefined;
+			return await new Promise<ISSHClient>((resolve, reject) => {
+				let settled = false;
+				let unregisterCancel: () => void = () => undefined;
 
-			const settle = (callback: () => void): void => {
-				if (settled) {
+				const settle = (callback: () => void): void => {
+					if (settled) {
+						return;
+					}
+					settled = true;
+					unregisterCancel();
+					callback();
+				};
+				const cancel = async (): Promise<void> => {
+					settle(() => reject(new TurboFileTransferCanceledError()));
+					await abortSshClientAndWait(client);
+				};
+
+				client
+					.on('ready', () => settle(() => resolve(client)))
+					.on('error', error => settle(() => reject(error)))
+					.on('close', () => {
+						if (!settled) {
+							settle(() => reject(new Error('SSH connection closed before authentication completed.')));
+						}
+					});
+				unregisterCancel = this.registerTransferCancelHandler(progressId, cancel);
+				onClientCreated?.(client);
+				if (this.isTransferCanceled(progressId) || shouldCancel?.()) {
+					void cancel();
 					return;
 				}
-				settled = true;
-				unregisterCancel();
-				callback();
-			};
-			const cancel = async (): Promise<void> => {
-				settle(() => reject(new TurboFileTransferCanceledError()));
-				await abortSshClientAndWait(client);
-			};
 
-			client
-				.on('ready', () => settle(() => resolve(client)))
-				.on('error', error => settle(() => reject(error)))
-				.on('close', () => {
-					if (!settled) {
-						settle(() => reject(new Error('SSH connection closed before authentication completed.')));
-					}
-				});
-			unregisterCancel = this.registerTransferCancelHandler(progressId, cancel);
-			onClientCreated?.(client);
-			if (this.isTransferCanceled(progressId) || shouldCancel?.()) {
-				void cancel();
-				return;
-			}
-
-			try {
-				client.connect(config);
-			} catch (error) {
-				settle(() => reject(error));
-			}
-		});
+				try {
+					client.connect(config);
+				} catch (error) {
+					settle(() => reject(error));
+				}
+			});
+		} finally {
+			unregisterQueuedCancel();
+			releaseHandshake?.();
+		}
 	}
 
 	private async getDirectorySftpSession(options: ITurboFileSshConnectionOptions, config: ConnectConfig): Promise<IRemoteDirectorySftpSession> {
@@ -13236,14 +13251,22 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		const [source, previous] = await Promise.all([fsp.stat(localPath), this.getRemoteFileForReplacement(sftp, remotePath)]);
 		const receipt = this.sftpMoveReceipts.get(progressId ?? '');
 		const temporaryPath = joinRemotePath(getRemoteParentPath(remotePath), `.turbofile-${randomUUID()}.part`);
-		const reservation = await this.openRemoteFile(sftp, temporaryPath, 'wx', previous?.mode === undefined ? 0o666 : previous.mode & 0o666);
+		let created = false;
+		let committed = false;
+		let acknowledgedBytes = 0;
 		try {
-			await this.closeRemoteFile(sftp, reservation);
-			await this.fastPutRaw(sftp, localPath, temporaryPath, options);
+			await this.fastPutRaw(sftp, localPath, temporaryPath, {
+				...options,
+				step: (totalTransferred, chunk, total) => {
+					acknowledgedBytes = totalTransferred;
+					options?.step?.(totalTransferred, chunk, total);
+				}
+			}, { mode: previous?.mode === undefined ? 0o666 : previous.mode & 0o666, onCreated: () => { created = true; } });
 			this.throwIfTransferCanceled(progressId);
-			const actual = await this.remoteStat(sftp, temporaryPath);
-			if (!actual.isFile() || actual.size !== source.size) {
-				throw new Error(`SFTP upload size mismatch: expected ${source.size}, got ${actual.size}.`);
+			// fastPut reports bytes only after the server acknowledges WRITE, and resolves
+			// only after CLOSE succeeds. Re-statting every small file adds a needless round trip.
+			if (acknowledgedBytes !== source.size) {
+				throw new Error(`SFTP upload size mismatch: expected ${source.size}, got ${acknowledgedBytes}.`);
 			}
 			if (receipt?.sourceKind === 'local') {
 				const current = await fsp.stat(localPath);
@@ -13252,11 +13275,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				}
 			}
 			await this.replaceRemoteFile(sftp, temporaryPath, remotePath, progressId);
+			committed = true;
 			if (receipt?.sourceKind === 'local') {
 				receipt.files.push({ path: localPath, size: source.size, mtime: source.mtimeMs, ctime: source.ctimeMs, ino: source.ino });
 			}
 		} finally {
-			await this.cleanupRemoteOwnedTemporary(sftp, temporaryPath);
+			if (created && !committed) { await this.cleanupRemoteOwnedTemporary(sftp, temporaryPath); }
 		}
 	}
 
@@ -13355,11 +13379,13 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}), REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS, localize('turbofile.sftpTransferTimeout', 'SFTP file transfer timed out without data progress.'));
 	}
 
-	private fastPutRaw(sftp: ISFTPWrapper, localPath: string, remotePath: string, options?: ISFTPTransferOptions): Promise<void> {
+	private fastPutRaw(sftp: ISFTPWrapper, localPath: string, remotePath: string, options?: ISFTPTransferOptions, exclusive?: { readonly mode: number; readonly onCreated: () => void }): Promise<void> {
 		return this.getSftpOperationWatchdog(sftp).run(reportActivity => new Promise((resolve, reject) => {
+			let remoteCloseError: Error | undefined;
 			const callback = (error: Error | undefined): void => {
-				if (error) {
-					reject(error);
+				const failure = error ?? remoteCloseError;
+				if (failure) {
+					reject(failure);
 					return;
 				}
 				resolve();
@@ -13377,7 +13403,44 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 					}
 				}
 			};
-			sftp.fastPut(localPath, remotePath, monitoredOptions, callback);
+			if (!exclusive) {
+				sftp.fastPut(localPath, remotePath, monitoredOptions, callback);
+				return;
+			}
+			// Keep ssh2's parallel transfer implementation. Adapt only this call's destination
+			// OPEN to exclusive creation, instead of OPEN/CLOSE followed by a second OPEN.
+			// Other methods stay bound to the real channel so request IDs and flow control are shared.
+			const methods = new Map<PropertyKey, unknown>();
+			const destination = new Proxy(sftp, {
+				get: (target, property) => {
+					if (property === 'close') {
+						return (handle: Buffer, closed: (error: Error | undefined) => void): void => target.close(handle, error => {
+							// ssh2's empty-file completion path discards CLOSE errors. Preserve them
+							// so even a zero-byte stage cannot be committed after a failed close.
+							remoteCloseError ??= error;
+							closed(error);
+						});
+					}
+					if (property === 'open') {
+						return (requestedPath: string, flags: string, opened: (error: Error | undefined, handle: Buffer) => void): void => {
+							if (requestedPath !== remotePath || flags !== 'w') {
+								opened(new Error('Unexpected SFTP upload open request.'), Buffer.alloc(0));
+								return;
+							}
+							target.open(requestedPath, 'wx', { mode: exclusive.mode }, (error, handle) => {
+								if (!error) { exclusive.onCreated(); }
+								opened(error, handle);
+							});
+						};
+					}
+					const value: unknown = Reflect.get(target, property, target);
+					if (typeof value !== 'function') { return value; }
+					if (!methods.has(property)) { methods.set(property, value.bind(target)); }
+					return methods.get(property);
+				}
+			});
+			const upload = sftp.fastPut as (local: string, remote: string, settings: ISFTPTransferOptions, completed: (error: Error | undefined) => void) => void;
+			upload.call(destination, localPath, remotePath, monitoredOptions, callback);
 		}), REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS, localize('turbofile.sftpTransferTimeout', 'SFTP file transfer timed out without data progress.'));
 	}
 
@@ -13480,6 +13543,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private async uploadDirectoryConcurrent(endpoint: ITurboFileTransferEndpoint, localPath: string, remotePath: string, onTotal?: (totalBytes: number) => void, onDelta?: (delta: number) => void, progressId?: string): Promise<void> {
 		this.throwIfTransferCanceled(progressId);
 		const plan = await this.collectLocalDirectoryTransferPlan(localPath, remotePath, progressId);
+		// Reuse the existing metadata plan. Tiny files use tiny ssh2 buffers, so three
+		// tasks can hide metadata latency on one channel without opening more SSH connections.
+		// Mixed directories and large files keep their original single-task-per-channel path.
+		const workerSlots = plan.files.every(file => file.size <= 64 * 1024) ? 3 : 1;
 		onTotal?.(plan.totalBytes);
 		await this.withSftpPool(endpoint, this.getDirectorySftpConnectionCount(plan.files.length, plan.totalBytes), progressId, async pool => {
 			this.throwIfTransferCanceled(progressId);
@@ -13487,7 +13554,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			await this.runSftpWorkers(pool, plan.files, progressId, async (sftp, file) => {
 				this.throwIfTransferCanceled(progressId);
 				await this.fastPutWithFallback(sftp, file.localPath, file.remotePath, file.size, onDelta, progressId);
-			});
+			}, workerSlots);
 		});
 	}
 
@@ -13724,7 +13791,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async runSftpWorkers<T>(pool: ISftpWorkerPool, items: readonly T[], progressId: string | undefined, worker: (sftp: ISFTPWrapper, item: T, index: number) => Promise<void>): Promise<void> {
+	private async runSftpWorkers<T>(pool: ISftpWorkerPool, items: readonly T[], progressId: string | undefined, worker: (sftp: ISFTPWrapper, item: T, index: number) => Promise<void>, workerSlotsPerConnection = 1): Promise<void> {
 		if (!items.length) {
 			return;
 		}
@@ -13776,11 +13843,14 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				});
 			};
 
-			startWorker(pool.primary);
+			const startConnection = (sftp: ISFTPWrapper): void => {
+				for (let slot = 0; slot < Math.max(1, Math.min(3, workerSlotsPerConnection)); slot++) { startWorker(sftp); }
+			};
+			startConnection(pool.primary);
 			for (const connection of pool.additional) {
 				void connection.then(sftp => {
 					if (sftp && !settled && nextIndex < items.length) {
-						startWorker(sftp);
+						startConnection(sftp);
 					}
 				});
 			}

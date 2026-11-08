@@ -7,6 +7,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { createRequire } from 'module';
 import * as ts from 'typescript';
 import { localize } from '../../../../nls.js';
 import { captureTurboFileLocalMoveSnapshots } from '../../node/turbofileMoveSafety.js';
@@ -33,6 +34,8 @@ interface IHarness {
 	commitAckLost: boolean;
 	canceled: boolean;
 	onCopied?: () => Promise<void>;
+	planSizes: number[];
+	peakFileTasks: number;
 	fastPut(sftp: object, localPath: string, remotePath: string, options?: object, progressId?: string): Promise<void>;
 	fastGet(sftp: object, remotePath: string, localPath: string, options?: object, progressId?: string): Promise<void>;
 	replaceRemoteFile(sftp: object, temporary: string, target: string, progressId?: string): Promise<void>;
@@ -40,14 +43,16 @@ interface IHarness {
 	deleteBatchSources(source: { kind: string }, items: { sourcePath: string; targetName: string }[], progressId?: string, receipts?: ReadonlyMap<string, IReceipt>): Promise<unknown[]>;
 	moveLocalPathNative(source: string, target: string): Promise<void>;
 	relayRemoteFileInParallel(source: object, target: object, sourcePath: string, targetPath: string, bytes: number, onDelta?: (delta: number) => void): Promise<void>;
-	runSftpWorkers<T>(pool: { primary: object; additional: Promise<object>[] }, items: readonly T[], progressId: string | undefined, worker: (sftp: object, item: T, index: number) => Promise<void>): Promise<void>;
+	runSftpWorkers<T>(pool: { primary: object; additional: Promise<object>[] }, items: readonly T[], progressId: string | undefined, worker: (sftp: object, item: T, index: number) => Promise<void>, slots?: number): Promise<void>;
+	uploadDirectoryConcurrent(endpoint: object, local: string, remote: string): Promise<void>;
 }
 
 /** Fault injection runs the real safety/commit methods, with only the transport and filesystem boundaries replaced. */
-function createHarness(localFs: typeof fs.promises = fs.promises): IHarness {
+function createHarness(localFs: typeof fs.promises = fs.promises, useRealRaw = false): IHarness {
 	const filename = path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 	const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
-	const names = new Set(['fastPut', 'fastGet', 'replaceRemoteFile', 'getRemoteFileForReplacement', 'deleteSftpMoveSources', 'deleteBatchSources', 'moveLocalPathNative', 'relayRemoteFileInParallel', 'cleanupRemoteOwnedTemporary', 'runSftpWorkers']);
+	const names = new Set(['fastPut', 'fastGet', 'replaceRemoteFile', 'getRemoteFileForReplacement', 'deleteSftpMoveSources', 'deleteBatchSources', 'moveLocalPathNative', 'relayRemoteFileInParallel', 'cleanupRemoteOwnedTemporary', 'runSftpWorkers', 'uploadDirectoryConcurrent']);
+	if (useRealRaw) { names.add('fastPutRaw'); }
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) { methods.push(node.getText(source)); }
@@ -58,7 +63,7 @@ function createHarness(localFs: typeof fs.promises = fs.promises): IHarness {
 	const code = ts.transpileModule(`class Harness {
 		remote = new Map(); modes = new Map(); links = new Set(); sftpMoveReceipts = new Map(); batchMoveSnapshots = new Map(); sftpConnectionConfigs = new WeakMap(); calls = []; commitFailure = false; restoreFailure = false; canceled = false; backupAckLost = false; commitAckLost = false;
 		throwIfTransferCanceled() { if (this.canceled) { throw new Error('Transfer canceled.'); } }
-		getSftpOperationWatchdog() { return { run: fn => fn() }; }
+		getSftpOperationWatchdog() { return { run: fn => fn(() => {}) }; }
 		async remoteStat(sftp, file) {
 			if (!this.remote.has(file)) { throw Object.assign(new Error('No such file'), { code: 2 }); }
 			return { size: this.remote.get(file).length, mtime: 1, mode: this.modes.get(file) ?? 0o644, isFile: () => !this.links.has(file), isSymbolicLink: () => this.links.has(file) };
@@ -76,8 +81,10 @@ function createHarness(localFs: typeof fs.promises = fs.promises): IHarness {
 			if (this.rawFailure) { throw this.rawFailure; }
 			const old = this.remote.get(handle.toString()); const output = Buffer.alloc(Math.max(old.length, position + length)); old.copy(output); buffer.copy(output, position, 0, length); this.remote.set(handle.toString(), output);
 		}
-		async fastPutRaw(sftp, local, remote) {
+		async fastPutRaw(sftp, local, remote, options, exclusive) {
+			await this.openRemoteFile(sftp, remote, 'wx', exclusive.mode); exclusive.onCreated();
 			this.remote.set(remote, this.rawFailure ? Buffer.from('partial') : await fsp.readFile(local));
+			options?.step?.(this.remote.get(remote).length, this.remote.get(remote).length, this.remote.get(remote).length);
 			await this.onCopied?.(); if (this.rawFailure) { throw this.rawFailure; }
 		}
 		async fastGetRaw(sftp, remote, local) {
@@ -99,12 +106,18 @@ function createHarness(localFs: typeof fs.promises = fs.promises): IHarness {
 		async connect(config, progressId, onCreated) { if (progressId !== undefined) { throw new Error('Cleanup must not inherit canceled task'); } this.calls.push('cleanup-connect'); const client = { end: () => {}, destroy: () => { this.calls.push('cleanup-closed'); } }; onCreated(client); return client; }
 		async openSftp() { return {}; }
 		async copyLocalPath(source, target) { this.calls.push('copy'); await fsp.cp(source, target, { recursive: true }); }
+		planSizes = []; peakFileTasks = 0; activeFileTasks = 0;
+		async collectLocalDirectoryTransferPlan() { return { files: this.planSizes.map((size, index) => ({ size, localPath: 'local'+index, remotePath: 'remote'+index })), directories: [], totalBytes: this.planSizes.reduce((sum, size) => sum + size, 0) }; }
+		getDirectorySftpConnectionCount() { return 1; }
+		async withSftpPool(_endpoint, count, _progressId, callback) { this.calls.push('pool:' + count); return callback({ primary: {}, additional: [] }); }
+		async ensureRemoteDirectoriesForUpload() {}
+		async fastPutWithFallback() { this.activeFileTasks++; this.peakFileTasks = Math.max(this.peakFileTasks, this.activeFileTasks); await new Promise(resolve => setImmediate(resolve)); this.activeFileTasks--; }
 		${methods.join('\n')}
 	}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-	const Harness: new () => IHarness = new Function('fsp', 'randomUUID', 'join', 'dirname', 'joinRemotePath', 'getRemoteParentPath', 'localize', 'formatTransferError', 'SFTP_REQUEST_TIMEOUT_MS', 'platform', 'looksLikeWindowsPath', 'ensureLocalParentDirectory', 'isCrossDeviceMoveError', 'isRemotePathMissingError', 'SFTP_RELAY_CHUNK_SIZE', 'SFTP_RELAY_CONCURRENCY', 'mapLimit', 'captureTurboFileLocalMoveSnapshots', 'withTurboFileTimeout', `${code}; return Harness;`)(
+	const Harness: new () => IHarness = new Function('fsp', 'randomUUID', 'join', 'dirname', 'joinRemotePath', 'getRemoteParentPath', 'localize', 'formatTransferError', 'SFTP_REQUEST_TIMEOUT_MS', 'platform', 'looksLikeWindowsPath', 'ensureLocalParentDirectory', 'isCrossDeviceMoveError', 'isRemotePathMissingError', 'SFTP_RELAY_CHUNK_SIZE', 'SFTP_RELAY_CONCURRENCY', 'mapLimit', 'captureTurboFileLocalMoveSnapshots', 'withTurboFileTimeout', 'REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS', `${code}; return Harness;`)(
 		localFs, randomUUID, path.join, path.dirname, path.posix.join, path.posix.dirname, localize, (error: Error) => error.message, 30000,
 		() => 'win32', () => true, async () => { }, (error: NodeJS.ErrnoException) => error.code === 'EXDEV', (error: { code: number }) => error.code === 2,
-		4, 2, async (items: readonly number[], _limit: number, work: (item: number) => Promise<void>) => Promise.all(items.map(work)), captureTurboFileLocalMoveSnapshots, withTurboFileTimeout
+		4, 2, async (items: readonly number[], _limit: number, work: (item: number) => Promise<void>) => Promise.all(items.map(work)), captureTurboFileLocalMoveSnapshots, withTurboFileTimeout, 120000
 	);
 	return new Harness();
 }
@@ -222,6 +235,52 @@ suite('TurboFileFileSafety', () => {
 		assert.strictEqual(service.modes.get('/new'), 0o644);
 	});
 
+	test('real ssh2 fastPut exclusively opens each stage once and retains shared-channel state across concurrent uploads', async () => {
+		service = createHarness(fs.promises, true);
+		const native = createRequire(import.meta.url)('ssh2/lib/protocol/SFTP.js') as { SFTP: { prototype: { fastPut: Function } } };
+		const payload = Buffer.alloc(64 * 1024, 0x55);
+		const source = path.join(root, 'source');
+		const empty = path.join(root, 'empty');
+		await fs.promises.writeFile(source, payload);
+		await fs.promises.writeFile(empty, '');
+		const opens: string[] = [], closes: string[] = [];
+		let closeFailure = false;
+		const transport = {
+			server: false, outgoing: { state: 'open' }, fastPut: native.SFTP.prototype.fastPut,
+			open(file: string, flags: string, attrs: { mode: number }, callback: (error: Error | undefined, handle?: Buffer) => void) {
+				assert.strictEqual(this, transport, 'native channel request state must not be copied onto an adapter');
+				assert.strictEqual(flags, 'wx');
+				assert.ok(!service.remote.has(file));
+				opens.push(file); service.remote.set(file, Buffer.alloc(0)); service.modes.set(file, attrs.mode & ~0o022);
+				setImmediate(() => callback(undefined, Buffer.from(file)));
+			},
+			write(handle: Buffer, buffer: Buffer, offset: number, length: number, position: number, callback: (error?: Error) => void) {
+				assert.strictEqual(this, transport);
+				const name = handle.toString(), previous = service.remote.get(name)!;
+				const next = Buffer.alloc(Math.max(previous.length, position + length));
+				previous.copy(next); buffer.copy(next, position, offset, offset + length); service.remote.set(name, next);
+				setImmediate(callback);
+			},
+			close(handle: Buffer, callback: (error?: Error) => void) { assert.strictEqual(this, transport); closes.push(handle.toString()); setImmediate(() => callback(closeFailure ? new Error('Injected CLOSE failure') : undefined)); }
+		};
+		await Promise.all([
+			service.fastPut(transport, source, '/one', { concurrency: 2, chunkSize: 4096 }),
+			service.fastPut(transport, source, '/two', { concurrency: 2, chunkSize: 4096 }),
+			service.fastPut(transport, empty, '/empty', { concurrency: 2, chunkSize: 4096 })
+		]);
+		assert.strictEqual(opens.length, 3, 'no extra reservation/re-open');
+		assert.deepStrictEqual(closes.sort(), opens.sort());
+		assert.deepStrictEqual(service.remote.get('/one'), payload);
+		assert.deepStrictEqual(service.remote.get('/two'), payload);
+		assert.strictEqual(service.remote.get('/empty')!.length, 0);
+		assert.strictEqual([...service.remote.keys()].some(name => name.endsWith('.part')), false);
+		closeFailure = true;
+		service.remote.set('/empty-failed', Buffer.from('original'));
+		await assert.rejects(service.fastPut(transport, empty, '/empty-failed', { concurrency: 2, chunkSize: 4096 }), /Injected CLOSE failure/);
+		assert.strictEqual(service.remote.get('/empty-failed')!.toString(), 'original');
+		assert.strictEqual([...service.remote.keys()].some(name => name.endsWith('.part')), false);
+	});
+
 	test('canceling a disconnected upload retries only its owned partial file on a fresh bounded connection', async () => {
 		const local = path.join(root, 'source');
 		await fs.promises.writeFile(local, 'new');
@@ -275,6 +334,41 @@ suite('TurboFileFileSafety', () => {
 		assert.strictEqual(finished, false, 'batch must wait for in-flight cleanup');
 		clean();
 		await rejected;
+	});
+
+	test('tiny directory uploads pipeline three files on the same channel while mixed directories keep one', async () => {
+		for (const largeFile of [false, true]) {
+			service = createHarness();
+			service.planSizes = [32, 64, largeFile ? 65537 : 65536, 16, 128, 32];
+			await service.uploadDirectoryConcurrent({}, '/local', '/remote');
+			assert.strictEqual(service.peakFileTasks, largeFile ? 1 : 3);
+			assert.deepStrictEqual(service.calls, ['pool:1'], 'pipelining must not request additional SSH connections');
+		}
+	});
+
+	test('three tasks on one channel stop scheduling on failure or cancel and wait for every cleanup', async () => {
+		for (const cancel of [false, true]) {
+			service = createHarness();
+			const releases: (() => void)[] = [];
+			const started: number[] = [];
+			let finished = false;
+			const transfer = service.runSftpWorkers({ primary: {}, additional: [] }, [0, 1, 2, 3, 4], 'pipeline', async (_sftp, item) => {
+				started.push(item);
+				await new Promise<void>(resolve => { releases[item] = resolve; });
+				if (item === 0) { if (cancel) { service.canceled = true; } throw new Error(cancel ? 'canceled' : 'failed'); }
+			}, 3);
+			const rejected = assert.rejects(transfer, cancel ? /canceled/ : /failed/).then(() => { finished = true; });
+			assert.deepStrictEqual(started, [0, 1, 2]);
+			releases[0]();
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.strictEqual(finished, false);
+			releases[1]();
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.strictEqual(finished, false);
+			releases[2]();
+			await rejected;
+			assert.deepStrictEqual(started, [0, 1, 2]);
+		}
 	});
 
 	test('move cleanup preserves newly created and modified files while removing confirmed unchanged files', async () => {

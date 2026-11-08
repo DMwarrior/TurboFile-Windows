@@ -13,6 +13,7 @@ export const turboFileReleaseNotes: readonly { readonly version: string; readonl
 		changes: [
 			localize('turbofile.release175.progress', "底部传输信息可展开进度面板，显示实时速度曲线、已传容量和完成后的平均速度；已知总量显示百分比，未知总量不估造进度。"),
 			localize('turbofile.release175.sftp', "增强 SFTP 覆盖文件保护，使用临时文件完成传输后再替换，避免断线、取消或写入失败破坏原有文件。"),
+			localize('turbofile.release175.connections', "限制同一服务器的同时握手数量，减少批量任务启动时的连接失败；精简小文件传输的重复请求。"),
 			localize('turbofile.release175.move', "修复跨盘剪切清理失败时误删目标副本的问题，加强目录剪切时对新增或修改文件的保护。"),
 			localize('turbofile.release175.recovery', "完善传输取消、Tar 中转结束确认和错误传播，避免失败后错误重试或误报完成。"),
 			localize('turbofile.release175.persistence', "设备编辑保存失败恢复原配置与凭据；任务日志写入暂时失败时进行有界重试。"),

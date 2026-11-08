@@ -111,6 +111,26 @@ suite('TurboFileSftpStability', () => {
 		assert.deepStrictEqual({ reportedBytes, ended: sftp.ended, timers: clock.countTimers() }, { reportedBytes: 5120, ended: false, timers: 0 });
 	});
 
+	test('three active file operations share a channel watchdog without false timeouts or early timer cleanup', async () => {
+		const pending: { options: ITransferOptions; callback: (error: Error | undefined) => void }[] = [];
+		sftp.fastPut = (_local, _remote, options, callback) => { pending.push({ options, callback }); };
+		const transfers = [0, 1, 2].map(index => service.fastPutRaw(sftp, 'local', `/remote-${index}`));
+		for (let tick = 0; tick < 4; tick++) {
+			await clock.tickAsync(60000);
+			for (const operation of pending) { operation.options.step?.((tick + 1) * 32, 32, 160); }
+		}
+		pending[0].callback(undefined);
+		await transfers[0];
+		assert.strictEqual(clock.countTimers(), 1, 'other operations still own the watchdog timer');
+		await clock.tickAsync(60000);
+		pending[1].options.step?.(160, 32, 160);
+		pending[2].options.step?.(160, 32, 160);
+		pending[1].callback(undefined);
+		pending[2].callback(undefined);
+		await Promise.all(transfers);
+		assert.deepStrictEqual({ ended: sftp.ended, timers: clock.countTimers() }, { ended: false, timers: 0 });
+	});
+
 	test('zero-byte progress cannot indefinitely keep a stalled file transfer alive', async () => {
 		const transfer = assert.rejects(service.fastPutRaw(sftp, 'local', '/remote'), /without data progress/);
 		await clock.tickAsync(60000);
