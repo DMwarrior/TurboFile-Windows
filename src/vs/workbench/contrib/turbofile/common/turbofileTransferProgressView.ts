@@ -6,7 +6,7 @@
 import { TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS, TurboFileTransferDisplayStatus } from './turbofileTransferDisplay.js';
 
 export const TURBOFILE_TRANSFER_SPEED_HISTORY_LIMIT = 120;
-const speedHistoryWindowMs = TURBOFILE_TRANSFER_SPEED_HISTORY_LIMIT * TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
+export const TURBOFILE_TRANSFER_SPEED_HISTORY_WINDOW_MS = TURBOFILE_TRANSFER_SPEED_HISTORY_LIMIT * TURBOFILE_TRANSFER_PROGRESS_RENDER_INTERVAL_MS;
 
 export interface ITurboFileTransferSpeedPoint {
 	readonly elapsedMs: number;
@@ -38,7 +38,7 @@ export class TurboFileTransferSpeedHistory {
 			return false;
 		}
 		this.lastBucket = bucket;
-		while (this.length > 0 && this.points[this.head]!.elapsedMs <= elapsedMs - speedHistoryWindowMs) {
+		while (this.length > 0 && this.points[this.head]!.elapsedMs <= elapsedMs - TURBOFILE_TRANSFER_SPEED_HISTORY_WINDOW_MS) {
 			this.points[this.head] = undefined;
 			this.head = (this.head + 1) % TURBOFILE_TRANSFER_SPEED_HISTORY_LIMIT;
 			this.length--;

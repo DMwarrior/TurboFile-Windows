@@ -97,6 +97,81 @@ suite('TurboFileTransferProgressDialog', () => {
 		});
 	});
 
+	test('measured progress keeps moving across delayed updates and owns only one browser animation', () => {
+		const { dialog } = createDialog();
+		const update = (bytes: number, status: 'running' | 'success' = 'running') => dialog.update(data({
+			metrics: getTurboFileTransferProgressView({ status, transferredBytes: bytes, totalBytes: 1000, elapsedMs: 19000 + bytes, speedBytesPerSecond: 100 })
+		}));
+		update(100);
+		update(500);
+		const fill = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-fill')!;
+		const animations = fill.getAnimations();
+		assert.strictEqual(animations.length, 1);
+		const animation = animations[0];
+		const trackWidth = fill.parentElement!.getBoundingClientRect().width;
+		let previous = 0;
+		for (const time of [300, 550, 750, 1000, 1500]) {
+			animation.currentTime = time;
+			const width = fill.getBoundingClientRect().width;
+			assert.ok(width > previous && width <= trackWidth * 0.5, `${time}ms must keep advancing within measured bytes`);
+			previous = width;
+		}
+		update(500);
+		assert.strictEqual(fill.getAnimations()[0], animation, 'Repeated counters must not restart playback');
+		update(700);
+		assert.strictEqual(fill.getAnimations().length, 1, 'Updates must replace, never accumulate, animations');
+		update(1000, 'success');
+		assert.strictEqual(fill.getAnimations().length, 0);
+		assert.strictEqual(fill.style.width, '100%');
+	});
+
+	test('real browser playback continues between 700ms and 1400ms without a new transport event', async () => {
+		const { dialog } = createDialog();
+		const update = (bytes: number) => dialog.update(data({
+			metrics: getTurboFileTransferProgressView({ status: 'running', transferredBytes: bytes, totalBytes: 1000, elapsedMs: 19000, speedBytesPerSecond: 100 })
+		}));
+		update(100);
+		update(600);
+		const fill = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-fill')!;
+		const started = performance.now();
+		let previous: number | undefined;
+		let movingFrames = 0;
+		await new Promise<void>(resolve => {
+			const sample = () => {
+				const elapsed = performance.now() - started;
+				const width = fill.getBoundingClientRect().width;
+				if (elapsed >= 700 && previous !== undefined && width > previous) {
+					movingFrames++;
+				}
+				previous = width;
+				if (elapsed >= 1400) {
+					resolve();
+				} else {
+					requestAnimationFrame(sample);
+				}
+			};
+			requestAnimationFrame(sample);
+		});
+		assert.ok(movingFrames >= 10, `Expected continuous native playback, got ${movingFrames} moving frames`);
+	});
+
+	test('canceling and closing release the native animation immediately', () => {
+		const { dialog } = createDialog();
+		dialog.update(data());
+		const advance = (bytes: number, canceling = false) => dialog.update(data({ canceling,
+			metrics: getTurboFileTransferProgressView({ status: 'running', transferredBytes: bytes, totalBytes: 1000, elapsedMs: 20000, speedBytesPerSecond: 100 })
+		}));
+		const fill = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-fill')!;
+		advance(800);
+		assert.strictEqual(fill.getAnimations().length, 1);
+		advance(800, true);
+		assert.strictEqual(fill.getAnimations().length, 0);
+		advance(900);
+		assert.strictEqual(fill.getAnimations().length, 1);
+		dialog.dispose();
+		assert.strictEqual(fill.getAnimations().length, 0);
+	});
+
 	test('running-at-total stays in finishing state and only backend success is exposed as complete', () => {
 		const { dialog } = createDialog();
 		const metrics = { transferredBytes: 1000, totalBytes: 1000, elapsedMs: 20000, speedBytesPerSecond: 100 };
@@ -139,13 +214,15 @@ suite('TurboFileTransferProgressDialog', () => {
 		assert.ok(Math.abs(completed.bottom - statusbarTop) <= 1, 'Completion must retain bottom alignment');
 	});
 
-	test('the real canvas draws a blue measured line and continuous translucent area in both themes', async () => {
+	test('the real canvas draws a blue speed line and subtle area shadow in both themes', async () => {
 		const { dialog } = createDialog();
-		const history = [20, 40, 65, 35, 75, 60, 85, 45].map((speed, index) => ({ elapsedMs: index * 500, speedBytesPerSecond: speed * 1024 * 1024 }));
+		const history = [20, 40, 65, 35, 75, 60, 85, 45].map((speed, index) => ({ elapsedMs: index * 8000, speedBytesPerSecond: speed * 1024 * 1024 }));
 		const canvas = dialog.element.querySelector<HTMLCanvasElement>('canvas')!;
 		for (const light of [true, false]) {
 			container.classList.toggle('is-turbofile-light', light);
-			dialog.update(data({ history, theme: light ? 'light' : 'dark' }));
+			dialog.update(data({ history, theme: light ? 'light' : 'dark',
+				metrics: getTurboFileTransferProgressView({ status: 'success', transferredBytes: 1000, totalBytes: 1000, elapsedMs: 56000, speedBytesPerSecond: 0 })
+			}));
 			// Let the real ResizeObserver report the chart's layout before reading canvas pixels.
 			await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 			const context = canvas.getContext('2d');
@@ -163,8 +240,7 @@ suite('TurboFileTransferProgressDialog', () => {
 				}
 				return false;
 			};
-			// At this height all measured points lie above the row. A continuous filled
-			// area covers it; the removed Steam bars leave most of these pixels empty.
+			// All measured speeds lie above this row. The shadow covers measured time only.
 			const row = Math.floor((canvas.getBoundingClientRect().height - 30) * ratio);
 			let filled = 0;
 			let sampled = 0;
@@ -175,10 +251,47 @@ suite('TurboFileTransferProgressDialog', () => {
 					filled++;
 				}
 			}
-			assert.deepStrictEqual({ light, line: containsPlotColor(light ? [0, 120, 212] : [59, 142, 234]), continuousArea: sampled > 100 && filled / sampled > 0.9, greenTrend: containsPlotColor(light ? [76, 127, 37] : [120, 180, 66]) }, {
-				light, line: true, continuousArea: true, greenTrend: false
+			assert.deepStrictEqual({ light, line: containsPlotColor(light ? [0, 120, 212] : [59, 142, 234]), shaded: sampled > 100 && filled / sampled > 0.8, greenTrend: containsPlotColor(light ? [76, 127, 37] : [120, 180, 66]) }, {
+				light, line: true, shaded: true, greenTrend: false
 			});
 		}
+	});
+
+	test('the speed timeline grows by time, ignores completion percentage, and scrolls after 60 seconds', async () => {
+		const { dialog } = createDialog();
+		const history = [0, 15000, 30000, 45000, 60000].map(elapsedMs => ({ elapsedMs, speedBytesPerSecond: 80 * 1024 * 1024 }));
+		const render = (samples: typeof history, bytes: number, total: number | undefined, status: 'running' | 'success' = 'running') => dialog.update(data({ history: samples,
+			metrics: getTurboFileTransferProgressView({ status, transferredBytes: bytes, totalBytes: total, elapsedMs: samples[samples.length - 1].elapsedMs, speedBytesPerSecond: 80 * 1024 * 1024 })
+		}));
+		render(history, 1000, 1000, 'success');
+		await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		const canvas = dialog.element.querySelector<HTMLCanvasElement>('canvas')!;
+		const bounds = () => {
+			const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+			let left = canvas.width;
+			let right = -1;
+			for (let index = 0; index < pixels.length; index += 4) {
+				if (pixels[index + 3] > 8 && pixels[index + 2] > pixels[index] + 80 && pixels[index + 2] > pixels[index + 1] + 60) {
+					const x = (index / 4) % canvas.width;
+					left = Math.min(left, x);
+					right = Math.max(right, x);
+				}
+			}
+			return { left, right };
+		};
+		const full = bounds();
+		assert.ok(full.right - full.left > 100);
+		const early = [0, 1500, 3000].map(elapsedMs => ({ elapsedMs, speedBytesPerSecond: 80 * 1024 * 1024 }));
+		for (const fraction of [0.08, 0.5, undefined, 1]) {
+			render(early, fraction === undefined ? 80 : fraction * 1000, fraction === undefined ? undefined : 1000, fraction === 1 ? 'success' : 'running');
+			const line = bounds();
+			assert.ok(Math.abs((line.right - full.left) / (full.right - full.left) - 0.05) < 0.01,
+				`Three seconds should occupy 5% of the time axis at any completion percentage: ${JSON.stringify(line)}`);
+		}
+		render([60000, 75000].map(elapsedMs => ({ elapsedMs, speedBytesPerSecond: 80 * 1024 * 1024 })), 800, 1000);
+		const scrolled = bounds();
+		assert.ok(Math.abs((scrolled.left - full.left) / (full.right - full.left) - 0.75) < 0.01);
+		assert.ok(Math.abs(scrolled.right - full.right) <= 1);
 	});
 
 	test('progress motion stops for terminal, settling and canceling states', () => {

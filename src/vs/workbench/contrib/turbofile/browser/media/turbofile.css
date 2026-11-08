@@ -2922,9 +2922,9 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .turbofile-transfer-progress-panel {
 	--turbofile-progress-accent: #3b8eea;
+	--turbofile-progress-fill: rgba(59, 142, 234, 0.12);
 	--turbofile-progress-label: #9ca3af;
 	--turbofile-progress-grid: color-mix(in srgb, var(--tf-text) 20%, transparent);
-	--turbofile-progress-fill: color-mix(in srgb, var(--turbofile-progress-accent) 12%, transparent);
 	--turbofile-progress-track: color-mix(in srgb, var(--tf-text) 22%, transparent);
 	width: 100%;
 	max-height: min(360px, 100%);
@@ -2949,9 +2949,9 @@ body.hc-black .turbofile-live-transfer-panel {
 
 .is-turbofile-light .turbofile-transfer-progress-panel {
 	--turbofile-progress-accent: #0078d4;
+	--turbofile-progress-fill: rgba(0, 120, 212, 0.08);
 	--turbofile-progress-label: #697386;
 	--turbofile-progress-grid: #d1d5db;
-	--turbofile-progress-fill: rgba(0, 120, 212, 0.08);
 	--turbofile-progress-track: #dedfe2;
 	box-shadow: none;
 }
@@ -3109,11 +3109,6 @@ body.hc-black .turbofile-live-transfer-panel {
 	background: linear-gradient(100deg, #347ded 0%, #3782ee 45%, #3985f1 100%);
 	box-shadow: inset 0 1px 1px rgb(255 255 255 / 12%);
 	transition: none;
-}
-
-.turbofile-transfer-progress-track.is-animated:not(.is-indeterminate) .turbofile-transfer-progress-fill {
-	/* Bridge the 500 ms measured updates with a little scheduling tolerance, without easing pauses. */
-	transition: width 550ms linear;
 }
 
 .turbofile-transfer-progress-fill::after {
@@ -3287,10 +3282,6 @@ body.hc-black .turbofile-live-transfer-panel {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.turbofile-transfer-progress-track.is-animated:not(.is-indeterminate) .turbofile-transfer-progress-fill {
-		transition: none;
-	}
-
 	.turbofile-transfer-progress-track.is-indeterminate .turbofile-transfer-progress-fill {
 		animation: none;
 		transform: translateX(262.5%);

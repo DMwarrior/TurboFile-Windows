@@ -11,6 +11,8 @@ export const turboFileReleaseNotes: readonly { readonly version: string; readonl
 		version: '1.175.0',
 		date: '2026-11-08',
 		changes: [
+			localize('turbofile.release175.smoothTimeline', "修复进度条周期性停顿；速度曲线按最近 60 秒绘制并滚动，恢复淡蓝色阴影，与完成百分比独立显示。"),
+			localize('turbofile.release175.directPreparation', "修复首次直连探测尚未完成就过早切换中转的问题，探测等待可取消，已有有效缓存无需额外等待。"),
 			localize('turbofile.release175.progress', "底部传输信息可展开进度面板，显示实时速度曲线、已传容量和完成后的平均速度；已知总量显示百分比，未知总量不估造进度。"),
 			localize('turbofile.release175.sftp', "增强 SFTP 覆盖文件保护，使用临时文件完成传输后再替换，避免断线、取消或写入失败破坏原有文件。"),
 			localize('turbofile.release175.connections', "限制同一服务器的同时握手数量，减少批量任务启动时的连接失败；精简小文件传输的重复请求。"),

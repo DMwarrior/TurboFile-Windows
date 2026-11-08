@@ -37,7 +37,7 @@ import { TurboFileSshHandshakeQueue } from '../node/turbofileSshHandshakeQueue.j
 import { buildTurboFilePosixMoveCaptureCommand, buildTurboFilePosixMoveCleanupCommand, captureTurboFileLocalMoveSnapshots, captureTurboFileRemoteMoveSnapshots, decodeTurboFileRemoteMoveSnapshots, encodeTurboFileMoveCapturePaths, encodeTurboFileMoveCleanupSnapshot, ITurboFileMoveSnapshot } from '../node/turbofileMoveSafety.js';
 import { discoverTurboFileSavedSshDevices } from '../node/turbofileSavedSsh.js';
 import { TurboFileDirectDataError, TurboFileDirectSshRoute, TurboFileDirectUnavailableError, TurboFileDirectVerification } from '../common/turbofileDirectRoute.js';
-import { coordinateTurboFileDirectRouteProbe, TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS } from '../common/turbofileDirectRouteProbe.js';
+import { coordinateTurboFileDirectRouteProbe } from '../common/turbofileDirectRouteProbe.js';
 import { createTurboFileRsyncMappedGroups, createTurboFileRsyncSourceGroups } from '../common/turbofileRsyncBatchPlan.js';
 import { getRemoteDirectoryReadRetryDelay, REMOTE_DIRECTORY_READ_MAX_ATTEMPTS, shouldRetryRemoteDirectoryRead } from '../common/turbofileRemoteDirectoryRetry.js';
 import { createPosixNativeBatchTransferPlan, createPosixPortableBatchTransferPlan } from '../common/turbofileRemoteNativeBatchPlan.js';
@@ -1413,7 +1413,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const preparedDirectRoutes = new Map<ITurboFileTransferAttempt, IPreparedDirectRoute>();
 		if (request.strategyHint !== 'relay' && plan.attempts.some(attempt => attempt.route === 'direct')) {
-			const selected = await this.resolveOrPrepareDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute);
+			const selected = await this.resolveOrPrepareDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute, request.progressId);
 			this.throwIfTransferCanceled(request.progressId);
 			if (!selected.length) {
 				effectiveRequest = { ...effectiveRequest, strategyHint: 'relay' };
@@ -3908,7 +3908,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		});
 		const preparedDirectRoutes = new Map<ITurboFileTransferAttempt, IPreparedDirectRoute>();
 		if (request.strategyHint !== 'relay' && plan.attempts.some(attempt => attempt.route === 'direct')) {
-			const selected = await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute);
+			const selected = await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute, request.progressId);
 			for (const prepared of selected) {
 				preparedDirectRoutes.set(prepared.attempt, prepared.preparedRoute);
 			}
@@ -8065,7 +8065,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		return prepared;
 	}
 
-	private async resolveOrPrepareDirectAttempts(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, attempts: readonly ITurboFileTransferAttempt[], inherited?: IPreparedDirectRoute): Promise<IPreparedDirectAttempt[]> {
+	private async resolveOrPrepareDirectAttempts(source: ITurboFileTransferEndpoint, target: ITurboFileTransferEndpoint, attempts: readonly ITurboFileTransferAttempt[], inherited?: IPreparedDirectRoute, progressId?: string): Promise<IPreparedDirectAttempt[]> {
 		const cached = this.resolvePreparedDirectAttempts(source, target, attempts, inherited);
 		if (cached.length || looksLikeWindowsPath(source.path) || looksLikeWindowsPath(target.path)) {
 			return cached;
@@ -8086,10 +8086,12 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		// A cache miss means "unknown", never "relay". Every foreground transfer for the same
 		// device pair shares the pane's in-flight proof through directScpProbePending. Start missing
 		// fallback protocols together and continue as soon as any planned direct route is proven.
-		// The foreground decision is capped at the agreed 800 ms; the shared background proofs are
-		// intentionally not canceled and can persist a direct result for the next operation.
+		// A cold proof may need SSH authentication on both servers. Give the already bounded
+		// background proof its full budget, rather than declaring relay after only 800 ms.
+		// Cancel only this transfer's wait: other transfers still share the same proof.
+		this.throwIfTransferCanceled(progressId);
 		const pending = unknownProtocols.map(protocol => this.getOrStartDirectScpProbePair(source, target, protocol));
-		await withTurboFileTimeout(new Promise<void>(resolve => {
+		await this.waitForTransferSession(withTurboFileTimeout(new Promise<void>(resolve => {
 			let remaining = pending.length;
 			let settled = false;
 			const handleSettledProbe = (): void => {
@@ -8105,7 +8107,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			for (const probe of pending) {
 				void probe.then(handleSettledProbe, handleSettledProbe);
 			}
-		}), TURBO_FILE_DIRECT_ROUTE_PROBE_DEADLINE_MS, 'Direct route foreground decision timed out.').catch(() => undefined);
+		}), DIRECT_SCP_PROBE_BACKGROUND_TIMEOUT_MS, 'Direct route foreground decision timed out.').catch(() => undefined), progressId);
 
 		// A proof that is still indeterminate at the foreground deadline must not strand the
 		// operation. Use relay now while the same single-flight proof continues in the background.

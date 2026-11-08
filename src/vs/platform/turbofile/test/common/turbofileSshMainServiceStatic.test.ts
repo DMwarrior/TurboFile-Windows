@@ -1125,7 +1125,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const preparedSelector = methodBlock(service, 'private resolvePreparedDirectAttempts', 'private getOrStartDirectScpProbePair');
 
 		assert.deepStrictEqual({
-			allDirectProtocolsCanSelectPreparedRoute: transfer.includes('await this.resolveOrPrepareDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute)')
+			allDirectProtocolsCanSelectPreparedRoute: transfer.includes('await this.resolveOrPrepareDirectAttempts(effectiveRequest.source, effectiveRequest.target, plan.attempts, preparedDirectRoute, request.progressId)')
 				&& preparedSelector.includes("if (attempt.route !== 'direct')")
 				&& preparedSelector.includes('getPreparedDirectRouteProtocol(attempt)')
 				&& preparedSelector.includes('prepared.push('),
@@ -1187,10 +1187,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const credentialWrapper = functionBlock(service, 'wrapRemoteCredentialCommand');
 
 		assert.deepStrictEqual({
-			multiFileUsesActualPlanDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
+			multiFileUsesActualPlanDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute, request.progressId)'),
 			explicitDirectAlsoUsesPaneDecision: batchPlan.includes("request.strategyHint !== 'relay'")
 				&& !batchPlan.includes("request.strategyHint !== 'direct'"),
-			preparedDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute)'),
+			preparedDecision: batchPlan.includes('await this.resolveOrPrepareDirectAttempts(request.source, request.targetDirectory, plan.attempts, preparedDirectRoute, request.progressId)'),
 			noDirectProbeProgress: !transferBatchCore.includes('Checking direct'),
 			sshRsyncDoesNotPublishPlannedDirectStrategy: transferBatchCore.includes("const initialIsRsync = initialAttempt?.protocol === 'rsync' && !sshToSsh;"),
 			relaySkipsEveryDirectAttempt: batchPlan.includes("strategyHint: 'relay'")

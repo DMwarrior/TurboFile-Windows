@@ -8,7 +8,8 @@ import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js'
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
-import { ITurboFileTransferProgressView, ITurboFileTransferSpeedPoint } from '../common/turbofileTransferProgressView.js';
+import { ITurboFileTransferProgressView, ITurboFileTransferSpeedPoint, TURBOFILE_TRANSFER_SPEED_HISTORY_WINDOW_MS } from '../common/turbofileTransferProgressView.js';
+import { ITurboFileProgressMotion, TurboFileProgressMotion } from '../common/turbofileProgressMotion.js';
 
 export interface ITurboFileTransferProgressDialogData {
 	readonly metrics: ITurboFileTransferProgressView;
@@ -46,6 +47,10 @@ export class TurboFileTransferProgressDialog extends Disposable {
 	private readonly footer = $('.turbofile-transfer-progress-footer');
 	private readonly closeButton: HTMLButtonElement;
 	private data: ITurboFileTransferProgressDialogData | undefined;
+	private readonly progressMotion = new TurboFileProgressMotion();
+	private motionPlan: ITurboFileProgressMotion | undefined;
+	private progressAnimation: Animation | undefined;
+	private readonly reducedMotion = getWindow(this.element).matchMedia('(prefers-reduced-motion: reduce)');
 	private width = 0;
 	private height = 0;
 	private colors: { accent: string; fill: string; grid: string; text: string } | undefined;
@@ -81,7 +86,7 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		const graph = $('.turbofile-transfer-progress-graph');
 		this.canvas.className = 'turbofile-transfer-progress-graph-canvas';
 		this.canvas.setAttribute('role', 'img');
-		const graphDescription = localize('turbofile.progress.graph', "最近 60 秒内的传输速度：蓝色折线及填充区域显示实际传输速度");
+		const graphDescription = localize('turbofile.progress.graph', "最近 60 秒内的传输速度：横轴表示时间，蓝色折线及淡蓝色阴影的高度表示实际传输速度");
 		this.canvas.setAttribute('aria-label', graphDescription);
 		this.canvas.title = graphDescription;
 		graph.appendChild(this.canvas);
@@ -89,6 +94,9 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		this.track.setAttribute('aria-label', localize('turbofile.progress.title', "传输进度"));
 		this.track.appendChild(this.fill);
 		this._register(addDisposableListener(this.element.ownerDocument, 'visibilitychange', () => this.updateAnimationState()));
+		const motionPreferenceChanged = () => this.updateAnimationState();
+		this.reducedMotion.addEventListener('change', motionPreferenceChanged);
+		this._register({ dispose: () => this.reducedMotion.removeEventListener('change', motionPreferenceChanged) });
 		const stats = $('.turbofile-transfer-progress-stats');
 		stats.append(this.size, this.time);
 		const details = $('.turbofile-transfer-progress-details');
@@ -148,6 +156,11 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		if (this.data?.theme !== data.theme) {
 			this.colors = undefined;
 		}
+		if (this.data && (data.name !== this.data.name || data.source !== this.data.source || data.target !== this.data.target
+			|| data.metrics.totalBytes !== this.data.metrics.totalBytes || data.metrics.elapsedMs < this.data.metrics.elapsedMs)) {
+			this.stopProgressAnimation();
+			this.progressMotion.reset(undefined, getWindow(this.element).performance.now());
+		}
 		this.data = data;
 		const metrics = data.metrics;
 		this.setText(this.speedLabel, metrics.status === 'success' ? localize('turbofile.progress.averageSpeed', "平均速度") : localize('turbofile.progress.currentSpeed', "当前速度"));
@@ -168,9 +181,9 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		this.track.classList.toggle('is-settling', metrics.status === 'finishing');
 		this.track.classList.toggle('is-complete', metrics.status === 'success');
 		this.track.classList.toggle('is-empty', metrics.status !== 'success' && !indeterminate && (metrics.fraction === undefined || metrics.fraction <= 0));
-		this.updateAnimationState();
 		this.fill.style.width = metrics.status === 'success' ? '100%'
 			: metrics.fraction === undefined ? active ? '' : '0%' : `${metrics.fraction * 100}%`;
+		this.updateAnimationState();
 		this.track.setAttribute('aria-valuetext', data.state);
 		if (metrics.percentage === undefined) {
 			this.track.removeAttribute('aria-valuenow');
@@ -190,6 +203,29 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		const animated = this.data?.metrics.status === 'running' && !this.data.canceling
 			&& !this.element.ownerDocument.hidden && !this.element.hidden && this.element.isConnected;
 		this.track.classList.toggle('is-animated', animated);
+		const now = getWindow(this.element).performance.now();
+		const fraction = this.data?.metrics.fraction;
+		if (!animated || this.reducedMotion.matches || fraction === undefined) {
+			this.stopProgressAnimation();
+			this.progressMotion.reset(fraction, now);
+			return;
+		}
+		const plan = this.progressMotion.update(fraction, now);
+		if (plan !== this.motionPlan) {
+			this.stopProgressAnimation();
+			this.motionPlan = plan;
+			if (plan) {
+				this.progressAnimation = this.fill.animate(plan.fractions.map(value => ({ width: `${value * 100}%` })), {
+					duration: plan.duration, easing: 'linear'
+				});
+			}
+		}
+	}
+
+	private stopProgressAnimation(): void {
+		this.progressAnimation?.cancel();
+		this.progressAnimation = undefined;
+		this.motionPlan = undefined;
 	}
 
 	/** Draw at most 120 measured samples, only while attached and visible. */
@@ -246,9 +282,11 @@ export class TurboFileTransferProgressDialog extends Disposable {
 			context.fillStyle = this.colors.text;
 			context.fillText(this.formatRate(ceiling * fraction), left - 8, y);
 		}
-		const first = points[0]?.elapsedMs ?? 0;
-		const last = points[points.length - 1]?.elapsedMs ?? first;
-		const span = Math.max(1000, last - first);
+		const last = points[points.length - 1]?.elapsedMs ?? 0;
+		// Time, never completion percentage, determines the horizontal position.
+		// Leave future time blank initially, then scroll the bounded history left.
+		const span = TURBOFILE_TRANSFER_SPEED_HISTORY_WINDOW_MS;
+		const first = Math.max(0, last - span);
 		const x = (point: ITurboFileTransferSpeedPoint) => left + (point.elapsedMs - first) / span * (right - left);
 		const y = (point: ITurboFileTransferSpeedPoint) => bottom - Math.min(1, point.speedBytesPerSecond / ceiling) * (bottom - top);
 		if (points.length > 0) {
@@ -282,7 +320,7 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		context.textAlign = 'left';
 		context.fillText(localize('turbofile.progress.graphSeconds', "{0} 秒", Math.floor(first / 1000)), left, height - 7);
 		context.textAlign = 'right';
-		context.fillText(localize('turbofile.progress.graphSeconds', "{0} 秒", Math.floor(last / 1000)), right, height - 7);
+		context.fillText(localize('turbofile.progress.graphSeconds', "{0} 秒", Math.floor((first + span) / 1000)), right, height - 7);
 	}
 
 	private setText(element: HTMLElement, text: string): void {
@@ -292,6 +330,7 @@ export class TurboFileTransferProgressDialog extends Disposable {
 	}
 
 	override dispose(): void {
+		this.stopProgressAnimation();
 		this.element.remove();
 		super.dispose();
 	}
