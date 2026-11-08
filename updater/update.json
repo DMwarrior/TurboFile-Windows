@@ -1,37 +1,37 @@
 {
-  "version": "1.174.0",
-  "name": "极速传 1.174.0",
-  "notes": "# 极速传 1.174.0\n\n发布日期：2026-10-29\n\n- 设备管理新增“导入已有设备”按钮，自动扫描本机保存的 SSH 连接，选择需要的设备后批量添加。\n- 支持 OpenSSH 的 `.ssh/config` 和 `Include` 配置，以及 WinSCP、PuTTY/KiTTY 保存的 SSH 会话；列表显示地址、用户、端口、配置来源和凭据状态。\n- 支持迁移 WinSCP 普通保存密码及私钥路径，密码存入极速传加密凭据存储，不在列表或日志中显示明文。\n- 重复导入时保留现有设备和密码，仅补充缺失凭据；新设备凭据保存失败时不留下不完整配置。\n- 保留手动选择 WinSCP INI 文件入口，支持中文名称、非标准端口及默认目录。\n\n兼容性说明：WinSCP 主密码保护的凭据需单独填写。代理、跳板机、OpenSSH Match 条件和特殊 Agent/证书配置暂不自动迁移，会在导入结果中提示。`known_hosts` 不包含完整登录信息，不作为完整设备导入。识别过程不执行配置中的命令，也不读取私钥文件内容。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.174.0.exe`\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
-  "pub_date": "2026-10-29T07:02:17.307Z",
+  "version": "1.175.0",
+  "name": "极速传 1.175.0",
+  "notes": "# 极速传 1.175.0\n\n发布日期：2026-11-08\n\n- 底部传输信息可展开进度面板，显示实时速度曲线、已传容量、耗时和完成后的平均速度；再次点击、最小化或关闭面板后继续传输。\n- 已知总量显示真实百分比和预计剩余时间；未知总量显示传输活动，不为显示进度额外扫描目录大小。进度条平滑更新，不含粒子特效。\n- 增强 SFTP 覆盖文件保护，先写同目录临时文件，完成后再替换；断线、取消或写入失败时保留已有目标文件。\n- 限制同一服务器的同时握手数量，减少批量任务启动时的连接失败；复用已连接通道并精简小文件的重复请求。\n- 修复跨盘剪切在源清理失败后误删目标副本的问题，加强目录剪切时对传输期间新增或修改文件的保护。\n- 完善传输取消、Tar 中转结束确认和错误传播，避免失败后错误重试或误报完成。\n- 设备编辑保存失败时恢复原配置与凭据；任务日志临时写入失败后进行有容量上限的退避重试。\n- 统一左右路径显示和工具栏图标尺寸，调整图标配色，改善深浅主题下的可读性。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.175.0.exe`\n\n自动更新继续优先使用 Gitee 国内源，GitHub 提供完整 EXE 下载和备用更新源。\n\n目录剪切只核对文件元数据，不计算内容哈希。若源文件在传输中发生变化，或服务器无法提供足够精度的元数据，已复制的目标文件保留，未能安全确认的源文件也会保留，并提示剪切未全部完成。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
+  "pub_date": "2026-11-08T10:47:02.340Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe",
-      "sha256": "3f1dd40ffb041f80e890a73487c51576890a5d9d07b51bedaf2580c2d4e753cc",
-      "size": 113642607,
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe",
+      "sha256": "3fd1ba2b115a9e612f81b958f1e18cf44b3cdc773bb070defeaa543baf7cd24a",
+      "size": 113666388,
       "parts": [
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part001",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part001",
           "size": 33554432,
-          "sha256": "a4c1565433f1afb67dd95ece1fc1d0421f2824cd750e8c87c745cd546f04fde3"
+          "sha256": "0063ef5e4bc3aeae58ae7e05e47d1d6562101e7329938d3f0a5602dd4f9d16f8"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part002",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part002",
           "size": 33554432,
-          "sha256": "22a7a1e2db9a3d76ab8a12b567181df979578db2b613f7b13dad727e9cff99e8"
+          "sha256": "6a8616cc7743a0640672fedd95a08663a9a1b2b1a820112cb29ebcc7014a97c2"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part003",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part003",
           "size": 33554432,
-          "sha256": "c99d39e5c881183dc8cfc1a12204b7e02b87c196c10f6c06cccef347025c4755"
+          "sha256": "15c6653cb14e96ba0a141f8d1a4f812c0f3cba8daa25233e7619436a25957465"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.174.0/TurboFileSetup-win32-x64-1.174.0.exe.part004",
-          "size": 12979311,
-          "sha256": "fdb2ab4acc2cb44815b1f22a448182f1235d05e2af5496a4b656716f37dad900"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part004",
+          "size": 13003092,
+          "sha256": "3a8a9d4e95683850e88d3016fbc5f928ff223d3ad98ab61eb872c189baca88a5"
         }
       ],
       "mirrors": [
-        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/687641247"
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/723641444"
       ]
     }
   }
