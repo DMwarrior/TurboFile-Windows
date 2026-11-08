@@ -18,17 +18,17 @@ function methodBlock(source: string, name: string, nextName: string): string {
 suite('TurboFileSftpHotPathStatic', () => {
 	const servicePath = () => path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 
-	test('confirms the source before pipelining the destructive target open with the first read', () => {
+	test('confirms the source before pipelining exclusive temporary creation with the first read', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const relay = methodBlock(service, 'private async relayRemoteFileInParallel', 'private openShell');
 		const sourceOpen = relay.indexOf("await this.openRemoteFile(sourceSftp, sourcePath, 'r')");
-		const targetOpen = relay.indexOf("this.openRemoteFile(targetSftp, targetPath, 'w')", sourceOpen);
+		const targetOpen = relay.indexOf("this.openRemoteFile(targetSftp, temporaryPath, 'wx', temporaryMode)", sourceOpen);
 		const firstRead = relay.indexOf('this.readRemoteFileChunkExact(', sourceOpen);
 		const pipeline = relay.indexOf('await Promise.allSettled([', sourceOpen);
 		const close = methodBlock(service, 'private closeRemoteFile', 'private async relayRemoteFileInParallel');
 
 		assert.deepStrictEqual({
-			sourceOpenPrecedesDestructiveTargetOpen: sourceOpen >= 0 && targetOpen > sourceOpen,
+			sourceOpenPrecedesTemporaryOpen: sourceOpen >= 0 && targetOpen > sourceOpen && !relay.includes("this.openRemoteFile(targetSftp, targetPath, 'w')"),
 			pipelinesTargetOpenWithFirstRead: pipeline > sourceOpen && firstRead > pipeline
 				&& relay.includes('openTarget().then(handle => { targetHandle = handle; })'),
 			closesBothSidesTogether: relay.includes('await Promise.all([')
@@ -37,7 +37,7 @@ suite('TurboFileSftpHotPathStatic', () => {
 				&& !relay.includes('.catch(() => undefined)'),
 			propagatesCloseErrors: close.includes('reject(error);')
 		}, {
-			sourceOpenPrecedesDestructiveTargetOpen: true,
+			sourceOpenPrecedesTemporaryOpen: true,
 			pipelinesTargetOpenWithFirstRead: true,
 			closesBothSidesTogether: true,
 			propagatesCloseErrors: true

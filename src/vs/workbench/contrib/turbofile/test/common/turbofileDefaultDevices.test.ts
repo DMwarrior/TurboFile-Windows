@@ -43,11 +43,11 @@ class TestSecretStorageService {
 		return Promise.resolve(this.values.get(key));
 	}
 
-	async set(key: string, value: string): Promise<void> {
+	set = async (key: string, value: string): Promise<void> => {
 		await this.setBlockers.get(key);
 		this.values.set(key, value);
 		this.onDidChangeSecretEmitter.fire(key);
-	}
+	};
 
 	delete(key: string): Promise<void> {
 		this.values.delete(key);
@@ -124,6 +124,113 @@ suite('TurboFileDefaultDevices', () => {
 		await assert.rejects(store.importDevice(draft({ password: 'example-secret' })), /Secret storage unavailable/);
 		assert.deepStrictEqual([store.loadDevices(), [...secrets.values]], [[], []]);
 		store.dispose();
+	});
+
+	test('rolls back partial credential writes before reporting an edited device as failed', async () => {
+		const original = device('edit-failure', 'old.example.test', 'old-user');
+		const { store, secrets } = createStore([original]);
+		const previousDevices = store.loadDevices();
+		const passwordKey = `turbofile.device.secret.${original.id}.password`;
+		const privateKeyKey = `turbofile.device.secret.${original.id}.privateKey`;
+		const passphraseKey = `turbofile.device.secret.${original.id}.passphrase`;
+		secrets.values.set(passwordKey, 'old-password');
+		secrets.values.set(privateKeyKey, 'old-key');
+		const lateWriteStarted = new DeferredPromise<void>();
+		const finishLateWrite = new DeferredPromise<void>();
+		const set = secrets.set;
+		secrets.set = async (key, value) => {
+			if (key === passphraseKey && value === 'new-passphrase') {
+				lateWriteStarted.complete();
+				await finishLateWrite.p;
+			}
+			await set(key, value);
+			// A provider may report failure after the write has already taken effect.
+			if (key === privateKeyKey && value === 'new-key') { throw new Error('Credential write failed'); }
+		};
+		try {
+			const editing = store.updateDevice(original.id, draft({ host: 'new.example.test', password: 'new-password', privateKey: 'new-key', passphrase: 'new-passphrase' }));
+			await lateWriteStarted.p;
+			const duringWrite = store.loadDevices();
+			let credentialReadFinished = false;
+			const reading = store.getPassword(original.id).then(value => { credentialReadFinished = true; return value; });
+			await Promise.resolve();
+			assert.deepStrictEqual([duringWrite, credentialReadFinished], [previousDevices, false]);
+			finishLateWrite.complete();
+			await assert.rejects(editing, /Credential write failed/);
+			assert.deepStrictEqual([store.loadDevices(), await reading, [...secrets.values]], [previousDevices, 'old-password', [[passwordKey, 'old-password'], [privateKeyKey, 'old-key']]]);
+		} finally {
+			finishLateWrite.complete();
+			store.dispose();
+		}
+	});
+
+	test('a failed edit cannot roll back a newer queued edit', async () => {
+		const original = device('queued-edit', 'old.example.test', 'old-user');
+		const { store, secrets } = createStore([original]);
+		const passwordKey = `turbofile.device.secret.${original.id}.password`;
+		secrets.values.set(passwordKey, 'old-password');
+		const set = secrets.set;
+		secrets.set = async (key, value) => {
+			await set(key, value);
+			if (value === 'failed-password') { throw new Error('Credential write failed'); }
+		};
+		try {
+			const first = store.updateDevice(original.id, draft({ host: 'failed.example.test', password: 'failed-password' }));
+			const second = store.updateDevice(original.id, draft({ host: 'new.example.test', password: 'new-password' }));
+			await assert.rejects(first, /Credential write failed/);
+			await second;
+			assert.deepStrictEqual([store.loadDevices()[0].host, await store.getPassword(original.id)], ['new.example.test', 'new-password']);
+		} finally { store.dispose(); }
+	});
+
+	test('restores credentials when saving edited metadata fails', async () => {
+		const original = device('metadata-failure', 'old.example.test', 'old-user');
+		const { store, storage, secrets } = createStore([original]);
+		const previousDevices = store.loadDevices();
+		const passwordKey = `turbofile.device.secret.${original.id}.password`;
+		secrets.values.set(passwordKey, 'old-password');
+		storage.store = (key, value) => {
+			if (key === 'turbofile.devices' && value.includes('new.example.test')) { throw new Error('Metadata write failed'); }
+			storage.values.set(key, value);
+		};
+		try {
+			await assert.rejects(store.updateDevice(original.id, draft({ host: 'new.example.test', password: 'new-password' })), /Metadata write failed/);
+			assert.deepStrictEqual([store.loadDevices(), await store.getPassword(original.id)], [previousDevices, 'old-password']);
+		} finally { store.dispose(); }
+	});
+
+	test('reports an unsuccessful credential rollback without publishing new device metadata', async () => {
+		const original = device('rollback-failure', 'old.example.test', 'old-user');
+		const { store, secrets } = createStore([original]);
+		const previousDevices = store.loadDevices();
+		secrets.values.set(`turbofile.device.secret.${original.id}.password`, 'old-password');
+		const set = secrets.set;
+		secrets.set = async (key, value) => {
+			if (value === 'new-key' || value === 'old-password') { throw new Error('Credential storage unavailable'); }
+			await set(key, value);
+		};
+		try {
+			await assert.rejects(store.updateDevice(original.id, draft({ host: 'new.example.test', password: 'new-password', privateKey: 'new-key' })), /Unable to restore saved device credentials/);
+			assert.deepStrictEqual(store.loadDevices(), previousDevices);
+		} finally { store.dispose(); }
+	});
+
+	test('preserves other device and capability updates while an edit is saving credentials', async () => {
+		const original = device('slow-edit', 'old.example.test', 'old-user');
+		const { store, secrets } = createStore([original]);
+		const started = new DeferredPromise<void>();
+		const released = new DeferredPromise<void>();
+		const set = secrets.set;
+		secrets.set = async (key, value) => { started.complete(); await released.p; await set(key, value); };
+		try {
+			const editing = store.updateDevice(original.id, draft({ host: 'new.example.test', password: 'new-password' }));
+			await started.p;
+			const added = await store.saveDevice(draft({ host: 'other.example.test' }));
+			store.updateDeviceCapabilities(original.id, { ...defaultTurboFileDeviceCapabilities, rsync: true });
+			released.complete();
+			await editing;
+			assert.deepStrictEqual(store.loadDevices().map(value => [value.id, value.host, value.capabilities.rsync]), [[original.id, 'new.example.test', true], [added.id, 'other.example.test', false]]);
+		} finally { released.complete(); store.dispose(); }
 	});
 
 	test('does not attach a passphrase to an existing device using a different private key', async () => {
@@ -296,7 +403,8 @@ suite('TurboFileDefaultDevices', () => {
 			getCallCounts: [secrets.getCallCounts.get(passwordKey), secrets.getCallCounts.get(privateKeyKey)]
 		}, {
 			values: ['new-password', 'new-private-key'],
-			getCallCounts: [2, 2]
+			// The updating store reads the previous values once for rollback before publishing.
+			getCallCounts: [3, 3]
 		});
 
 		firstStore.dispose();

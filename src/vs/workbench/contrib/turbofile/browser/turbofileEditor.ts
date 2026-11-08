@@ -16,7 +16,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -69,6 +69,7 @@ import { TurboFileJournalView } from './turbofileJournalView.js';
 import { ITurboFileDeviceMonitorContext, TurboFileDeviceMonitorView } from './turbofileDeviceMonitorView.js';
 import { applyTurboFileDocumentTabAffinity, ensureTurboFileTransferTabsLeft, getTurboFileDocumentTargetIndex } from './turbofileDocumentTabAffinity.js';
 import { getTurboFileRecycleBinIcon } from './turbofileRecycleBinIcons.js';
+import { TURBOFILE_TERMINAL_ICON } from './turbofileTerminalIcon.js';
 import { turboFileWorkbenchBridge, TurboFileWorkbenchCommand, TurboFileWorkbenchPage } from './turbofileWorkbenchBridge.js';
 import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from '../common/turbofileDirectoryInflight.js';
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
@@ -86,6 +87,8 @@ import { isTurboFileListingReadyForSort, sortTurboFileItems, turboFileSortNeedsA
 import { getTurboFileTitlebarUpdateActionKind, getTurboFileUpdateDownloadPercent, TurboFileTitlebarUpdateActionKind } from '../common/turbofileTitlebar.js';
 import { getTurboFileReleaseHistory, summarizeTurboFileReleaseNotes, turboFileReleaseNotes } from '../common/turbofileReleaseNotes.js';
 import { aggregateTurboFileTransferProgress, chooseDisplayTransferSpeed, createTurboFileTransferSizePolicy, isTurboFileTransferProgressQuiet, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, trimTurboFileTaskHistory, TurboFileTransferMetricsDisplay, TURBOFILE_TRANSFER_LIVE_TICK_INTERVAL_MS } from '../common/turbofileTransferDisplay.js';
+import { getTurboFileTransferProgressView, TurboFileTransferSpeedHistory } from '../common/turbofileTransferProgressView.js';
+import { TurboFileTransferProgressDialog } from './turbofileTransferProgressDialog.js';
 import { shouldRetargetWindowsDesktopPane } from '../common/turbofileWindowsLocation.js';
 import { enterTurboFileTrashDirectory, enterTurboFileTrashView, isTurboFileTrashBrowsePathAllowed, isTurboFileTrashRootView, leaveTurboFileTrashDirectory, leaveTurboFileTrashView, mapTurboFileTrashItemsToRows, TurboFileTrashPaneMode } from '../common/turbofileTrashView.js';
 
@@ -439,6 +442,11 @@ interface TurboFileTaskTransferItem {
 
 interface TurboFileTask {
 	lastProgressAt?: number;
+	transferSource?: string;
+	transferTarget?: string;
+	transferProgressPhase?: ITurboFileTransferProgressEvent['phase'];
+	/** The last measured progress counter, retained when completion reports file payload size. */
+	transferProgressBytes?: number;
 	id: number;
 	kind: TurboFileTaskKind;
 	label: string;
@@ -584,6 +592,7 @@ const TURBOFILE_UI_FONT_FAMILIES = [
 const TURBOFILE_BROWSER_FONT_FAMILIES = TURBOFILE_UI_FONT_FAMILIES;
 type TurboFileBootstrapIcon = 'archive' | 'arrow-clockwise' | 'arrow-up-circle' | 'clock' | 'cloud-upload-fill' | 'eye' | 'file-earmark' | 'file-earmark-zip' | 'files' | 'folder-check' | 'folder-fill' | 'folder-plus' | 'geo-alt-fill' | 'grid-3x3-gap' | 'hdd-network-fill' | 'lightning-charge-fill' | 'pencil-square' | 'scissors' | 'search' | 'terminal' | 'trash';
 type TurboFileIconColor = 'primary' | 'success' | 'warning' | 'info' | 'danger' | 'secondary';
+type TurboFileToolbarAction = 'sort' | 'refresh' | 'search' | 'delete' | 'copy-path' | 'images' | 'image-pane' | 'maximize' | 'terminal';
 type TurboFileAppearanceIcon = 'moon' | 'sun' | 'system';
 interface TurboFileIconPath {
 	readonly d: string;
@@ -829,6 +838,10 @@ export class TurboFileEditor extends EditorPane {
 	private imageGridObserver: IntersectionObserver | undefined;
 	private liveTransferTicker: number | undefined;
 	private readonly transferMetricsDisplay = new TurboFileTransferMetricsDisplay();
+	private readonly transferProgressHistory = new TurboFileTransferSpeedHistory();
+	private readonly transferProgressDialog = this._register(new MutableDisposable<TurboFileTransferProgressDialog>());
+	private transferProgressTaskIds: number[] = [];
+	private transferProgressTasks: readonly TurboFileTask[] | undefined;
 	private imageGridScrollRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	// Thumbnails load only after scrolling settles, and only for the page in view; bumping the token
 	// invalidates any batch still loading a page the user has scrolled away from (fast jumps).
@@ -1180,6 +1193,7 @@ export class TurboFileEditor extends EditorPane {
 		this.deviceMonitorView?.refresh();
 		this.syncGlobalEditorVisibility();
 		if (visible) {
+			this.refreshTransferProgressDialog();
 			void this.syncActiveTerminalForCurrentPage();
 			this.applyTurboFileThemeState();
 			this.ensureTitlebarChrome();
@@ -1250,6 +1264,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		this.pendingRenderAfterDeviceSelectClose = false;
+		const focusedElement = getWindow(this.container).document.activeElement;
+		const retainedProgressFocus = focusedElement && this.transferProgressDialog.value?.element.contains(focusedElement)
+			? focusedElement as HTMLElement : undefined;
 		const retainedDeviceFormOverlay = this.isDeviceFormVisible
 			? this.container.querySelector<HTMLElement>(':scope > .turbofile-device-overlay') ?? undefined
 			: undefined;
@@ -1286,6 +1303,10 @@ export class TurboFileEditor extends EditorPane {
 		if (this.isTaskLogVisible) {
 			this.container.appendChild(this.renderTaskLogOverlay());
 		}
+		if (this.transferProgressDialog.value && this.activePage === 'transfer') {
+			this.container.appendChild(this.transferProgressDialog.value.element);
+			this.refreshTransferProgressDialog();
+		}
 		if (this.isDeviceFormVisible && !retainedDeviceFormOverlay) {
 			this.container.appendChild(this.renderDeviceForm());
 		}
@@ -1293,6 +1314,9 @@ export class TurboFileEditor extends EditorPane {
 			this.container.appendChild(this.renderDialogOverlay());
 		}
 		this.bindImageGridObserver();
+		if (!this.dialogState && retainedProgressFocus?.isConnected) {
+			retainedProgressFocus.focus({ preventScroll: true });
+		}
 	}
 
 	private clearContainerForRender(retainedChild?: HTMLElement): void {
@@ -1386,6 +1410,7 @@ export class TurboFileEditor extends EditorPane {
 		return this.isEditorVisible
 			&& (this.activePage === 'transfer' || this.activePage === 'images')
 			&& !this.dialogState && !this.isDeviceFormVisible && !this.isTaskLogVisible
+			&& !this.transferProgressDialog.value?.element.contains(event.target as Node)
 			&& !this.nativeDragSession
 			&& !this.getTurboFileDragSourceSide(event)
 			&& this.hasExternalDropData(event);
@@ -1462,6 +1487,17 @@ export class TurboFileEditor extends EditorPane {
 	private handleWorkbenchKeydown(event: KeyboardEvent): void {
 		if (event.defaultPrevented || !this.isKeyboardEventFromTurboFileSurface(event.target)) {
 			return;
+		}
+		if (this.transferProgressDialog.value && !this.dialogState) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				event.stopPropagation();
+				this.closeTransferProgressDialog();
+				return;
+			}
+			if (this.transferProgressDialog.value.element.contains(event.target as Node)) {
+				return;
+			}
 		}
 
 		if (this.handleImageGridKeyboardShortcut(event)) {
@@ -3797,6 +3833,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		this.activePage = page;
 		if (page !== 'transfer') {
+			this.closeTransferProgressDialog(false);
+		}
+		if (page !== 'transfer') {
 			this.taskbarHiddenForTerminal = false;
 		}
 		this.isTaskLogVisible = false;
@@ -4088,26 +4127,24 @@ export class TurboFileEditor extends EditorPane {
 		const browserHeader = $('.turbofile-browser-header');
 		const toolbar = $('.turbofile-browser-toolbar');
 		const toolbarTitle = $('.turbofile-browser-toolbar-title');
-		toolbarTitle.appendChild(state.trashMode.active ? renderIcon(Codicon.trash) : renderTurboFileIcon(side === 'left' ? 'files' : 'folder-check', side === 'left' ? 'info' : 'success'));
+		toolbarTitle.appendChild(state.trashMode.active ? renderIcon(Codicon.trash) : renderTurboFileIcon('folder-check', 'warning'));
 		toolbarTitle.append(browserTitle);
 		const itemCount = $('.turbofile-browser-item-count');
 		this.updatePaneItemCountElement(side, itemCount);
 		toolbarTitle.appendChild(itemCount);
 		toolbar.appendChild(toolbarTitle);
-		const toolbarAccent: TurboFileIconColor = side === 'left' ? 'primary' : 'success';
-		const gridAccent: TurboFileIconColor = side === 'left' ? 'info' : 'success';
-		this.appendPaneSortButton(toolbar, side, toolbarAccent);
+		this.appendPaneSortButton(toolbar, side);
 		this.appendDragOperationButton(toolbar, side);
-		this.appendToolbarButton(toolbar, Codicon.refresh, '刷新', () => this.refreshPane(side, { force: true }), 'arrow-clockwise', toolbarAccent);
-		this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', toolbarAccent);
+		this.appendToolbarButton(toolbar, Codicon.refresh, '刷新', () => this.refreshPane(side, { force: true }), 'arrow-clockwise', undefined, 'refresh');
+		this.appendToolbarButton(toolbar, Codicon.search, '搜索', () => this.searchInPane(side), 'search', undefined, 'search');
 		if (!state.trashMode.active) {
-			this.appendToolbarButton(toolbar, Codicon.trash, '删除选中项', () => this.deleteSelected(side), 'trash', 'danger');
+			this.appendToolbarButton(toolbar, Codicon.trash, '删除选中项', () => this.deleteSelected(side), 'trash', undefined, 'delete');
 			this.appendRecycleBinButton(toolbar, side);
 		}
-		this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', 'secondary');
-		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', gridAccent);
-		this.appendToolbarButton(toolbar, side === 'left' ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarRight, '在当前侧展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'));
-		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), 'terminal', toolbarAccent);
+		this.appendToolbarButton(toolbar, Codicon.copy, '复制当前路径', () => { void this.copyPanePath(side); }, 'files', undefined, 'copy-path');
+		this.appendToolbarButton(toolbar, Codicon.fileMedia, '展开图片', () => this.openImageGrid(side), 'grid-3x3-gap', undefined, 'images');
+		this.appendToolbarButton(toolbar, side === 'left' ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarRight, '在当前侧展开图片', () => this.openImageGrid(side, undefined, false, 'grid', 'pane'), undefined, undefined, 'image-pane');
+		this.appendToolbarButton(toolbar, Codicon.terminal, '打开终端', () => this.openTerminal(side), undefined, undefined, 'terminal');
 		if (state.trashMode.active) {
 			this.appendToolbarButton(toolbar, Codicon.arrowLeft, state.trashMode.browseItem ? localize('turbofile.recycleBinBackToRoot', "返回回收站") : localize('turbofile.recycleBinBack', "返回"), () => state.trashMode.browseItem ? this.leaveTrashDirectory(side) : this.leaveTrashView(side));
 			if (isTurboFileTrashRootView(state.trashMode)) {
@@ -4119,10 +4156,10 @@ export class TurboFileEditor extends EditorPane {
 			toolbar,
 			this.maximizedPane === side ? Codicon.screenNormal : Codicon.screenFull,
 			this.maximizedPane === side ? '恢复双栏' : '单栏显示',
-			() => this.togglePaneMaximized(side)
+			() => this.togglePaneMaximized(side), undefined, undefined, 'maximize'
 		);
 
-		const pathbar = this.renderPanePathbar(side, device, state, toolbarAccent);
+		const pathbar = this.renderPanePathbar(side, device, state, side === 'left' ? 'primary' : 'success');
 		const selectedCount = this.getSelectedTransferItems(side).length;
 		if (selectedCount > 1) {
 			const selectionCount = $('.turbofile-selection-count');
@@ -5379,13 +5416,19 @@ export class TurboFileEditor extends EditorPane {
 
 		taskbar.tabIndex = 0;
 		taskbar.setAttribute('role', 'button');
-		taskbar.title = '打开任务日志';
-		taskbar.setAttribute('aria-label', '打开任务日志');
-		taskbar.addEventListener('click', () => this.setActivePage('tasks'));
+		const hasTransfer = !!this.transferProgressDialog.value || runningTransfers.length > 0 || latest?.kind === 'transfer';
+		const toggleLabel = this.transferProgressDialog.value
+			? localize('turbofile.progress.minimize', "收起传输进度")
+			: hasTransfer ? localize('turbofile.progress.open', "打开传输进度") : localize('turbofile.progress.openLogs', "打开任务日志");
+		taskbar.title = toggleLabel;
+		taskbar.setAttribute('aria-label', toggleLabel);
+		taskbar.setAttribute('aria-expanded', String(!!this.transferProgressDialog.value));
+		const activate = () => hasTransfer ? this.toggleTransferProgressDialog() : this.setActivePage('tasks');
+		taskbar.addEventListener('click', activate);
 		taskbar.addEventListener('keydown', event => {
-			if (event.key === 'Enter' || event.key === ' ') {
+			if (event.target === taskbar && (event.key === 'Enter' || event.key === ' ')) {
 				event.preventDefault();
-				this.setActivePage('tasks');
+				activate();
 			}
 		});
 
@@ -5457,6 +5500,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private refreshTaskbar(): void {
+		this.refreshTransferProgressDialog();
 		if (!this.container || this.activePage !== 'transfer' || !this.shouldShowTaskbar()) {
 			return;
 		}
@@ -5470,6 +5514,7 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private refreshTaskbarMetrics(): void {
+		this.refreshTransferProgressDialog();
 		if (!this.container || this.activePage !== 'transfer' || !this.shouldShowTaskbar()) {
 			return;
 		}
@@ -5583,12 +5628,139 @@ export class TurboFileEditor extends EditorPane {
 		return itemCount > 1 ? `${prefix}：${activeName} · ${itemCount} 项` : `${prefix}：${activeName}`;
 	}
 
-	private getLiveTransferAggregate(tasks: TurboFileTask[]): { transferredBytes: number; totalBytes?: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number } {
+	private getLiveTransferAggregate(tasks: readonly TurboFileTask[]): { transferredBytes: number; totalBytes?: number; speedBytesPerSecond: number; remainingMs?: number; startedAt?: number } {
 		return aggregateTurboFileTransferProgress(tasks, Date.now());
 	}
 
 	private getLiveTransferDisplay(tasks: TurboFileTask[]) {
 		return this.transferMetricsDisplay.read(tasks.map(task => task.id).join(','), this.getLiveTransferAggregate(tasks), Date.now());
+	}
+
+	private toggleTransferProgressDialog(): void {
+		if (this.transferProgressDialog.value) {
+			this.closeTransferProgressDialog();
+			return;
+		}
+		if (!this.container || this.activePage !== 'transfer') {
+			return;
+		}
+		const running = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
+		const tasks = running.length ? running : this.tasks.filter(task => task.kind === 'transfer').slice(0, 1);
+		if (!tasks.length) {
+			return;
+		}
+		this.closeDeviceSelect(undefined, false);
+		this.transferProgressTaskIds = tasks.map(task => task.id);
+		this.transferProgressTasks = tasks;
+		const dialog = new TurboFileTransferProgressDialog(
+			() => this.closeTransferProgressDialog(),
+			() => {
+				const running = this.tasks.filter(task => this.transferProgressTaskIds.includes(task.id) && task.status === 'running');
+				void this.cancelRunningTransfers(running);
+			},
+			value => this.formatSpeed(value)
+		);
+		this.transferProgressDialog.value = dialog;
+		this.container.appendChild(dialog.element);
+		this.refreshTaskbar();
+		dialog.focus();
+	}
+
+	private closeTransferProgressDialog(restoreFocus = true): void {
+		if (!this.transferProgressDialog.value) {
+			return;
+		}
+		this.transferProgressDialog.clear();
+		this.transferProgressTasks = undefined;
+		this.refreshTaskbar();
+		if (restoreFocus) {
+			this.container?.querySelector<HTMLElement>('.turbofile-taskbar')?.focus();
+		}
+	}
+
+	/** Reuse the status bar's atomic snapshot. Never scan a directory or contact a device here. */
+	private refreshTransferProgressDialog(): void {
+		const dialog = this.transferProgressDialog.value;
+		const running = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
+		if (!running.length && !dialog) {
+			return;
+		}
+		// Keep finished members of an open multi-task view, including their failures and byte counts.
+		const tasks = dialog ? this.transferProgressTasks ?? this.tasks.filter(task => this.transferProgressTaskIds.includes(task.id)) : running;
+		if (!tasks.length) {
+			return;
+		}
+		const hasRunning = tasks.some(task => task.status === 'running');
+		const summary = this.getLiveTransferAggregate(tasks);
+		const status = hasRunning ? 'running' : tasks.some(task => task.status === 'error') ? 'error'
+			: tasks.some(task => task.status === 'canceled') ? 'canceled' : 'success';
+		const startedAt = summary.startedAt ?? Math.min(...tasks.map(task => task.startedAt));
+		const endedAt = hasRunning ? Date.now() : Math.max(...tasks.map(task => task.endedAt ?? task.startedAt));
+		const elapsedMs = Math.max(0, endedAt - startedAt);
+		// Tar counters measure archive bytes, not the selected file's raw size. Do not divide unlike units.
+		const totalBytes = tasks.every(task => task.trackTotalBytes && !task.strategy?.startsWith('tar')) ? summary.totalBytes : undefined;
+		const metrics = getTurboFileTransferProgressView({
+			status,
+			transferredBytes: tasks.reduce((sum, task) => sum + (task.transferProgressBytes ?? task.transferredBytes ?? task.bytes ?? 0), 0),
+			totalBytes,
+			elapsedMs,
+			speedBytesPerSecond: hasRunning ? summary.speedBytesPerSecond : 0
+		});
+		const historyKey = tasks.map(task => `${task.id}:${task.strategy ?? ''}:${task.transferProgressPhase ?? ''}:${task.activeTransferItemIndex ?? ''}`).join(',');
+		this.transferProgressHistory.sample(historyKey, elapsedMs, metrics.speedBytesPerSecond);
+		if (!dialog || !this.isEditorVisible || this.activePage !== 'transfer') {
+			return;
+		}
+		let state: string;
+		if (tasks.some(task => task.cancelRequested && task.status === 'running')) {
+			state = localize('turbofile.progress.canceling', "正在取消…");
+		} else if (metrics.status === 'success') {
+			state = localize('turbofile.progress.completed', "已完成");
+		} else if (metrics.status === 'error') {
+			state = localize('turbofile.progress.failed', "传输失败");
+		} else if (metrics.status === 'canceled') {
+			state = localize('turbofile.progress.canceled', "已取消");
+		} else if (metrics.status === 'finishing') {
+			state = localize('turbofile.progress.finishing', "正在完成");
+		} else {
+			state = metrics.percentage === undefined ? localize('turbofile.progress.running', "传输中") : `${metrics.percentage}%`;
+		}
+		const task = tasks.find(task => task.status === 'error') ?? tasks[0];
+		const phase = task.transferProgressPhase;
+		const phaseLabel = phase === 'relay-download' ? localize('turbofile.progress.relayDownload', "中转：下载至本机")
+			: phase === 'relay-upload' ? localize('turbofile.progress.relayUpload', "中转：上传至目标")
+				: this.getTransferProtocolLabel(task.strategy) ?? localize('turbofile.progress.preparing', "准备传输");
+		const detail = task.error ?? (hasRunning && tasks.some(task => task.status === 'running' && isTurboFileTransferProgressQuiet(task.lastProgressAt ?? task.startedAt, Date.now()))
+			? localize('turbofile.awaitingProgress', "等待进度反馈（任务未结束）") : phaseLabel);
+		// Completion uses the same accounting as the journal/status bar, including preparation.
+		const completedDurationMs = tasks.length === 1 && task.durationMs !== undefined && task.durationMs > 0
+			? task.durationMs : Math.max(1, endedAt - Math.min(...tasks.map(task => task.startedAt)));
+		const reportedAverage = tasks.length === 1 ? task.averageBytesPerSecond : undefined;
+		const averageSpeed = metrics.status === 'success'
+			? reportedAverage !== undefined && Number.isFinite(reportedAverage) && reportedAverage >= 0
+				? reportedAverage : tasks.reduce((sum, task) => sum + (task.bytes ?? task.transferredBytes ?? 0), 0) / (completedDurationMs / 1000)
+			: undefined;
+		dialog.update({
+			metrics,
+			history: this.transferProgressHistory.read(),
+			speed: this.formatSpeed(averageSpeed ?? metrics.speedBytesPerSecond),
+			size: metrics.totalBytes === undefined
+				? localize('turbofile.progress.bytesUnknown', "已传输：{0}", formatSize(metrics.transferredBytes))
+				: localize('turbofile.progress.bytesKnown', "已传输：{0} / {1}", formatSize(metrics.transferredBytes), formatSize(metrics.totalBytes)),
+			time: metrics.status === 'success' ? localize('turbofile.progress.totalTime', "总耗时：{0}", formatDuration(completedDurationMs))
+				: metrics.remainingMs === undefined
+				? localize('turbofile.progress.elapsed', "已用时间：{0}", formatDuration(elapsedMs))
+				: localize('turbofile.progress.remaining', "预计剩余：{0}", formatDuration(metrics.remainingMs)),
+			state,
+			name: tasks.length === 1 ? task.retryTransfer?.sourceItem.name ?? task.transferItems?.[0]?.name ?? task.label
+				: localize('turbofile.progress.multipleTasks', "{0} 个传输任务", tasks.length),
+			source: tasks.length === 1 ? task.transferSource ?? task.detail : localize('turbofile.progress.multipleSources', "多个来源"),
+			target: tasks.length === 1 ? task.transferTarget ?? '' : localize('turbofile.progress.multipleTargets', "多个目标"),
+			detail,
+			cancelable: hasRunning,
+			canceling: hasRunning && tasks.filter(task => task.status === 'running').every(task => task.cancelRequested),
+			theme: this.container?.classList.contains('is-turbofile-light') ? 'light' : 'dark'
+		});
 	}
 
 	private getLiveTransferItemTotal(item: TurboFileTaskTransferItem, task: TurboFileTask): number | undefined {
@@ -5883,6 +6055,9 @@ export class TurboFileEditor extends EditorPane {
 		if (task.status !== 'running' || task.progressId !== event.progressId) {
 			return;
 		}
+		if (event.phase !== 'complete' && event.phase !== 'prepare') {
+			task.transferProgressPhase = event.phase;
+		}
 		const activeItem = task.activeTransferItemIndex !== undefined ? task.transferItems?.[task.activeTransferItemIndex] : undefined;
 		const previousVisibleTransferredBytes = activeItem?.transferredBytes ?? task.transferredBytes ?? 0;
 		if (event.currentName) {
@@ -5989,6 +6164,7 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const aggregate = this.getLiveTransferAggregate([task]);
 		task.transferredBytes = activeItem ? aggregate.transferredBytes : transferredBytes;
+		task.transferProgressBytes = task.transferredBytes;
 		task.totalBytes = activeItem ? aggregate.totalBytes : totalBytes;
 		task.speedBytesPerSecond = activeItem ? aggregate.speedBytesPerSecond : speed;
 		task.remainingMs = aggregate.remainingMs;
@@ -6235,6 +6411,8 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private primeTransferTaskStrategy(task: TurboFileTask, sourceDevice: TurboFileDevice, targetDevice: TurboFileDevice, sourceItems: readonly TurboFileFileItem[]): void {
+		task.transferSource = `${sourceDevice.name} ${sourceItems[0]?.path ?? ''}`;
+		task.transferTarget = targetDevice.name;
 		const sizePolicy = createTurboFileTransferSizePolicy(sourceItems);
 		task.trackTotalBytes = sizePolicy.trackTotalBytes;
 		task.totalBytes = sizePolicy.totalBytes;
@@ -6349,6 +6527,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 		task.status = status;
+		task.transferProgressBytes ??= task.transferredBytes ?? options.bytes;
 		task.detail = detail;
 		task.endedAt = Date.now();
 		if (task.kind === 'transfer') {
@@ -8417,13 +8596,14 @@ export class TurboFileEditor extends EditorPane {
 		this.render();
 	}
 
-	private appendPaneSortButton(parent: HTMLElement, side: 'left' | 'right', iconColor?: TurboFileIconColor): void {
+	private appendPaneSortButton(parent: HTMLElement, side: 'left' | 'right'): void {
 		const state = this.paneStates[side];
 		const button = document.createElement('button');
 		button.className = 'turbofile-toolbar-button turbofile-sort-button';
+		button.dataset.turbofileAction = 'sort';
 		button.title = `排序：${this.getPaneSortLabel(state.sortKey)}，${this.getPaneSortDirectionLabel(state.sortDirection)}`;
 		button.setAttribute('aria-label', button.title);
-		button.appendChild(renderTurboFileSortIcon(iconColor));
+		button.appendChild(renderTurboFileSortIcon());
 		button.addEventListener('click', event => this.showPaneSortMenu(side, event));
 		parent.appendChild(button);
 	}
@@ -8455,12 +8635,24 @@ export class TurboFileEditor extends EditorPane {
 		parent.appendChild(button);
 	}
 
-	private appendToolbarButton(parent: HTMLElement, icon: ThemeIcon, title: string, handler?: () => void, turboIcon?: TurboFileBootstrapIcon, iconColor?: TurboFileIconColor): void {
+	private appendToolbarButton(parent: HTMLElement, icon: ThemeIcon, title: string, handler?: () => void, turboIcon?: TurboFileBootstrapIcon, iconColor?: TurboFileIconColor, action?: TurboFileToolbarAction): void {
 		const button = document.createElement('button');
 		button.className = 'turbofile-toolbar-button';
 		button.title = title;
 		button.setAttribute('aria-label', title);
-		button.appendChild(turboIcon ? renderTurboFileIcon(turboIcon, iconColor) : renderIcon(icon));
+		if (action) {
+			button.dataset.turbofileAction = action;
+		}
+		if (action === 'terminal') {
+			const image = document.createElement('img');
+			image.className = 'turbofile-terminal-icon';
+			image.src = TURBOFILE_TERMINAL_ICON;
+			image.alt = '';
+			image.draggable = false;
+			button.appendChild(image);
+		} else {
+			button.appendChild(turboIcon ? renderTurboFileIcon(turboIcon, iconColor) : renderIcon(icon));
+		}
 		if (handler) {
 			button.addEventListener('click', handler);
 		}
@@ -11105,6 +11297,8 @@ export class TurboFileEditor extends EditorPane {
 		const targetPath = options.targetPath ?? joinPanePath(targetState.path, sourceItem.name, this.isWindowsDevice(targetDevice));
 		const progressId = options.task ? `turbofile-transfer-${options.task.id}-${Date.now()}` : undefined;
 		if (options.task) {
+			options.task.transferSource = `${sourceDevice.name} ${sourceItem.path}`;
+			options.task.transferTarget = `${targetDevice.name} ${targetPath}`;
 			options.task.progressId = progressId;
 			const activeItem = options.task.activeTransferItemIndex !== undefined ? options.task.transferItems?.[options.task.activeTransferItemIndex] : undefined;
 			if (activeItem) {
@@ -11186,6 +11380,8 @@ export class TurboFileEditor extends EditorPane {
 		task.speedSamples = [];
 		this.primeTransferTaskStrategy(task, sourceDevice, targetDevice, items);
 		const progressId = `turbofile-batch-${task.id}-${Date.now()}`;
+		task.transferSource = `${sourceDevice.name} ${transferContext.source.directoryPath}`;
+		task.transferTarget = `${targetDevice.name} ${transferContext.target.directoryPath}`;
 		task.progressId = progressId;
 		for (const transferItem of task.transferItems) {
 			transferItem.progressId = progressId;

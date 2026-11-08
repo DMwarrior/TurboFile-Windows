@@ -317,11 +317,13 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(input.includes("records.push('Z', '', '', '', '', '')"));
 	});
 
-	test('deletes a large remote cut selection through a null-delimited list', () => {
+	test('checks captured metadata before deleting a large remote cut selection', () => {
 		const service = fs.readFileSync(servicePath(), 'utf8');
 		const cleanup = methodBlock(service, 'private async deleteBatchSources', 'private joinBatchTargetPath');
 
-		assert.ok(cleanup.includes('buildPosixDeleteManyFromInputCommand(true)'));
+		assert.ok(cleanup.includes('buildTurboFilePosixMoveCleanupCommand()'));
+		assert.ok(cleanup.includes('encodeTurboFileMoveCleanupSnapshot(receipt)'));
+		assert.ok(!cleanup.includes('buildPosixDeleteManyFromInputCommand(true)'));
 		assert.ok(cleanup.includes('execRemoteWithInput'));
 		assert.ok(cleanup.includes('inactivityTimeoutMs'));
 	});
@@ -1227,10 +1229,10 @@ suite('TurboFileSshMainServiceStatic', () => {
 			failedTopologyRouteIsForgotten: batchPlan.includes("if (attempt.route === 'direct' && selectedPreparedRoute && shouldInvalidatePreparedDirectRoute(error)) {")
 				&& batchPlan.includes('selectedPreparedRoute.probeProtocol, selectedPreparedRoute.route'),
 			warmParallelRelayStreams: batchRelayTar.includes('await this.acquireTransferSessionPair(request.source, request.targetDirectory, request.progressId)')
-				&& batchRelayTar.includes('const [sourceStream, targetStream] = await Promise.all([')
+				&& batchRelayTar.includes('const [sourceResult, targetResult] = await Promise.allSettled([')
 				&& batchRelayTar.includes('sourceLease.release();')
 				&& batchRelayTar.includes('targetLease.release();')
-				&& singleRelayTar.includes('await Promise.all([')
+				&& singleRelayTar.includes('const [sourceResult, targetResult] = await Promise.allSettled([')
 				&& singleRelayTar.includes('this.acquireTransferSessionPair(request.source, request.target, request.progressId)')
 				&& !batchRelayTar.includes('sourceClient?.end()')
 				&& !singleRelayTar.includes('sourceClient?.end()')

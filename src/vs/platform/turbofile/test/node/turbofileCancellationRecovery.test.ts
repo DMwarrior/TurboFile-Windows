@@ -135,7 +135,7 @@ interface IServiceHarness {
 	abortDirectorySftpSessionAndWait(session: ISession): Promise<void>;
 	getSftpOperationWatchdog(sftp: SilentSftp, client: SilentClient): TurboFileOperationWatchdog;
 	remoteStat(sftp: SilentSftp, remotePath: string): Promise<{ size: number }>;
-	fastPut(sftp: SilentSftp, localPath: string, remotePath: string, options: ITransferOptions): Promise<void>;
+	fastPutRaw(sftp: SilentSftp, localPath: string, remotePath: string, options: ITransferOptions): Promise<void>;
 	createSftpTransferOptions(onDelta: (delta: number) => void, progressId: string): ITransferOptions;
 	forwardIn(client: SilentClient, host: string, port: number, progressId?: string): Promise<number>;
 	unforwardIn(client: SilentClient, host: string, port: number): Promise<void>;
@@ -159,7 +159,7 @@ function createServiceHarness(charsetProbe: Promise<string[]> = Promise.resolve(
 	const methodNames = new Set([
 		'cancelTransfer', 'registerTransferCancelHandler', 'isTransferCanceled', 'throwIfTransferCanceled', 'clearTaskCancellation',
 		'abortDirectorySftpSessionAndWait', 'getSftpOperationWatchdog', 'remoteStat', 'forwardIn', 'unforwardIn',
-		'fastPut', 'createSftpTransferOptions',
+		'fastPutRaw', 'createSftpTransferOptions',
 		'openRemoteCommandStream', 'relayRemoteStreamsWithWatchdog', 'runNativeTransferWithWatchdog', 'runNativeLocalTarUpload',
 		'runNativeLocalTarUploadChunk', 'runNativeLocalTarZstdUploadChunk', 'runCancelableLocalCommand',
 		'pipeNativeTarDownload', 'pipeRemoteTarDownload', 'uploadFileWithScpProtocolOnClient',
@@ -167,7 +167,7 @@ function createServiceHarness(charsetProbe: Promise<string[]> = Promise.resolve(
 	]);
 	const declarationNames = new Set([
 		'TurboFileTransferCanceledError', 'abortSshClientAndWait', 'abortSshExecStreamAndWait',
-		'createProgressPassThrough', 'writeInputToWritableStream', 'formatLocalCommandError',
+		'createProgressPassThrough', 'writeInputToWritableStream', 'formatLocalCommandError', 'formatTransferProcessFailure',
 		'ScpProtocolReader', 'readScpResponse', 'readScpFileHeader', 'writeScpData', 'waitForScpClose',
 		'ensureLocalParentDirectory', 'ensureLocalDirectory', 'isLocalFilesystemRoot', 'formatScpMode', 'sanitizeScpFileName'
 	]);
@@ -359,7 +359,7 @@ suite('TurboFileCancellationRecovery', () => {
 	test('late SFTP progress after cancellation rejects the transfer without throwing out of ssh2', async () => {
 		const service = createServiceHarness();
 		const sftp = new SilentSftp();
-		const transfer = assert.rejects(service.fastPut(sftp, '/local', '/remote', service.createSftpTransferOptions(() => undefined, 'step-task')), /canceled/i);
+		const transfer = assert.rejects(service.fastPutRaw(sftp, '/local', '/remote', service.createSftpTransferOptions(() => undefined, 'step-task')), /canceled/i);
 		await service.cancelTransfer('step-task');
 		try {
 			assert.doesNotThrow(() => sftp.transferOptions?.step?.(1024, 1024, 2048));

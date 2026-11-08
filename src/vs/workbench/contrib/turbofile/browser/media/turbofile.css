@@ -1510,7 +1510,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 .turbofile-browser-toolbar {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
 	padding: 0 8px;
 	border-bottom: 1px solid var(--turbofile-pane-border);
 }
@@ -1573,37 +1573,18 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	box-shadow: none;
 }
 
-.turbofile-drag-operation-icon {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 24px;
-	height: 18px;
-	box-sizing: border-box;
-	border: 1px solid currentColor;
-	border-radius: 2px;
-	font-size: 10px;
-	font-weight: 400;
-	line-height: 1;
-	white-space: nowrap;
-}
-
-.turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy {
-	color: #3b82f6;
-}
-
-.turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy {
-	color: #2fae7b;
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-button.is-copy {
+	color: var(--turbofile-toolbar-copy-color, #6cb6ff);
 }
 
 .turbofile-drag-operation-button.is-move {
 	color: #ef6670;
 }
 
-.turbofile-drag-operation-button:hover,
-.turbofile-drag-operation-button:active,
-.turbofile-drag-operation-button:focus,
-.turbofile-drag-operation-button:focus-visible {
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-button:hover,
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-button:active,
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-button:focus,
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-button:focus-visible {
 	border: 0;
 	outline: 0;
 	background: transparent;
@@ -1653,6 +1634,101 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	background: transparent;
 }
 
+/* File actions keep the same meaning on both panes, independently of the path accent. */
+.turbofile-workbench .turbofile-browser-toolbar {
+	--turbofile-toolbar-copy-color: #6cb6ff;
+	--turbofile-toolbar-sort-color: #b39ddb;
+	--turbofile-toolbar-refresh-color: #58d695;
+	--turbofile-toolbar-search-color: #f1c35b;
+	--turbofile-toolbar-delete-color: #ff747c;
+	--turbofile-toolbar-path-copy-color: #e0e6ed;
+	--turbofile-toolbar-images-color: var(--turbofile-toolbar-layout-color);
+	--turbofile-toolbar-layout-color: #e4e8ef;
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action] {
+	color: var(--turbofile-toolbar-action-color, var(--turbofile-toolbar-layout-color));
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="sort"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-sort-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="refresh"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-refresh-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="search"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-search-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="delete"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-delete-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="copy-path"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-path-copy-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="images"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-images-color);
+}
+
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="image-pane"],
+.turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action="maximize"] {
+	--turbofile-toolbar-action-color: var(--turbofile-toolbar-layout-color);
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action] .codicon,
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-toolbar-button[data-turbofile-action] .turbofile-bi-icon {
+	color: inherit;
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-toolbar-button:not(.turbofile-drag-operation-button):hover {
+	background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 9%, transparent));
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-toolbar-button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.turbofile-workbench .turbofile-browser-toolbar {
+	--turbofile-toolbar-icon-size: 18px;
+}
+
+.turbofile-workbench .turbofile-browser-toolbar :is(.codicon, .turbofile-bi-icon, .turbofile-terminal-icon, .turbofile-recycle-bin-icon, .turbofile-drag-operation-icon) {
+	width: var(--turbofile-toolbar-icon-size);
+	height: var(--turbofile-toolbar-icon-size);
+	flex: 0 0 var(--turbofile-toolbar-icon-size);
+	line-height: var(--turbofile-toolbar-icon-size);
+	opacity: 1;
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .codicon {
+	font-size: var(--turbofile-toolbar-icon-size);
+}
+
+.turbofile-workbench .turbofile-browser-toolbar .turbofile-drag-operation-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 18px;
+	flex: 0 0 24px;
+	box-sizing: border-box;
+	border: 1px solid currentColor;
+	border-radius: 2px;
+	font-size: 10px;
+	font-weight: 400;
+	white-space: nowrap;
+}
+
+.turbofile-toolbar-button .turbofile-terminal-icon {
+	object-fit: contain;
+	pointer-events: none;
+}
+
 .turbofile-secondary-button:hover {
 	background: var(--vscode-button-secondaryHoverBackground);
 }
@@ -1675,12 +1751,13 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	background: var(--tf-file-surface, var(--vscode-editor-background));
 }
 
-.turbofile-pathbar-primary {
-	--turbofile-path-color: #60a5fa;
+.turbofile-pathbar-primary,
+.turbofile-pathbar-success {
+	--turbofile-path-color: #3b8eea;
 }
 
-.turbofile-pathbar-success {
-	--turbofile-path-color: #4fc391;
+.turbofile-workbench .turbofile-pane .turbofile-pathbar > .turbofile-bi-icon {
+	color: var(--turbofile-path-color);
 }
 
 .turbofile-location-menu-button {
@@ -1911,7 +1988,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	color: var(--turbofile-path-color);
-	font-weight: 500;
+	font-weight: 700;
 }
 
 .turbofile-path-display {
@@ -1922,7 +1999,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	min-height: 24px;
 	font-family: "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace;
 	font-size: calc(var(--turbofile-browser-font-size, 14px) * 0.88);
-	font-weight: 500;
+	font-weight: 700;
 	cursor: text;
 }
 
@@ -1938,7 +2015,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 	background: transparent;
 	color: inherit;
 	font: inherit;
-	font-weight: 500;
+	font-weight: 700;
 	white-space: nowrap;
 	text-overflow: ellipsis;
 	overflow: hidden;
@@ -1953,7 +2030,7 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 
 .turbofile-path-separator {
 	color: inherit;
-	font-weight: 400;
+	font-weight: inherit;
 	margin: 0 1px;
 }
 
@@ -2827,6 +2904,398 @@ body.hc-black .turbofile-live-transfer-panel {
 .turbofile-task-row-button:disabled {
 	opacity: 0.5;
 	cursor: default;
+}
+
+.turbofile-transfer-progress-overlay {
+	position: absolute;
+	/* The editor surface already stops above VS Code's native status-bar slot. */
+	inset: 0;
+	z-index: 39;
+	display: flex;
+	align-items: flex-end;
+	justify-content: center;
+	box-sizing: border-box;
+	padding: 0;
+	background: transparent;
+	pointer-events: none;
+}
+
+.turbofile-transfer-progress-panel {
+	--turbofile-progress-accent: #3b8eea;
+	--turbofile-progress-label: #9ca3af;
+	--turbofile-progress-grid: color-mix(in srgb, var(--tf-text) 20%, transparent);
+	--turbofile-progress-fill: color-mix(in srgb, var(--turbofile-progress-accent) 12%, transparent);
+	--turbofile-progress-track: color-mix(in srgb, var(--tf-text) 22%, transparent);
+	width: 100%;
+	max-height: min(360px, 100%);
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	border: 1px solid color-mix(in srgb, var(--tf-text) 28%, var(--tf-bg));
+	border-radius: 0;
+	background: var(--tf-bg);
+	color: var(--tf-text);
+	box-shadow: none;
+	font-size: 14px;
+	font-variant-numeric: tabular-nums;
+	overflow: hidden;
+	pointer-events: auto;
+}
+
+.is-turbofile-light .turbofile-transfer-progress-overlay {
+	background: transparent;
+}
+
+.is-turbofile-light .turbofile-transfer-progress-panel {
+	--turbofile-progress-accent: #0078d4;
+	--turbofile-progress-label: #697386;
+	--turbofile-progress-grid: #d1d5db;
+	--turbofile-progress-fill: rgba(0, 120, 212, 0.08);
+	--turbofile-progress-track: #dedfe2;
+	box-shadow: none;
+}
+
+.turbofile-transfer-progress-header {
+	min-height: 36px;
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	box-sizing: border-box;
+	padding: 4px 12px 4px 20px;
+	border-bottom: 1px solid var(--tf-border);
+	background: color-mix(in srgb, var(--tf-text) 3%, var(--tf-bg));
+}
+
+.turbofile-transfer-progress-title {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+	line-height: 1.5;
+}
+
+.turbofile-transfer-progress-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.turbofile-transfer-progress-actions .turbofile-toolbar-button {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 3px;
+	color: var(--tf-text);
+}
+
+.turbofile-transfer-progress-actions .codicon {
+	font-size: 18px;
+}
+
+.turbofile-transfer-progress-actions .turbofile-toolbar-button:hover {
+	background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--tf-text) 9%, transparent));
+}
+
+.turbofile-transfer-progress-actions .turbofile-toolbar-button:focus-visible,
+.turbofile-transfer-progress-cancel:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, var(--turbofile-progress-accent));
+	outline-offset: 2px;
+}
+
+.turbofile-transfer-progress-body {
+	min-height: 0;
+	min-width: 0;
+	display: grid;
+	grid-template-columns: 220px minmax(0, 1fr);
+	grid-template-areas:
+		"hero graph"
+		"hero track"
+		"hero stats"
+		"details details";
+	gap: 8px 20px;
+	padding: 12px 20px;
+	overflow: auto;
+	overscroll-behavior: contain;
+}
+
+.turbofile-transfer-progress-hero {
+	grid-area: hero;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	justify-content: center;
+	gap: 6px;
+	min-width: 0;
+	padding-right: 20px;
+	border-right: 1px solid var(--tf-border);
+	line-height: 1.2;
+}
+
+.turbofile-transfer-progress-speed-label {
+	color: var(--tf-text-muted);
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 1.4;
+}
+
+.turbofile-transfer-progress-speed {
+	font-size: 36px;
+	font-weight: 600;
+	letter-spacing: -0.5px;
+	white-space: nowrap;
+}
+
+.turbofile-transfer-progress-status {
+	min-width: 0;
+	font-size: 24px;
+	font-weight: 600;
+	text-align: left;
+	white-space: nowrap;
+}
+
+.turbofile-transfer-progress-status.is-indeterminate,
+.turbofile-transfer-progress-status.is-settling {
+	font-size: 24px;
+}
+
+.turbofile-transfer-progress-status.is-error {
+	color: var(--tf-danger);
+}
+
+.turbofile-transfer-progress-graph {
+	grid-area: graph;
+	position: relative;
+	height: 104px;
+	min-width: 0;
+	contain: layout paint;
+}
+
+.turbofile-transfer-progress-graph-canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.turbofile-transfer-progress-graph-label {
+	color: var(--tf-text-muted);
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
+.turbofile-transfer-progress-track {
+	grid-area: track;
+	position: relative;
+	height: 16px;
+	border-radius: 999px;
+	isolation: isolate;
+}
+
+.turbofile-transfer-progress-track::before {
+	content: '';
+	position: absolute;
+	inset: 2px 0;
+	border-radius: inherit;
+	background: var(--turbofile-progress-track);
+}
+
+.turbofile-transfer-progress-fill {
+	position: relative;
+	top: 2px;
+	height: 12px;
+	max-width: 100%;
+	border-radius: inherit;
+	background: linear-gradient(100deg, #347ded 0%, #3782ee 45%, #3985f1 100%);
+	box-shadow: inset 0 1px 1px rgb(255 255 255 / 12%);
+	transition: none;
+}
+
+.turbofile-transfer-progress-track.is-animated:not(.is-indeterminate) .turbofile-transfer-progress-fill {
+	/* Bridge the 500 ms measured updates with a little scheduling tolerance, without easing pauses. */
+	transition: width 550ms linear;
+}
+
+.turbofile-transfer-progress-fill::after {
+	content: '';
+	position: absolute;
+	top: -2px;
+	right: 0;
+	width: 16px;
+	max-width: 100%;
+	height: 16px;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 0 0 1px rgb(255 255 255 / 22%), 0 1px 3px rgb(17 51 92 / 16%);
+}
+
+.turbofile-transfer-progress-track.is-empty .turbofile-transfer-progress-fill::after {
+	display: none;
+}
+
+.turbofile-transfer-progress-track.is-indeterminate .turbofile-transfer-progress-fill {
+	width: 16%;
+	animation: turbofile-transfer-progress-activity 2.4s linear infinite;
+	animation-play-state: paused;
+	will-change: transform;
+}
+
+.turbofile-transfer-progress-track.is-indeterminate {
+	overflow: hidden;
+}
+
+.turbofile-transfer-progress-track.is-indeterminate.is-animated .turbofile-transfer-progress-fill {
+	animation-play-state: running;
+}
+
+.turbofile-transfer-progress-stats {
+	grid-area: stats;
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 4px 20px;
+	color: var(--tf-text);
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.turbofile-transfer-progress-details {
+	grid-area: details;
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+	align-items: baseline;
+	gap: 3px 12px;
+	min-width: 0;
+	padding-top: 10px;
+	border-top: 1px solid var(--tf-border);
+	line-height: 1.5;
+}
+
+.turbofile-transfer-progress-detail-label {
+	color: var(--tf-text-muted);
+}
+
+.turbofile-transfer-progress-detail-value {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	user-select: text;
+}
+
+.turbofile-transfer-progress-footer {
+	min-height: 40px;
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 12px;
+	box-sizing: border-box;
+	padding: 5px 20px;
+	border-top: 1px solid var(--tf-border);
+}
+
+.turbofile-transfer-progress-cancel {
+	min-width: 100px;
+	height: 28px;
+	padding: 0 14px;
+	border: 1px solid color-mix(in srgb, var(--tf-text) 35%, transparent);
+	border-radius: 3px;
+	background: transparent;
+	color: var(--tf-text);
+	font: inherit;
+	cursor: pointer;
+}
+
+.turbofile-transfer-progress-cancel:hover:not(:disabled) {
+	background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--tf-text) 9%, transparent));
+}
+
+.turbofile-transfer-progress-cancel:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.turbofile-transfer-progress-panel [hidden] {
+	display: none;
+}
+
+@keyframes turbofile-transfer-progress-activity {
+	from {
+		transform: translateX(-100%);
+	}
+	to {
+		transform: translateX(625%);
+	}
+}
+
+@media (max-width: 760px) {
+	.turbofile-transfer-progress-body {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "hero" "graph" "track" "stats" "details";
+		gap: 8px;
+		padding: 10px 16px;
+	}
+
+	.turbofile-transfer-progress-hero {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas: "speed-label status" "speed status";
+		align-items: center;
+		gap: 2px 12px;
+		padding-right: 0;
+		border-right: 0;
+	}
+
+	.turbofile-transfer-progress-speed-label {
+		grid-area: speed-label;
+	}
+
+	.turbofile-transfer-progress-speed {
+		grid-area: speed;
+		font-size: 32px;
+	}
+
+	.turbofile-transfer-progress-status {
+		grid-area: status;
+		font-size: 24px;
+		text-align: right;
+	}
+
+	.turbofile-transfer-progress-status.is-indeterminate,
+	.turbofile-transfer-progress-status.is-settling {
+		font-size: 21px;
+	}
+
+	.turbofile-transfer-progress-details {
+		grid-template-columns: max-content minmax(0, 1fr);
+		gap: 3px 10px;
+	}
+}
+
+@media (max-height: 540px) {
+	.turbofile-transfer-progress-body {
+		row-gap: 6px;
+		padding-top: 8px;
+		padding-bottom: 8px;
+	}
+
+	.turbofile-transfer-progress-graph {
+		height: 84px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.turbofile-transfer-progress-track.is-animated:not(.is-indeterminate) .turbofile-transfer-progress-fill {
+		transition: none;
+	}
+
+	.turbofile-transfer-progress-track.is-indeterminate .turbofile-transfer-progress-fill {
+		animation: none;
+		transform: translateX(262.5%);
+		will-change: auto;
+	}
 }
 
 .turbofile-task-log-overlay {
@@ -4772,13 +5241,11 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 /* Use darker semantic colors on white surfaces; retain the existing font metrics and dark palette. */
-.turbofile-workbench.is-turbofile-light .turbofile-text-primary,
-.turbofile-workbench.is-turbofile-light .turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy {
+.turbofile-workbench.is-turbofile-light .turbofile-text-primary {
 	color: #1d4ed8;
 }
 
-.turbofile-workbench.is-turbofile-light .turbofile-text-success,
-.turbofile-workbench.is-turbofile-light .turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy {
+.turbofile-workbench.is-turbofile-light .turbofile-text-success {
 	color: var(--tf-success);
 }
 
@@ -4805,12 +5272,20 @@ body.turbofile-shell .turbofile-theme-toggle {
 	color: var(--tf-text-muted);
 }
 
-.turbofile-workbench.is-turbofile-light .turbofile-pathbar-primary {
-	--turbofile-path-color: #1d4ed8;
+.turbofile-workbench.is-turbofile-light .turbofile-pathbar-primary,
+.turbofile-workbench.is-turbofile-light .turbofile-pathbar-success {
+	--turbofile-path-color: #3b8eea;
 }
 
-.turbofile-workbench.is-turbofile-light .turbofile-pathbar-success {
-	--turbofile-path-color: var(--tf-success);
+.turbofile-workbench.is-turbofile-light .turbofile-browser-toolbar {
+	--turbofile-toolbar-copy-color: #24578a;
+	--turbofile-toolbar-sort-color: #b39ddb;
+	--turbofile-toolbar-refresh-color: #176239;
+	--turbofile-toolbar-search-color: #815400;
+	--turbofile-toolbar-delete-color: #ad2233;
+	--turbofile-toolbar-path-copy-color: #374655;
+	--turbofile-toolbar-images-color: var(--turbofile-toolbar-layout-color);
+	--turbofile-toolbar-layout-color: #333e4b;
 }
 
 .vs .turbofile-browser-toolbar,

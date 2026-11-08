@@ -161,8 +161,9 @@ suite('TurboFileMutationStabilityStatic', () => {
 		assert.ok(builder.includes('$item.sourcePath'));
 		assert.ok(builder.includes('$item.targetPath'));
 		assert.ok(!builder.includes('-Force'));
-		assert.ok(cleanup.includes('buildWindowsDeleteManyFromInputCommand(true)'));
-		assert.ok(cleanup.includes('execRemoteWithInput'));
+		assert.ok(cleanup.includes('this.deleteSftpMoveSources(source, snapshot, progressId)'));
+		assert.ok(cleanup.includes('this.remoteLstat(sftp, file.path)'));
+		assert.ok(!cleanup.includes('buildWindowsDeleteManyFromInputCommand(true)'));
 		assert.ok(!service.includes('function buildWindowsBatchDeleteCommand'));
 	});
 

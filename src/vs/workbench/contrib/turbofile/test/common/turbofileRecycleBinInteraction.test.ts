@@ -20,7 +20,7 @@ suite('TurboFileRecycleBinInteraction', () => {
 
 		assert.deepStrictEqual({
 			normalRow: !editor.includes("row.classList.add('is-trash-item')") && editor.includes('size.textContent = item.size;'),
-			normalToolbar: renderPane.indexOf('this.appendPaneSortButton(toolbar, side, toolbarAccent);') < renderPane.indexOf('if (state.trashMode.active)'),
+			normalToolbar: renderPane.indexOf('this.appendPaneSortButton(toolbar, side);') < renderPane.indexOf('if (state.trashMode.active)'),
 			normalActions: ['appendDragOperationButton', "'搜索'", "'复制当前路径'", "'展开图片'", "'打开终端'"].every(value => renderPane.includes(value)),
 			hidesDeleteAndRecycleButtons: hiddenTrashToolbarActions.includes("'删除选中项'") && hiddenTrashToolbarActions.includes('appendRecycleBinButton'),
 			backRestoreAndEmptyAreAdded: trashExtras.includes('Codicon.arrowLeft') && trashExtras.includes('Codicon.discard') && trashExtras.includes('Codicon.clearAll'),

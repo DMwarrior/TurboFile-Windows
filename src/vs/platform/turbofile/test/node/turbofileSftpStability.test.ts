@@ -44,14 +44,14 @@ class SilentSftp extends EventEmitter {
 interface IServiceHarness {
 	remoteStat(sftp: SilentSftp, remotePath: string): Promise<{ size: number }>;
 	closeRemoteFile(sftp: SilentSftp, handle: Buffer): Promise<void>;
-	fastPut(sftp: SilentSftp, localPath: string, remotePath: string, options?: ITransferOptions): Promise<void>;
+	fastPutRaw(sftp: SilentSftp, localPath: string, remotePath: string, options?: ITransferOptions): Promise<void>;
 }
 
 /** Replay the service's actual methods without loading Electron or registering Explorer hooks. */
 function createServiceHarness(): IServiceHarness {
 	const servicePath = path.join(process.cwd(), 'src/vs/platform/turbofile/electron-main/turbofileSshMainService.ts');
 	const source = ts.createSourceFile(servicePath, fs.readFileSync(servicePath, 'utf8'), ts.ScriptTarget.Latest, true);
-	const names = new Set(['getSftpOperationWatchdog', 'remoteStat', 'closeRemoteFile', 'fastPut']);
+	const names = new Set(['getSftpOperationWatchdog', 'remoteStat', 'closeRemoteFile', 'fastPutRaw']);
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) {
@@ -101,7 +101,7 @@ suite('TurboFileSftpStability', () => {
 
 	test('file transfer reports real progress and stays alive past two minutes', async () => {
 		let reportedBytes = 0;
-		const transfer = service.fastPut(sftp, 'local', '/remote', { step: (_total, chunk) => reportedBytes += chunk });
+		const transfer = service.fastPutRaw(sftp, 'local', '/remote', { step: (_total, chunk) => reportedBytes += chunk });
 		for (let step = 0; step < 5; step++) {
 			await clock.tickAsync(60000);
 			sftp.transferOptions?.step?.((step + 1) * 1024, 1024, 5120);
@@ -112,7 +112,7 @@ suite('TurboFileSftpStability', () => {
 	});
 
 	test('zero-byte progress cannot indefinitely keep a stalled file transfer alive', async () => {
-		const transfer = assert.rejects(service.fastPut(sftp, 'local', '/remote'), /without data progress/);
+		const transfer = assert.rejects(service.fastPutRaw(sftp, 'local', '/remote'), /without data progress/);
 		await clock.tickAsync(60000);
 		sftp.transferOptions?.step?.(0, 0, 1024);
 		await clock.tickAsync(60000);

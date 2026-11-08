@@ -2,6 +2,12 @@ NOTICES
 
 This repository incorporates material as listed below or described in the code.
 
+Windows Terminal icon: Copyright (c) Microsoft Corporation. All rights reserved.
+Source: https://github.com/microsoft/terminal/tree/main/res
+The unmodified icon image is licensed under Creative Commons Attribution-NoDerivatives
+4.0 International: https://creativecommons.org/licenses/by-nd/4.0/
+Full license: resources/turbofile/terminal-icon-LICENSE.txt.
+
 
 
 ---------------------------------------------------------

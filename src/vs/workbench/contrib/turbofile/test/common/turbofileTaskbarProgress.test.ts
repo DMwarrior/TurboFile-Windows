@@ -13,12 +13,21 @@ import { ITurboFileTransferProgressEvent } from '../../../../../platform/turbofi
 import { aggregateTurboFileTransferProgress, chooseDisplayTransferSpeed, isTurboFileTransferProgressQuiet, resolveTurboFileVisibleTotalBytes, shouldStartTransferTiming, trimTurboFileTaskHistory, TurboFileTransferMetricsDisplay } from '../../common/turbofileTransferDisplay.js';
 import { createTurboFileTransferProgressSemanticKey } from '../../common/turbofileTransferRefresh.js';
 
+interface ITestElementEvent {
+	target: TestElement;
+	key: string;
+	defaultPrevented: boolean;
+	propagationStopped: boolean;
+	preventDefault(): void;
+	stopPropagation(): void;
+}
+
 class TestElement {
 	readonly children: TestElement[] = [];
 	readonly classes = new Set<string>();
 	readonly attributes = new Map<string, string>();
 	readonly style = { width: '' };
-	readonly listeners = new Map<string, () => void>();
+	readonly listeners = new Map<string, (init?: Partial<ITestElementEvent>) => ITestElementEvent>();
 	readonly classList = {
 		add: (name: string): void => { this.classes.add(name); },
 		toggle: (name: string, enabled: boolean): void => { if (enabled) { this.classes.add(name); } else { this.classes.delete(name); } }
@@ -35,7 +44,21 @@ class TestElement {
 	setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
 	removeAttribute(name: string): void { this.attributes.delete(name); }
 	appendChild(child: TestElement): TestElement { child.parentElement = this; this.children.push(child); return child; }
-	addEventListener(type: string, listener: (event: { stopPropagation(): void }) => void): void { this.listeners.set(type, () => listener({ stopPropagation() { } })); }
+	addEventListener(type: string, listener: (event: ITestElementEvent) => void): void {
+		this.listeners.set(type, init => {
+			const event: ITestElementEvent = {
+				target: this,
+				key: '',
+				defaultPrevented: false,
+				propagationStopped: false,
+				preventDefault() { this.defaultPrevented = true; },
+				stopPropagation() { this.propagationStopped = true; },
+				...init
+			};
+			listener(event);
+			return event;
+		});
+	}
 	replaceWith(next: TestElement): void {
 		const siblings = this.parentElement?.children;
 		if (siblings) {
@@ -76,6 +99,10 @@ interface ITestTask {
 
 interface IEditorHarness {
 	container: TestElement;
+	activePage: string;
+	pageChanges: string[];
+	progressToggles: number;
+	transferProgressDialog: { value: object | undefined };
 	taskbarHiddenForTerminal: boolean;
 	showTaskbar: boolean;
 	renders: number;
@@ -83,9 +110,10 @@ interface IEditorHarness {
 	useTaskMetrics: boolean;
 	time: { text: string; title: string };
 	summary: { transferredBytes: number; totalBytes?: number; speedBytesPerSecond: number };
-	beginTask(kind: 'transfer', label: string, detail: string, shouldRender: false): ITestTask;
+	beginTask(kind: 'transfer' | 'delete', label: string, detail: string, shouldRender: false): ITestTask;
 	finishTask(task: ITestTask, status: 'error' | 'canceled' | 'success', detail: string, options: object, shouldRender: false): void;
 	refreshTaskbarMetrics(): void;
+	refreshTaskbar(): void;
 	updateTransferProgress(task: ITestTask, event: ITurboFileTransferProgressEvent): void;
 }
 
@@ -108,6 +136,9 @@ function createHarness(): IEditorHarness {
 		tasks = [];
 		taskSequence = 1;
 		activePage = 'transfer';
+		pageChanges = [];
+		progressToggles = 0;
+		transferProgressDialog = { value: undefined };
 		taskbarHiddenForTerminal = true;
 		showTaskbar = true;
 		renders = 0;
@@ -120,6 +151,9 @@ function createHarness(): IEditorHarness {
 		summary = { transferredBytes: 0, speedBytesPerSecond: 0 };
 		constructor() { this.container.appendChild(new TestElement('.turbofile-transfer-page')); }
 		shouldShowTaskbar() { return this.showTaskbar; }
+		refreshTransferProgressDialog() { }
+		toggleTransferProgressDialog() { this.progressToggles++; this.transferProgressDialog.value = this.transferProgressDialog.value ? undefined : {}; this.refreshTaskbar(); }
+		setActivePage(page) { this.activePage = page; this.pageChanges.push(page); }
 		getLiveTransferDisplay(tasks) { return this.useTaskMetrics ? this.transferMetricsDisplay.read(tasks.map(task => task.id).join(','), this.getLiveTransferAggregate(tasks), Date.now()) : this.summary; }
 		getLiveTransferStatusTitle() { return '正在传输'; }
 		getTransferTimeDisplay() { return this.time; }
@@ -156,10 +190,80 @@ function readMetrics(editor: IEditorHarness) {
 }
 
 suite('TurboFileTaskbarProgress', () => {
+	test('clicking the taskbar toggles transfer details without navigating or canceling the task', () => {
+		const editor = createHarness();
+		editor.beginTask('transfer', '复制目录', 'Windows -> 64', false);
+		const closed = editor.container.querySelector('.turbofile-taskbar')!;
+		assert.strictEqual(closed.attributes.get('aria-expanded'), 'false');
+		closed.listeners.get('click')!();
+		const opened = editor.container.querySelector('.turbofile-taskbar')!;
+		assert.strictEqual(opened.attributes.get('aria-expanded'), 'true');
+		opened.listeners.get('click')!();
+		assert.deepStrictEqual({ toggles: editor.progressToggles, page: editor.activePage, pageChanges: editor.pageChanges, cancels: editor.cancelCalls, expanded: editor.container.querySelector('.turbofile-taskbar')!.attributes.get('aria-expanded') }, {
+			toggles: 2, page: 'transfer', pageChanges: [], cancels: [], expanded: 'false'
+		});
+	});
+
+	test('Enter and Space open transfer details only when the taskbar itself has keyboard focus', () => {
+		const editor = createHarness();
+		editor.beginTask('transfer', '复制目录', 'Windows -> 64', false);
+		const prevented: boolean[] = [];
+		for (const key of ['Enter', ' ']) {
+			const taskbar = editor.container.querySelector('.turbofile-taskbar')!;
+			prevented.push(taskbar.listeners.get('keydown')!({ key }).defaultPrevented);
+		}
+		const taskbar = editor.container.querySelector('.turbofile-taskbar')!;
+		const cancel = editor.container.querySelector('.turbofile-statusbar-cancel')!;
+		const descendant = taskbar.listeners.get('keydown')!({ target: cancel, key: 'Enter' });
+		const unrelated = taskbar.listeners.get('keydown')!({ key: 'ArrowDown' });
+		assert.deepStrictEqual({ toggles: editor.progressToggles, prevented, descendant: descendant.defaultPrevented, unrelated: unrelated.defaultPrevented, pageChanges: editor.pageChanges, cancels: editor.cancelCalls }, {
+			toggles: 2, prevented: [true, true], descendant: false, unrelated: false, pageChanges: [], cancels: []
+		});
+	});
+
+	test('completed transfers still open their details and an empty taskbar retains log navigation', () => {
+		const editor = createHarness();
+		editor.refreshTaskbar();
+		editor.container.querySelector('.turbofile-taskbar')!.listeners.get('click')!();
+		assert.deepStrictEqual(editor.pageChanges, ['tasks']);
+		editor.activePage = 'transfer';
+		const task = editor.beginTask('transfer', '复制目录', 'Windows -> 64', false);
+		editor.finishTask(task, 'success', '完成', {}, false);
+		editor.container.querySelector('.turbofile-taskbar')!.listeners.get('click')!();
+		assert.deepStrictEqual({ toggles: editor.progressToggles, pageChanges: editor.pageChanges, cancels: editor.cancelCalls }, { toggles: 1, pageChanges: ['tasks'], cancels: [] });
+	});
+
+	test('a latest deletion opens logs rather than reopening an older completed transfer', () => {
+		const editor = createHarness();
+		const transfer = editor.beginTask('transfer', '复制目录', 'Windows -> 64', false);
+		editor.finishTask(transfer, 'success', '传输完成', {}, false);
+		editor.beginTask('delete', '删除文件', '64服务器 /home/ubuntu/old.txt', false);
+		const taskbar = editor.container.querySelector('.turbofile-taskbar')!;
+		taskbar.listeners.get('click')!();
+		assert.deepStrictEqual({ title: taskbar.title, toggles: editor.progressToggles, pageChanges: editor.pageChanges, cancels: editor.cancelCalls }, {
+			title: '打开任务日志', toggles: 0, pageChanges: ['tasks'], cancels: []
+		});
+	});
+
+	test('an open progress window still toggles closed after a newer non-transfer task', () => {
+		const editor = createHarness();
+		const transfer = editor.beginTask('transfer', '复制文件', 'Windows -> 64', false);
+		editor.finishTask(transfer, 'success', '已完成', {}, false);
+		editor.transferProgressDialog.value = {};
+		editor.beginTask('delete', '删除文件', '已删除', false);
+		const taskbar = editor.container.querySelector('.turbofile-taskbar')!;
+		taskbar.listeners.get('click')!();
+		assert.deepStrictEqual({ title: taskbar.title, toggles: editor.progressToggles, open: !!editor.transferProgressDialog.value, pageChanges: editor.pageChanges, cancels: editor.cancelCalls }, {
+			title: '收起传输进度', toggles: 1, open: false, pageChanges: [], cancels: []
+		});
+	});
+
 	test('a same-host directory task shows initial metrics and a working cancel button with terminal open', () => {
 		const editor = createHarness();
 		const task = editor.beginTask('transfer', '复制目录', '62 -> 62', false);
-		editor.container.querySelector('.turbofile-statusbar-cancel')!.listeners.get('click')!();
+		const event = editor.container.querySelector('.turbofile-statusbar-cancel')!.listeners.get('click')!();
+		assert.strictEqual(event.propagationStopped, true);
+		assert.strictEqual(editor.progressToggles, 0);
 		assert.deepStrictEqual({ ...readMetrics(editor), cancelCalls: editor.cancelCalls, renders: editor.renders, terminalOpen: editor.taskbarHiddenForTerminal }, {
 			speed: '0 B/s', time: '12.5s', bytes: '0 B', protocol: '同机复制', cancelCalls: [[task]], renders: 0, terminalOpen: true
 		});

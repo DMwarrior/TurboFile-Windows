@@ -20,11 +20,12 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 	declare readonly _serviceBrand: undefined;
 	private readonly changed = this._register(new Emitter<void>());
 	readonly onDidChange = this.changed.event;
-	private readonly pending = new TurboFileJournalBuffer();
+	private pending = new TurboFileJournalBuffer();
 	private readonly sequence = new Sequencer();
 	private database: Promise<Database> | undefined;
 	private warning: string | undefined;
 	private gapPending = false;
+	private hasGap = false;
 	private writesSinceCleanup = 0;
 	private retryAfter = 0;
 	private readonly path: string;
@@ -42,12 +43,16 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 		if (!isTurboFileJournalKind(write?.record?.kind)) { return; }
 		this.pending.enqueue(write);
 		if (this.pending.takeGap()) { await this.reportGap(); }
-		if (!this.flushScheduler.isScheduled()) { this.flushScheduler.schedule(); }
+		this.scheduleFlush();
 	}
 
 	async reportGap(): Promise<void> {
-		this.warning = 'incomplete'; this.gapPending = true;
-		if (!this.flushScheduler.isScheduled()) { this.flushScheduler.schedule(); }
+		this.warning = 'incomplete'; this.gapPending = true; this.hasGap = true;
+		this.scheduleFlush();
+	}
+
+	private scheduleFlush(): void {
+		if (!this.flushScheduler.isScheduled()) { this.flushScheduler.schedule(Math.max(500, this.retryAfter - Date.now())); }
 	}
 
 	private connect(): Promise<Database> {
@@ -80,7 +85,7 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 						try {
 							const legacy = JSON.parse(row.summary) as ITurboFileJournalRecord & { message?: string };
 							safe = normalizeTurboFileJournalWrite({ record: { ...legacy, error: legacy.error ?? legacy.message } });
-						} catch { this.warning = 'incomplete'; this.gapPending = true; }
+						} catch { this.warning = 'incomplete'; this.gapPending = true; this.hasGap = true; }
 						if (safe) { await this.run(db, "UPDATE operations SET search='',archived=0,summary=? WHERE seq=?", [JSON.stringify(safe.record), row.seq]); }
 						else { await this.run(db, 'DELETE FROM operations WHERE seq=?', [row.seq]); }
 					}
@@ -101,31 +106,50 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 			// 6 MiB database plus bounded WAL transactions stays within the 10 MiB disk budget.
 			await this.exec(db, 'PRAGMA max_page_count=1536');
 			const gap = await this.all<{ value: string }>(db, "SELECT value FROM journal_meta WHERE key='incomplete'");
-			if (gap.length) { this.warning = 'incomplete'; }
+			if (gap.length) { this.warning = 'incomplete'; this.hasGap = true; }
 			return db;
 		} catch (error) { await new Promise<void>(resolve => db.close(() => resolve())); throw error; }
 	}
 
 	flush(): Promise<void> { this.flushScheduler.cancel(); return this.sequence.queue(() => this.flushPending()); }
 
-	private async flushPending(): Promise<void> {
-		if ((!this.pending.size && !this.gapPending) || Date.now() < this.retryAfter) { return; }
+	private async flushPending(ignoreBackoff = false): Promise<void> {
+		if (!this.pending.size && !this.gapPending) { return; }
+		if (!ignoreBackoff && Date.now() < this.retryAfter) { this.scheduleFlush(); return; }
 		const batch: ITurboFileJournalWrite[] = [];
 		while (this.pending.size) { batch.push(this.pending.shift()!); }
 		try {
 			const db = await this.connect();
 			await this.exec(db, 'BEGIN IMMEDIATE');
+			let savingGap = false;
 			try {
 				for (const { record } of batch) {
 					await this.run(db, "INSERT INTO operations(id,started,status,kind,search,archived,summary) VALUES(?,?,?,?,'',0,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,summary=excluded.summary", [record.id, record.startedAt, record.status, record.kind, JSON.stringify(record)]);
 				}
-				if (this.gapPending) { await this.run(db, "INSERT OR REPLACE INTO journal_meta VALUES('incomplete','1')"); }
-				await this.exec(db, 'COMMIT'); this.gapPending = false;
-			} catch (error) { await this.exec(db, 'ROLLBACK'); throw error; }
+				savingGap = this.gapPending;
+				if (savingGap) {
+					this.gapPending = false;
+					await this.run(db, "INSERT OR REPLACE INTO journal_meta VALUES('incomplete','1')");
+				}
+				await this.exec(db, 'COMMIT');
+			} catch (error) {
+				if (savingGap) { this.gapPending = true; }
+				await this.exec(db, 'ROLLBACK'); throw error;
+			}
+			this.retryAfter = 0;
+			this.warning = this.hasGap ? 'incomplete' : undefined;
 			this.writesSinceCleanup += batch.length;
-			if (this.writesSinceCleanup >= 20) { await this.cleanup(db); }
+			if (this.writesSinceCleanup >= 20) { await this.cleanup(db).catch(error => this.logService.warn('[TurboFile journal] Cleanup failed', error)); }
 		} catch (error) {
-			this.warning = 'write-failed'; this.gapPending = true; this.retryAfter = Date.now() + 30000;
+			// Reuse the bounded buffer and apply newer arrivals last so an old running state
+			// can never replace a result that arrived while the failed transaction was pending.
+			const retry = new TurboFileJournalBuffer();
+			for (const write of batch) { retry.enqueue(write); }
+			while (this.pending.size) { retry.enqueue(this.pending.shift()!); }
+			this.pending = retry;
+			if (retry.takeGap()) { this.gapPending = true; this.hasGap = true; }
+			this.warning = 'write-failed'; this.retryAfter = Date.now() + 30000;
+			this.flushScheduler.cancel(); this.scheduleFlush();
 			this.logService.warn('[TurboFile journal] Unable to persist operation history', error);
 		}
 		this.changed.fire();
@@ -167,7 +191,9 @@ export class TurboFileJournalService extends Disposable implements ITurboFileJou
 	}
 
 	async close(): Promise<void> {
-		this.maintenanceScheduler.cancel(); await this.flush(); this.maintenanceScheduler.cancel();
+		this.maintenanceScheduler.cancel(); this.flushScheduler.cancel();
+		await this.sequence.queue(() => this.flushPending(true));
+		this.flushScheduler.cancel(); this.maintenanceScheduler.cancel();
 		if (this.database) { const db = await this.database; await new Promise<void>(resolve => db.close(() => resolve())); this.database = undefined; }
 	}
 

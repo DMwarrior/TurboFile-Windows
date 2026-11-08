@@ -6,6 +6,7 @@
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter } from '../../../../base/common/event.js';
+import { localize } from '../../../../nls.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { TurboFileAuthType, TurboFileDevice, TurboFileDeviceCapabilities, TurboFileDevicePlatform, TurboFileTransferProtocol, defaultTurboFileDeviceCapabilities, defaultTurboFileTransferProtocol } from '../common/turbofileTypes.js';
@@ -87,6 +88,7 @@ const TURBOFILE_LEGACY_DEFAULT_DEVICE_ID_PREFIX = 'turbofile-default-';
 export class TurboFileDeviceStore extends Disposable {
 	private readonly secretValueCache = new Map<string, Promise<string | undefined>>();
 	private readonly secretMutationChains = new Map<string, Promise<unknown>>();
+	private readonly deviceMutationChains = new Map<string, Promise<void>>();
 	private readonly onDidChangeDeviceSecretEmitter = this._register(new Emitter<string>());
 	readonly onDidChangeDeviceSecret = this.onDidChangeDeviceSecretEmitter.event;
 	private readonly onDidChangeDeviceOrderEmitter = this._register(new Emitter<void>());
@@ -292,58 +294,79 @@ export class TurboFileDeviceStore extends Disposable {
 	}
 
 	async updateDevice(deviceId: string, draft: TurboFileDeviceDraft): Promise<TurboFileDevice> {
-		const devices = this.loadDevices();
-		const index = devices.findIndex(device => device.id === deviceId);
-		if (index < 0) {
-			throw new Error('Device not found');
-		}
-
-		const existing = devices[index];
-		const device: TurboFileDevice = {
-			...existing,
-			name: draft.name.trim() || draft.host.trim(),
-			host: draft.host.trim(),
-			port: draft.port || 22,
-			username: draft.username.trim(),
-			authType: draft.authType,
-			defaultPath: normalizeDefaultPath(draft.defaultPath, draft.platform),
-			platform: draft.platform,
-			privateKeyPath: draft.privateKeyPath?.trim() || undefined,
-			preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
-		};
-		devices[index] = device;
-		this.storeDevices(devices);
-
-		await this.storeDeviceSecrets(device.id, draft);
-
-		return device;
+		return this.queueDeviceMutation(deviceId, async () => {
+			if (!this.loadDevices().some(device => device.id === deviceId)) {
+				throw new Error('Device not found');
+			}
+			let device: TurboFileDevice | undefined;
+			await this.storeDeviceSecretsTransaction(deviceId, draft, () => {
+				// Reload after the asynchronous secret writes to preserve changes to other devices
+				// and capability updates that arrived while credential storage was busy.
+				const devices = this.loadDevices();
+				const index = devices.findIndex(device => device.id === deviceId);
+				if (index < 0) { throw new Error('Device not found'); }
+				device = {
+					...devices[index],
+					name: draft.name.trim() || draft.host.trim(),
+					host: draft.host.trim(),
+					port: draft.port || 22,
+					username: draft.username.trim(),
+					authType: draft.authType,
+					defaultPath: normalizeDefaultPath(draft.defaultPath, draft.platform),
+					platform: draft.platform,
+					privateKeyPath: draft.privateKeyPath?.trim() || undefined,
+					preferredTransferProtocol: normalizeTransferProtocol(draft.preferredTransferProtocol)
+				};
+				devices[index] = device;
+				this.storeDevices(devices);
+			});
+			return device!;
+		});
 	}
 
 	async deleteDevice(deviceId: string): Promise<void> {
-		const devices = this.loadDevices();
-		const nextDevices = devices.filter(device => device.id !== deviceId);
-		this.storeDevices(nextDevices);
-		if (this.storageService.get(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, StorageScope.PROFILE) !== undefined) {
-			this.storeDeviceOrder(this.getOrderedDeviceIds([TURBOFILE_LOCAL_WINDOWS_DEVICE_ID, ...nextDevices.map(device => device.id)]));
+		return this.queueDeviceMutation(deviceId, async () => {
+			const devices = this.loadDevices();
+			const nextDevices = devices.filter(device => device.id !== deviceId);
+			this.storeDevices(nextDevices);
+			if (this.storageService.get(TURBOFILE_DEVICE_ORDER_STORAGE_KEY, StorageScope.PROFILE) !== undefined) {
+				this.storeDeviceOrder(this.getOrderedDeviceIds([TURBOFILE_LOCAL_WINDOWS_DEVICE_ID, ...nextDevices.map(device => device.id)]));
+			}
+			if (this.isDefaultDeviceId(deviceId)) {
+				const deletedDefaultDeviceIds = this.loadDeletedDefaultDeviceIds();
+				deletedDefaultDeviceIds.add(deviceId);
+				this.storageService.store(TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY, JSON.stringify([...deletedDefaultDeviceIds]), StorageScope.PROFILE, StorageTarget.MACHINE);
+			}
+			await this.deleteDeviceSecrets(deviceId);
+		});
+	}
+
+	private async queueDeviceMutation<T>(deviceId: string, mutation: () => Promise<T>): Promise<T> {
+		const operation = (this.deviceMutationChains.get(deviceId) ?? Promise.resolve()).then(mutation);
+		const completion = operation.then(() => undefined, () => undefined);
+		this.deviceMutationChains.set(deviceId, completion);
+		try {
+			return await operation;
+		} finally {
+			if (this.deviceMutationChains.get(deviceId) === completion) { this.deviceMutationChains.delete(deviceId); }
 		}
-		if (this.isDefaultDeviceId(deviceId)) {
-			const deletedDefaultDeviceIds = this.loadDeletedDefaultDeviceIds();
-			deletedDefaultDeviceIds.add(deviceId);
-			this.storageService.store(TURBOFILE_DELETED_DEFAULT_DEVICES_STORAGE_KEY, JSON.stringify([...deletedDefaultDeviceIds]), StorageScope.PROFILE, StorageTarget.MACHINE);
-		}
-		await this.deleteDeviceSecrets(deviceId);
 	}
 
 	getPassword(deviceId: string): Promise<string | undefined> {
-		return this.getSecret(this.getPasswordKey(deviceId));
+		return this.getDeviceSecret(deviceId, this.getPasswordKey(deviceId));
 	}
 
 	getPrivateKey(deviceId: string): Promise<string | undefined> {
-		return this.getSecret(this.getPrivateKeyKey(deviceId));
+		return this.getDeviceSecret(deviceId, this.getPrivateKeyKey(deviceId));
 	}
 
 	getPassphrase(deviceId: string): Promise<string | undefined> {
-		return this.getSecret(this.getPassphraseKey(deviceId));
+		return this.getDeviceSecret(deviceId, this.getPassphraseKey(deviceId));
+	}
+
+	private getDeviceSecret(deviceId: string, key: string): Promise<string | undefined> {
+		const mutation = this.deviceMutationChains.get(deviceId);
+		return mutation ? mutation.then(() => this.getSecret(key)) : this.getSecret(key);
 	}
 
 	updateDeviceCapabilities(deviceId: string, capabilities: TurboFileDeviceCapabilities): TurboFileDevice | undefined {
@@ -485,17 +508,34 @@ export class TurboFileDeviceStore extends Disposable {
 	}
 
 	private async storeDeviceSecrets(deviceId: string, secrets: Pick<TurboFileDeviceDraft, 'password' | 'privateKey' | 'passphrase'>): Promise<void> {
-		const writes: Promise<void>[] = [];
-		if (secrets.password) {
-			writes.push(this.storeSecret(this.getPasswordKey(deviceId), secrets.password));
+		await Promise.all(this.getDeviceSecretWrites(deviceId, secrets).map(([key, value]) => this.storeSecret(key, value)));
+	}
+
+	private getDeviceSecretWrites(deviceId: string, secrets: Pick<TurboFileDeviceDraft, 'password' | 'privateKey' | 'passphrase'>): [string, string][] {
+		const writes: [string, string][] = [];
+		if (secrets.password) { writes.push([this.getPasswordKey(deviceId), secrets.password]); }
+		if (secrets.privateKey) { writes.push([this.getPrivateKeyKey(deviceId), secrets.privateKey]); }
+		if (secrets.passphrase) { writes.push([this.getPassphraseKey(deviceId), secrets.passphrase]); }
+		return writes;
+	}
+
+	private async storeDeviceSecretsTransaction(deviceId: string, secrets: Pick<TurboFileDeviceDraft, 'password' | 'privateKey' | 'passphrase'>, commit: () => void): Promise<void> {
+		const writes = this.getDeviceSecretWrites(deviceId, secrets);
+		const previous = await Promise.all(writes.map(([key]) => this.getSecret(key)));
+		try {
+			// Wait for every write before rolling back, including a late successful write.
+			const results = await Promise.allSettled(writes.map(([key, value]) => this.storeSecret(key, value)));
+			const failure = results.find(result => result.status === 'rejected');
+			if (failure?.status === 'rejected') { throw failure.reason; }
+			commit();
+		} catch (error) {
+			const restored = await Promise.allSettled(writes.map(([key], index) => previous[index] === undefined ? this.deleteSecret(key) : this.storeSecret(key, previous[index])));
+			const failures = restored.filter(result => result.status === 'rejected');
+			if (failures.length) {
+				throw new AggregateError([error, ...failures.map(result => result.reason)], localize('turbofile.credentialsRestoreFailed', "Unable to restore saved device credentials. Please re-enter the device credentials."));
+			}
+			throw error;
 		}
-		if (secrets.privateKey) {
-			writes.push(this.storeSecret(this.getPrivateKeyKey(deviceId), secrets.privateKey));
-		}
-		if (secrets.passphrase) {
-			writes.push(this.storeSecret(this.getPassphraseKey(deviceId), secrets.passphrase));
-		}
-		await Promise.all(writes);
 	}
 
 	private async deleteDeviceSecrets(deviceId: string): Promise<void> {

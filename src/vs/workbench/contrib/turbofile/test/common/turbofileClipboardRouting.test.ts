@@ -74,6 +74,11 @@ interface IEditorHarness {
 	currentInput: object;
 	editorService: { activeEditor: object | undefined };
 	activeFilePaneSide: PaneSide;
+	transferProgressDialog: { value: { element: { contains(target: TestElement): boolean } } | undefined };
+	progressCloseCount: number;
+	taskbarFocusCount: number;
+	canceledTransfers: number;
+	deletedSides: PaneSide[];
 	container: { ownerDocument: { body: TestElement; documentElement: TestElement } };
 	devices: Record<PaneSide, ITestDevice>;
 	paneStates: Record<PaneSide, { path: string; trashMode: { active: boolean } }>;
@@ -97,7 +102,7 @@ interface IEditorHarness {
 function createEditorHarness(surface = 'active'): IEditorHarness {
 	const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 	const source = ts.createSourceFile(editorPath, fs.readFileSync(editorPath, 'utf8'), ts.ScriptTarget.Latest, true);
-	const names = new Set(['handleWorkbenchKeydown', 'handlePaneKeyboardShortcut', 'handleImageGridKeyboardShortcut', 'isImageGridSurfaceActive', 'isKeyboardEventFromTurboFileSurface', 'getPaneSideFromElement', 'setActiveFilePaneSide', 'getClipboardShortcutKey', 'isEditableKeyboardTarget', 'copySelectedToInternalClipboard', 'pasteInternalTransferClipboard', 'createTransferContext', 'getFileContextActions', 'getPaneContextActions', 'moveInternalItemsNatively', 'renameTransferItem']);
+	const names = new Set(['handleWorkbenchKeydown', 'closeTransferProgressDialog', 'handlePaneKeyboardShortcut', 'handleImageGridKeyboardShortcut', 'isImageGridSurfaceActive', 'isKeyboardEventFromTurboFileSurface', 'getPaneSideFromElement', 'setActiveFilePaneSide', 'getClipboardShortcutKey', 'isEditableKeyboardTarget', 'copySelectedToInternalClipboard', 'pasteInternalTransferClipboard', 'createTransferContext', 'getFileContextActions', 'getPaneContextActions', 'moveInternalItemsNatively', 'renameTransferItem']);
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) {
@@ -113,7 +118,13 @@ function createEditorHarness(surface = 'active'): IEditorHarness {
 		editorService = { activeEditor: this.currentInput };
 		activePage = 'transfer';
 		activeFilePaneSide = 'left';
-		container = { ownerDocument: document, contains: target => target instanceof HTMLElement && target.surface === surface };
+		progressCloseCount = 0;
+		taskbarFocusCount = 0;
+		canceledTransfers = 0;
+		deletedSides = [];
+		transferProgressDialog = { value: undefined, clear: () => { this.transferProgressDialog.value = undefined; this.progressCloseCount++; } };
+		container = { ownerDocument: document, contains: target => target instanceof HTMLElement && target.surface === surface,
+			querySelector: () => ({ focus: () => this.taskbarFocusCount++ }) };
 		devices = { left: { id: '62', name: '62' }, right: { id: '64', name: '64' } };
 		paneStates = { left: { path: '/source', trashMode: { active: false } }, right: { path: '/target', trashMode: { active: false } } };
 		paneImageGridStates = {};
@@ -143,6 +154,9 @@ function createEditorHarness(surface = 'active'): IEditorHarness {
 		schedulePostTransferReconcile() { }
 		applyOptimisticTransferResult() { }
 		refreshTaskbar() { }
+		getDeleteKeyboardTargetSide() { return this.activeFilePaneSide; }
+		deleteSelected(side) { this.deletedSides.push(side); }
+		cancelRunningTransfers() { this.canceledTransfers++; }
 		render() { }
 		pasteIntoPane(side) { this.pastedSides.push(side); }
 		copyImageGridSelectionToInternalClipboard(state, operation) { this.copySelectedToInternalClipboard(state.side, operation, false); }
@@ -165,6 +179,47 @@ function keyboardEvent(key: string, target: TestElement): ITestKeyboardEvent {
 }
 
 suite('TurboFileClipboardRouting', () => {
+	test('focus inside the transfer progress dock does not route copy, cut, paste or Delete to file panes', () => {
+		const editor = createEditorHarness();
+		const target = new TestElement('active');
+		editor.transferProgressDialog.value = { element: { contains: candidate => candidate === target } };
+		for (const key of ['c', 'x', 'v', 'Delete']) {
+			const event = keyboardEvent(key, target);
+			event.ctrlKey = key !== 'Delete';
+			editor.handleWorkbenchKeydown(event);
+		}
+		assert.deepStrictEqual({ clipboard: editor.internalTransferClipboard, pasted: editor.pastedSides, deleted: editor.deletedSides, closed: editor.progressCloseCount }, {
+			clipboard: undefined, pasted: [], deleted: [], closed: 0
+		});
+	});
+
+	test('file panes retain clipboard and Delete shortcuts while the nonmodal transfer progress dock is open', () => {
+		const editor = createEditorHarness();
+		const dockTarget = new TestElement('active');
+		editor.transferProgressDialog.value = { element: { contains: candidate => candidate === dockTarget } };
+		const paneTarget = new TestElement('active', 'right');
+		editor.handleWorkbenchKeydown(keyboardEvent('c', paneTarget));
+		editor.handleWorkbenchKeydown(keyboardEvent('v', paneTarget));
+		const remove = keyboardEvent('Delete', paneTarget);
+		remove.ctrlKey = false;
+		editor.handleWorkbenchKeydown(remove);
+		assert.deepStrictEqual({ clipboardSource: editor.internalTransferClipboard?.sourceSide, pasted: editor.pastedSides, deleted: editor.deletedSides, closed: editor.progressCloseCount, canceled: editor.canceledTransfers }, {
+			clipboardSource: 'right', pasted: ['right'], deleted: ['right'], closed: 0, canceled: 0
+		});
+	});
+
+	test('Escape closes only the progress window, restores taskbar focus and leaves transfers running', () => {
+		const editor = createEditorHarness();
+		editor.transferProgressDialog.value = { element: { contains: () => false } };
+		const escape = keyboardEvent('Escape', new TestElement('active'));
+		escape.ctrlKey = false;
+		editor.handleWorkbenchKeydown(escape);
+		editor.handleWorkbenchKeydown(keyboardEvent('c', new TestElement('active', 'right')));
+		assert.deepStrictEqual({ dialog: editor.transferProgressDialog.value, closed: editor.progressCloseCount, focused: editor.taskbarFocusCount, canceled: editor.canceledTransfers, prevented: escape.defaultPrevented, stopped: escape.stopped, clipboardSource: editor.internalTransferClipboard?.sourceSide }, {
+			dialog: undefined, closed: 1, focused: 1, canceled: 0, prevented: true, stopped: true, clipboardSource: 'right'
+		});
+	});
+
 	test('hidden tabs cannot intercept clipboard shortcuts after a render drops focus to body', () => {
 		const hidden = createEditorHarness('hidden');
 		const active = createEditorHarness();

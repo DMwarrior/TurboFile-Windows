@@ -54,7 +54,7 @@ suite('TurboFileDragDrop', () => {
 		], ['move', 'copy', 'move', 'move']);
 	});
 
-	test('renders side-colored mode buttons and routes drag snapshots', () => {
+	test('renders operation-colored mode buttons and routes drag snapshots', () => {
 		const editor = readTurboFileEditor();
 		const css = fs.readFileSync(path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/media/turbofile.css'), 'utf8');
 
@@ -63,23 +63,21 @@ suite('TurboFileDragDrop', () => {
 			snapshot: editor.includes("setData('application/x-turbofile-operation', operation)"),
 			internalDrop: editor.includes("this.recordNativeInternalDrop({ kind: 'pane'"),
 			externalDrop: editor.includes('this.transferExternalPaths(targetSide, externalPaths, operation, initiatedAt)'),
-			leftBlue: css.includes('.turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy'),
-			rightGreen: css.includes('.turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy'),
+			sharedCopyColor: css.includes('--turbofile-toolbar-copy-color:')
+				&& !css.includes('.turbofile-pane[data-turbofile-side="left"] .turbofile-drag-operation-button.is-copy')
+				&& !css.includes('.turbofile-pane[data-turbofile-side="right"] .turbofile-drag-operation-button.is-copy'),
 			cutRed: css.includes('.turbofile-drag-operation-button.is-move') && css.includes('color: #ef6670;'),
 			compactLabel: editor.includes("$('span.turbofile-drag-operation-icon', undefined, label)"),
 			noSelectedHighlight: css.includes('.turbofile-drag-operation-button:focus') && css.includes('background: transparent;'),
-			largerThinLabel: /\.turbofile-drag-operation-icon\s*\{[\s\S]*?font-size:\s*10px;[\s\S]*?font-weight:\s*400;/.test(css)
 		}, {
 			button: true,
 			snapshot: true,
 			internalDrop: true,
 			externalDrop: true,
-			leftBlue: true,
-			rightGreen: true,
+			sharedCopyColor: true,
 			cutRed: true,
 			compactLabel: true,
 			noSelectedHighlight: true,
-			largerThinLabel: true
 		});
 	});
 
@@ -263,8 +261,9 @@ suite('TurboFileDragDrop', () => {
 		const explicitDeleteStart = editor.indexOf('private async deleteSelected');
 		const explicitDeleteBlock = editor.slice(explicitDeleteStart, editor.indexOf('private removePaneItems', explicitDeleteStart));
 
-		assert.ok(cleanupBlock.includes('fsp.rm('));
-		assert.ok(cleanupBlock.includes('buildPosixDeleteManyFromInputCommand(true)'));
+		assert.ok(cleanupBlock.includes('this.deleteSftpMoveSources(source, snapshot, progressId)'));
+		assert.ok(!cleanupBlock.includes('fsp.rm('));
+		assert.ok(!cleanupBlock.includes('buildPosixDeleteManyFromInputCommand(true)'));
 		assert.ok(!cleanupBlock.includes('movePathsToTrash'));
 		assert.ok(explicitDeleteBlock.includes('moveUserItemsToTrash'));
 	});

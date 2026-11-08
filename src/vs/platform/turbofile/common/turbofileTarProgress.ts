@@ -5,6 +5,22 @@
 
 const DIRECT_TAR_BYTE_PROGRESS_PATTERN = /(?:^|[\r\n])\s*([0-9]+)\s+bytes(?:\s|\()/g;
 
+/** Reports only new archive bytes when a chunk or a complete upload is retried. */
+export function createTarRetryProgressReporter(onDelta?: (delta: number) => void): () => (delta: number) => void {
+	let maximumBytes = 0;
+	return () => {
+		let attemptBytes = 0;
+		return delta => {
+			attemptBytes += Math.max(0, delta);
+			if (attemptBytes > maximumBytes) {
+				const additionalBytes = attemptBytes - maximumBytes;
+				maximumBytes = attemptBytes;
+				onDelta?.(additionalBytes);
+			}
+		};
+	};
+}
+
 /**
  * Parses the byte counter emitted by GNU coreutils `dd status=progress`.
  * The parser accepts a rolling stderr buffer because SSH may split a progress line across chunks.

@@ -7,11 +7,12 @@ import * as assert from 'assert';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import type { Database } from '@vscode/sqlite3';
-import { timeout } from '../../../../base/common/async.js';
+import * as sinon from 'sinon';
+import { DeferredPromise, timeout } from '../../../../base/common/async.js';
 import { dirname, join } from '../../../../base/common/path.js';
 import { INativeEnvironmentService } from '../../../environment/common/environment.js';
 import { NullLogService } from '../../../log/common/log.js';
-import { ITurboFileJournalWrite, TURBOFILE_JOURNAL_DISK_BYTES, TURBOFILE_JOURNAL_RECORD_LIMIT } from '../../common/turbofileJournal.js';
+import { ITurboFileJournalWrite, TURBOFILE_JOURNAL_DISK_BYTES, TURBOFILE_JOURNAL_QUEUE_BYTES, TURBOFILE_JOURNAL_RECORD_LIMIT, TurboFileJournalBuffer } from '../../common/turbofileJournal.js';
 import { TurboFileJournalService } from '../../node/turbofileJournalService.js';
 
 function fixture(id: string, status: ITurboFileJournalWrite['record']['status'] = 'success'): ITurboFileJournalWrite {
@@ -122,5 +123,75 @@ suite('TurboFile compact persistent journal', () => {
 		await Promise.all(Array.from({ length: 100 }, async (_, index) => { await store.append(fixture(`parallel-${index}`)); await store.query({}); }));
 		const first = await store.query({}); const second = await store.query({ before: first.next });
 		assert.deepStrictEqual([first.records.length + second.records.length, first.warning], [100, undefined]);
+	});
+
+	test('automatically retries a failed batch without overwriting a newer result', async () => {
+		await store.query({});
+		const writer = store as unknown as { exec(db: Database, sql: string): Promise<void> };
+		const transactionStarted = new DeferredPromise<void>();
+		const failTransaction = new DeferredPromise<void>();
+		let attempts = 0;
+		writer.exec = async (db, sql) => {
+			if (sql === 'BEGIN IMMEDIATE' && ++attempts === 1) {
+				transactionStarted.complete();
+				await failTransaction.p;
+				throw new Error('SQLITE_BUSY');
+			}
+			await exec(db, sql);
+		};
+		const clock = sinon.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+		try {
+			await store.append(fixture('retry-task', 'running'));
+			const flushing = store.flush();
+			await transactionStarted.p;
+			await store.append(fixture('retry-task', 'success'));
+			failTransaction.complete();
+			await flushing;
+			const failed = await store.query({});
+			await clock.tickAsync(29999);
+			assert.deepStrictEqual([failed.records, failed.warning, attempts], [[], 'write-failed', 1]);
+			const retried = new DeferredPromise<void>();
+			const listener = store.onDidChange(() => retried.complete());
+			try { await clock.tickAsync(1); await retried.p; } finally { listener.dispose(); }
+			const recovered = await store.query({});
+			assert.deepStrictEqual([recovered.records.map(record => [record.id, record.status]), recovered.warning, attempts], [[['retry-task', 'success']], undefined, 2]);
+		} finally {
+			failTransaction.complete();
+			clock.restore();
+			writer.exec = exec;
+		}
+	});
+
+	test('keeps retries bounded and retains overflow warnings after recovery', async () => {
+		await store.query({});
+		const writer = store as unknown as { exec(db: Database, sql: string): Promise<void>; pending: TurboFileJournalBuffer };
+		writer.exec = async (db, sql) => {
+			if (sql === 'BEGIN IMMEDIATE') { throw new Error('SQLITE_BUSY'); }
+			await exec(db, sql);
+		};
+		try {
+			for (let index = 0; index < 1000; index++) {
+				const write = fixture(`retry-${index}`);
+				await store.append({ record: { ...write.record, sourcePath: 'source'.repeat(300) } });
+			}
+			await store.flush();
+			assert.ok(writer.pending.size > 0 && writer.pending.size < 1000 && writer.pending.byteLength <= TURBOFILE_JOURNAL_QUEUE_BYTES);
+		} finally { writer.exec = exec; }
+		await store.close(); store.dispose(); store = createStore();
+		const recovered = await store.query({});
+		assert.deepStrictEqual([recovered.records.length > 0, recovered.warning], [true, 'incomplete']);
+	});
+
+	test('shutdown retries pending results even during the retry backoff', async () => {
+		await store.query({});
+		const writer = store as unknown as { exec(db: Database, sql: string): Promise<void> };
+		writer.exec = async (db, sql) => {
+			if (sql === 'BEGIN IMMEDIATE') { throw new Error('SQLITE_BUSY'); }
+			await exec(db, sql);
+		};
+		try { await store.append(fixture('shutdown-retry')); await store.flush(); } finally { writer.exec = exec; }
+		await store.close(); store.dispose(); store = createStore();
+		const recovered = await store.query({});
+		assert.deepStrictEqual([recovered.records.map(record => record.id), recovered.warning], [['shutdown-retry'], undefined]);
 	});
 });
