@@ -1,37 +1,41 @@
 {
-  "version": "1.175.0",
-  "name": "极速传 1.175.0",
-  "notes": "# 极速传 1.175.0\n\n发布日期：2026-11-08\n\n- 底部传输信息可展开进度面板，显示实时速度曲线、已传容量、耗时和完成后的平均速度；再次点击、最小化或关闭面板后继续传输。\n- 已知总量显示真实百分比和预计剩余时间；未知总量显示传输活动，不为显示进度额外扫描目录大小。进度条平滑更新，不含粒子特效。\n- 增强 SFTP 覆盖文件保护，先写同目录临时文件，完成后再替换；断线、取消或写入失败时保留已有目标文件。\n- 限制同一服务器的同时握手数量，减少批量任务启动时的连接失败；复用已连接通道并精简小文件的重复请求。\n- 修复跨盘剪切在源清理失败后误删目标副本的问题，加强目录剪切时对传输期间新增或修改文件的保护。\n- 完善传输取消、Tar 中转结束确认和错误传播，避免失败后错误重试或误报完成。\n- 设备编辑保存失败时恢复原配置与凭据；任务日志临时写入失败后进行有容量上限的退避重试。\n- 统一左右路径显示和工具栏图标尺寸，调整图标配色，改善深浅主题下的可读性。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.175.0.exe`\n\n自动更新继续优先使用 Gitee 国内源，GitHub 提供完整 EXE 下载和备用更新源。\n\n目录剪切只核对文件元数据，不计算内容哈希。若源文件在传输中发生变化，或服务器无法提供足够精度的元数据，已复制的目标文件保留，未能安全确认的源文件也会保留，并提示剪切未全部完成。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
-  "pub_date": "2026-11-08T10:47:02.340Z",
+  "version": "1.176.0",
+  "name": "极速传 1.176.0",
+  "notes": "# 极速传 1.176.0\n\n发布日期：2026-11-09\n\n- 新增“视图 → 传输时自动打开进度面板”，默认开启并保存选择；手动收起后同一任务不会反复弹出。\n- 新任务开始后立即刷新面板，替换上一任务的结果与曲线；自动展开不抢键盘焦点。\n- “取消传输”并入详情区域，完成后隐藏按钮，保持面板高度，避免界面跳动。\n- 进度条去掉白色圆点，百分比跟随蓝色填充前端显示，保留平滑动画；总大小未知时不显示虚假百分比。\n- 面板复用已有进度采样，速度曲线最多保留 120 个点；隐藏窗口暂停绘图，不增加目录大小扫描或设备请求。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.176.0.exe`\n\n自动更新优先 Gitee 国内源，GitHub 提供完整 EXE 下载和备用源。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
+  "pub_date": "2026-11-09T07:03:29.165Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe",
-      "sha256": "3fd1ba2b115a9e612f81b958f1e18cf44b3cdc773bb070defeaa543baf7cd24a",
-      "size": 113666388,
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe",
+      "sha256": "8729e994d135a797a3bda6fcb4aba9d22b50facd0719c52161c6ad7b7964b265",
+      "size": 113666971,
       "parts": [
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part001",
+          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part001",
           "size": 33554432,
-          "sha256": "0063ef5e4bc3aeae58ae7e05e47d1d6562101e7329938d3f0a5602dd4f9d16f8"
+          "sha256": "24ea622323f5ddf5277f70bd379d9460f267675932b81eab5f755770f3363ca7",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part001"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part002",
+          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part002",
           "size": 33554432,
-          "sha256": "6a8616cc7743a0640672fedd95a08663a9a1b2b1a820112cb29ebcc7014a97c2"
+          "sha256": "f7c1bc09605a1ff40e4ffdae32b7c460ada4f14353d955b36c807d2f38e7cc2c",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part002"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part003",
+          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part003",
           "size": 33554432,
-          "sha256": "15c6653cb14e96ba0a141f8d1a4f812c0f3cba8daa25233e7619436a25957465"
+          "sha256": "329014336ffd6935906a8a23f7b3851d4fd759f3877a3a6f610d248b31409c02",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part003"
         },
         {
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.175.0/TurboFileSetup-win32-x64-1.175.0.exe.part004",
-          "size": 13003092,
-          "sha256": "3a8a9d4e95683850e88d3016fbc5f928ff223d3ad98ab61eb872c189baca88a5"
+          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part004",
+          "size": 13003675,
+          "sha256": "d81ead7bec584e1139b1bb236d0639d067087a7f36f9406f4af9e7bbda39e515",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part004"
         }
       ],
       "mirrors": [
-        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/723641444"
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/726552734"
       ]
     }
   }
