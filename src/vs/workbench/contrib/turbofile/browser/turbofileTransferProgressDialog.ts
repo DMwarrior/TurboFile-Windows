@@ -37,6 +37,7 @@ export class TurboFileTransferProgressDialog extends Disposable {
 	private readonly canvas = document.createElement('canvas');
 	private readonly track = $('.turbofile-transfer-progress-track');
 	private readonly fill = $('.turbofile-transfer-progress-fill');
+	private readonly percentage = $('span.turbofile-transfer-progress-percentage');
 	private readonly size = $('span');
 	private readonly time = $('span');
 	private readonly name = $('.turbofile-transfer-progress-detail-value');
@@ -44,7 +45,6 @@ export class TurboFileTransferProgressDialog extends Disposable {
 	private readonly target = $('.turbofile-transfer-progress-detail-value');
 	private readonly detail = $('.turbofile-transfer-progress-detail-value');
 	private readonly cancel = document.createElement('button');
-	private readonly footer = $('.turbofile-transfer-progress-footer');
 	private readonly closeButton: HTMLButtonElement;
 	private data: ITurboFileTransferProgressDialogData | undefined;
 	private readonly progressMotion = new TurboFileProgressMotion();
@@ -93,7 +93,12 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		this.track.setAttribute('role', 'progressbar');
 		this.track.setAttribute('aria-label', localize('turbofile.progress.title', "传输进度"));
 		this.track.appendChild(this.fill);
-		this._register(addDisposableListener(this.element.ownerDocument, 'visibilitychange', () => this.updateAnimationState()));
+		this.percentage.setAttribute('aria-hidden', 'true');
+		this.fill.appendChild(this.percentage);
+		this._register(addDisposableListener(this.element.ownerDocument, 'visibilitychange', () => {
+			this.updateAnimationState();
+			this.draw();
+		}));
 		const motionPreferenceChanged = () => this.updateAnimationState();
 		this.reducedMotion.addEventListener('change', motionPreferenceChanged);
 		this._register({ dispose: () => this.reducedMotion.removeEventListener('change', motionPreferenceChanged) });
@@ -110,13 +115,14 @@ export class TurboFileTransferProgressDialog extends Disposable {
 			caption.textContent = label;
 			details.append(caption, value);
 		}
-		body.append(hero, graph, this.track, stats, details);
+		const detailRow = $('.turbofile-transfer-progress-detail-row');
 		this.cancel.type = 'button';
 		this.cancel.className = 'turbofile-transfer-progress-cancel';
 		this.cancel.textContent = localize('turbofile.progress.cancel', "取消传输");
 		this._register(addDisposableListener(this.cancel, 'click', cancel));
-		this.footer.appendChild(this.cancel);
-		this.panel.append(header, body, this.footer);
+		detailRow.append(details, this.cancel);
+		body.append(hero, graph, this.track, stats, detailRow);
+		this.panel.append(header, body);
 		this.element.appendChild(this.panel);
 		this._register(addDisposableListener(this.element, 'click', event => {
 			if (event.target === this.element) {
@@ -166,6 +172,9 @@ export class TurboFileTransferProgressDialog extends Disposable {
 		this.setText(this.speedLabel, metrics.status === 'success' ? localize('turbofile.progress.averageSpeed', "平均速度") : localize('turbofile.progress.currentSpeed', "当前速度"));
 		this.setText(this.speed, data.speed);
 		this.setText(this.status, data.state);
+		this.status.hidden = metrics.status === 'running' && metrics.percentage !== undefined && !data.canceling;
+		this.percentage.hidden = metrics.percentage === undefined;
+		this.setText(this.percentage, metrics.percentage === undefined ? '' : `${metrics.percentage}%`);
 		this.status.classList.toggle('is-indeterminate', metrics.percentage === undefined);
 		this.status.classList.toggle('is-settling', metrics.status === 'finishing');
 		this.status.classList.toggle('is-error', metrics.status === 'error');
@@ -193,7 +202,6 @@ export class TurboFileTransferProgressDialog extends Disposable {
 			this.track.setAttribute('aria-valuenow', String(metrics.percentage));
 		}
 		this.cancel.hidden = !data.cancelable;
-		this.footer.hidden = !data.cancelable;
 		this.cancel.disabled = data.canceling;
 		this.setText(this.cancel, data.canceling ? localize('turbofile.progress.canceling', "正在取消…") : localize('turbofile.progress.cancel', "取消传输"));
 		this.draw();
@@ -230,7 +238,7 @@ export class TurboFileTransferProgressDialog extends Disposable {
 
 	/** Draw at most 120 measured samples, only while attached and visible. */
 	private draw(): void {
-		if (!this.data || !this.element.isConnected || this.element.hidden || this.width <= 0 || this.height <= 0) {
+		if (!this.data || !this.element.isConnected || this.element.hidden || this.element.ownerDocument.hidden || this.width <= 0 || this.height <= 0) {
 			return;
 		}
 		const ratio = Math.min(2, getWindow(this.element).devicePixelRatio || 1);

@@ -152,6 +152,7 @@ function createHarness(): IEditorHarness {
 		constructor() { this.container.appendChild(new TestElement('.turbofile-transfer-page')); }
 		shouldShowTaskbar() { return this.showTaskbar; }
 		refreshTransferProgressDialog() { }
+		onTransferTaskStarted() { }
 		toggleTransferProgressDialog() { this.progressToggles++; this.transferProgressDialog.value = this.transferProgressDialog.value ? undefined : {}; this.refreshTaskbar(); }
 		setActivePage(page) { this.activePage = page; this.pageChanges.push(page); }
 		getLiveTransferDisplay(tasks) { return this.useTaskMetrics ? this.transferMetricsDisplay.read(tasks.map(task => task.id).join(','), this.getLiveTransferAggregate(tasks), Date.now()) : this.summary; }

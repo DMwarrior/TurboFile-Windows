@@ -570,6 +570,7 @@ const TURBOFILE_SHOW_FILE_SIZE_STORAGE_KEY = 'turbofile.view.showFileSize';
 const TURBOFILE_SHOW_FILE_MODIFIED_STORAGE_KEY = 'turbofile.view.showFileModified';
 const TURBOFILE_SHOW_FILE_TYPE_STORAGE_KEY = 'turbofile.view.showFileType';
 const TURBOFILE_SHOW_TASKBAR_STORAGE_KEY = 'turbofile.view.showTaskbar';
+const TURBOFILE_AUTO_OPEN_TRANSFER_PROGRESS_STORAGE_KEY = 'turbofile.view.autoOpenTransferProgress';
 const TURBOFILE_SYNC_PANE_NAVIGATION_STORAGE_KEY = 'turbofile.view.syncPaneNavigation';
 const TURBOFILE_PANE_SPLIT_RATIO_STORAGE_KEY = 'turbofile.view.paneSplitRatio';
 const TURBOFILE_PANE_SPLIT_DEFAULT_RATIO = 0.5;
@@ -2673,6 +2674,7 @@ export class TurboFileEditor extends EditorPane {
 				this.createCheckedAction('turbofile.view.imageGrid', localize('turbofile.imageGridView', "图片网格"), paneGridVisible, () => this.showPaneImageGrid(side))
 			]),
 			this.createCheckedAction('turbofile.view.showTaskbar', localize('turbofile.showTaskbar', "显示任务栏"), this.shouldShowTaskbar(), () => this.toggleTaskbar()),
+			this.createCheckedAction('turbofile.view.autoOpenTransferProgress', localize('turbofile.autoOpenTransferProgress', "传输时自动打开进度面板"), this.shouldAutoOpenTransferProgress(), () => this.toggleAutoOpenTransferProgress()),
 			this.createCheckedAction('turbofile.view.showTerminal', localize('turbofile.showTerminal', "显示终端"), terminalVisible, () => this.toggleTerminalPanel()),
 			this.createCheckedAction('turbofile.view.syncPaneNavigation', localize('turbofile.syncPaneNavigation', "左右面板同步导航"), this.shouldSyncPaneNavigation(), () => this.toggleSyncPaneNavigation()),
 			new Separator(),
@@ -5636,11 +5638,34 @@ export class TurboFileEditor extends EditorPane {
 		return this.transferMetricsDisplay.read(tasks.map(task => task.id).join(','), this.getLiveTransferAggregate(tasks), Date.now());
 	}
 
+	private shouldAutoOpenTransferProgress(): boolean {
+		return this.storageService.getBoolean(TURBOFILE_AUTO_OPEN_TRANSFER_PROGRESS_STORAGE_KEY, StorageScope.PROFILE, true);
+	}
+
+	private toggleAutoOpenTransferProgress(): void {
+		this.storageService.store(TURBOFILE_AUTO_OPEN_TRANSFER_PROGRESS_STORAGE_KEY, !this.shouldAutoOpenTransferProgress(), StorageScope.PROFILE, StorageTarget.USER);
+	}
+
+	/** Run once at task creation, never on each progress event or data chunk. */
+	private onTransferTaskStarted(): void {
+		if (this.transferProgressDialog.value) {
+			this.transferProgressTasks = this.tasks.filter(task => task.kind === 'transfer' && task.status === 'running');
+			this.transferProgressTaskIds = this.transferProgressTasks.map(task => task.id);
+			this.refreshTransferProgressDialog();
+		} else if (this.shouldAutoOpenTransferProgress() && this.isEditorVisible) {
+			this.openTransferProgressDialog(false);
+		}
+	}
+
 	private toggleTransferProgressDialog(): void {
 		if (this.transferProgressDialog.value) {
 			this.closeTransferProgressDialog();
 			return;
 		}
+		this.openTransferProgressDialog(true);
+	}
+
+	private openTransferProgressDialog(focus: boolean): void {
 		if (!this.container || this.activePage !== 'transfer') {
 			return;
 		}
@@ -5663,7 +5688,9 @@ export class TurboFileEditor extends EditorPane {
 		this.transferProgressDialog.value = dialog;
 		this.container.appendChild(dialog.element);
 		this.refreshTaskbar();
-		dialog.focus();
+		if (focus) {
+			dialog.focus();
+		}
 	}
 
 	private closeTransferProgressDialog(restoreFocus = true): void {
@@ -6032,6 +6059,9 @@ export class TurboFileEditor extends EditorPane {
 			this.render();
 		} else {
 			this.refreshTaskbar();
+		}
+		if (kind === 'transfer') {
+			this.onTransferTaskStarted();
 		}
 		return task;
 	}

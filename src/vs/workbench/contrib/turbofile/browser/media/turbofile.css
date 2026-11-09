@@ -3088,8 +3088,10 @@ body.hc-black .turbofile-live-transfer-panel {
 	grid-area: track;
 	position: relative;
 	height: 16px;
+	margin-top: 16px;
 	border-radius: 999px;
 	isolation: isolate;
+	contain: layout style;
 }
 
 .turbofile-transfer-progress-track::before {
@@ -3111,21 +3113,19 @@ body.hc-black .turbofile-live-transfer-panel {
 	transition: none;
 }
 
-.turbofile-transfer-progress-fill::after {
-	content: '';
+.turbofile-transfer-progress-percentage {
 	position: absolute;
-	top: -2px;
-	right: 0;
-	width: 16px;
-	max-width: 100%;
-	height: 16px;
-	border-radius: 50%;
-	background: #fff;
-	box-shadow: 0 0 0 1px rgb(255 255 255 / 22%), 0 1px 3px rgb(17 51 92 / 16%);
-}
-
-.turbofile-transfer-progress-track.is-empty .turbofile-transfer-progress-fill::after {
-	display: none;
+	bottom: calc(100% + 3px);
+	/* Follow the animated fill, staying inside the track even at 0% and 100%. */
+	left: max(0px, calc(100% - 4ch));
+	width: 4ch;
+	color: var(--tf-text);
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 18px;
+	text-align: right;
+	white-space: nowrap;
+	pointer-events: none;
 }
 
 .turbofile-transfer-progress-track.is-indeterminate .turbofile-transfer-progress-fill {
@@ -3155,15 +3155,22 @@ body.hc-black .turbofile-live-transfer-panel {
 	line-height: 1.5;
 }
 
-.turbofile-transfer-progress-details {
+.turbofile-transfer-progress-detail-row {
 	grid-area: details;
+	position: relative;
+	min-width: 0;
+	padding-top: 10px;
+	/* Keep the same detail width when the completed task hides its cancel control. */
+	padding-right: 120px;
+	border-top: 1px solid var(--tf-border);
+}
+
+.turbofile-transfer-progress-details {
 	display: grid;
 	grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
 	align-items: baseline;
 	gap: 3px 12px;
 	min-width: 0;
-	padding-top: 10px;
-	border-top: 1px solid var(--tf-border);
 	line-height: 1.5;
 }
 
@@ -3179,19 +3186,10 @@ body.hc-black .turbofile-live-transfer-panel {
 	user-select: text;
 }
 
-.turbofile-transfer-progress-footer {
-	min-height: 40px;
-	flex: 0 0 auto;
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	gap: 12px;
-	box-sizing: border-box;
-	padding: 5px 20px;
-	border-top: 1px solid var(--tf-border);
-}
-
 .turbofile-transfer-progress-cancel {
+	position: absolute;
+	right: 0;
+	bottom: 0;
 	min-width: 100px;
 	height: 28px;
 	padding: 0 14px;

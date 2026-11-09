@@ -45,6 +45,11 @@ interface IProgressHarness {
 	transferProgressTasks: IProgressTask[] | undefined;
 	transferProgressHistory: TurboFileTransferSpeedHistory;
 	isEditorVisible: boolean;
+	opened: boolean[];
+	setting: boolean | undefined;
+	onTransferTaskStarted(): void;
+	shouldAutoOpenTransferProgress(): boolean;
+	toggleAutoOpenTransferProgress(): void;
 	refreshTransferProgressDialog(): void;
 }
 
@@ -52,7 +57,7 @@ interface IProgressHarness {
 function createHarness(tasks: IProgressTask[], selectedIds = tasks.map(task => task.id)): IProgressHarness {
 	const editorPath = path.join(process.cwd(), 'src/vs/workbench/contrib/turbofile/browser/turbofileEditor.ts');
 	const source = ts.createSourceFile(editorPath, fs.readFileSync(editorPath, 'utf8'), ts.ScriptTarget.Latest, true);
-	const names = new Set(['refreshTransferProgressDialog', 'getLiveTransferAggregate']);
+	const names = new Set(['refreshTransferProgressDialog', 'getLiveTransferAggregate', 'onTransferTaskStarted', 'shouldAutoOpenTransferProgress', 'toggleAutoOpenTransferProgress']);
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) {
@@ -65,6 +70,10 @@ function createHarness(tasks: IProgressTask[], selectedIds = tasks.map(task => t
 	const code = ts.transpileModule(`class Harness {
 		tasks = [];
 		updates = [];
+		opened = [];
+		setting = undefined;
+		storageService = { getBoolean: (key, scope, fallback) => this.setting ?? fallback, store: (key, value) => this.setting = value };
+		openTransferProgressDialog(focus) { this.opened.push(focus); }
 		transferProgressTaskIds = [];
 		transferProgressTasks = undefined;
 		transferProgressHistory = new TurboFileTransferSpeedHistory();
@@ -76,8 +85,8 @@ function createHarness(tasks: IProgressTask[], selectedIds = tasks.map(task => t
 		getTransferProtocolLabel(strategy) { return strategy; }
 		${methods.join('\n')}
 	}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-	const Harness: new () => IProgressHarness = new Function('localize', 'formatSize', 'formatDuration', 'aggregateTurboFileTransferProgress', 'isTurboFileTransferProgressQuiet', 'getTurboFileTransferProgressView', 'TurboFileTransferSpeedHistory', `${code}; return Harness;`)(
-		localize, (bytes: number) => `${bytes} B`, (elapsed: number) => `${elapsed} ms`, aggregateTurboFileTransferProgress, isTurboFileTransferProgressQuiet, getTurboFileTransferProgressView, TurboFileTransferSpeedHistory
+	const Harness: new () => IProgressHarness = new Function('localize', 'formatSize', 'formatDuration', 'aggregateTurboFileTransferProgress', 'isTurboFileTransferProgressQuiet', 'getTurboFileTransferProgressView', 'TurboFileTransferSpeedHistory', 'TURBOFILE_AUTO_OPEN_TRANSFER_PROGRESS_STORAGE_KEY', 'StorageScope', 'StorageTarget', `${code}; return Harness;`)(
+		localize, (bytes: number) => `${bytes} B`, (elapsed: number) => `${elapsed} ms`, aggregateTurboFileTransferProgress, isTurboFileTransferProgressQuiet, getTurboFileTransferProgressView, TurboFileTransferSpeedHistory, 'turbofile.view.autoOpenTransferProgress', { PROFILE: 0 }, { USER: 0 }
 	);
 	const harness = new Harness();
 	harness.tasks = tasks;
@@ -100,6 +109,46 @@ function latest(harness: IProgressHarness): ITurboFileTransferProgressDialogData
 }
 
 suite('TurboFileTransferProgressIntegration', () => {
+	test('a new task immediately replaces the completed selection and its speed history', () => {
+		const previous = task(1, { status: 'success', endedAt: 20000 });
+		const harness = createHarness([previous]);
+		harness.refreshTransferProgressDialog();
+		const next = task(2, { label: '新的文件', startedAt: Date.now(), transferredBytes: 0, transferProgressBytes: 0, speedBytesPerSecond: 0 });
+		harness.tasks.unshift(next);
+		harness.onTransferTaskStarted();
+		assert.deepStrictEqual({ ids: harness.transferProgressTaskIds, name: latest(harness).name, bytes: latest(harness).metrics.transferredBytes, status: latest(harness).metrics.status, history: latest(harness).history }, {
+			ids: [2], name: '新的文件', bytes: 0, status: 'running', history: [{ elapsedMs: 0, speedBytesPerSecond: 0 }]
+		});
+	});
+
+	test('new concurrent transfers join the running selection without retaining completed tasks', () => {
+		const harness = createHarness([task(3), task(2), task(1, { status: 'success' })], [1, 2]);
+		harness.onTransferTaskStarted();
+		assert.deepStrictEqual({ ids: harness.transferProgressTaskIds, name: latest(harness).name }, { ids: [3, 2], name: '2 个传输任务' });
+	});
+
+	test('auto-open defaults on, persists the toggle, and opens only on a new task without taking focus', () => {
+		const harness = createHarness([task(1)]);
+		Object.assign(harness, { transferProgressDialog: { value: undefined } });
+		assert.strictEqual(harness.shouldAutoOpenTransferProgress(), true);
+		harness.onTransferTaskStarted();
+		harness.refreshTransferProgressDialog();
+		harness.refreshTransferProgressDialog();
+		harness.toggleAutoOpenTransferProgress();
+		harness.onTransferTaskStarted();
+		assert.deepStrictEqual({ opened: harness.opened, stored: harness.setting, enabled: harness.shouldAutoOpenTransferProgress() }, { opened: [false], stored: false, enabled: false });
+		harness.toggleAutoOpenTransferProgress();
+		harness.isEditorVisible = false;
+		harness.onTransferTaskStarted();
+		assert.deepStrictEqual(harness.opened, [false]);
+	});
+
+	test('disabling auto-open still immediately updates a panel that is already open', () => {
+		const harness = createHarness([task(2), task(1, { status: 'success' })], [1]);
+		harness.setting = false;
+		harness.onTransferTaskStarted();
+		assert.deepStrictEqual(harness.transferProgressTaskIds, [2]);
+	});
 	test('a failed member retains its bytes and error while a sibling runs, then determines final status', () => {
 		const clock = sinon.useFakeTimers({ now: 20000 });
 		try {

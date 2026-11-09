@@ -8,6 +8,15 @@ import { localize } from '../../../../nls.js';
 /** Keep released versions here so the installed application can show its history offline. */
 export const turboFileReleaseNotes: readonly { readonly version: string; readonly date: string; readonly changes: readonly string[] }[] = [
 	{
+		version: '1.176.0',
+		date: '2026-11-09',
+		changes: [
+			localize('turbofile.release176.autoOpen', "新增“视图 → 传输时自动打开进度面板”开关，默认开启并保存选择；新任务立即替换上一任务的进度和曲线。"),
+			localize('turbofile.release176.layout', "取消传输按钮并入详情区域，结束后隐藏按钮，面板高度保持不变；去掉白色圆点，百分比跟随进度条前端显示。"),
+			localize('turbofile.release176.lightweight', "进度面板复用现有采样，曲线最多保留 120 个点；窗口隐藏时暂停绘图，平滑动画使用浏览器原生播放，不额外扫描文件或请求设备。")
+		]
+	},
+	{
 		version: '1.175.0',
 		date: '2026-11-08',
 		changes: [

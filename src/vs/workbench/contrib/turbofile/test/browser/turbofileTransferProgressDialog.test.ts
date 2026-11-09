@@ -178,17 +178,16 @@ suite('TurboFileTransferProgressDialog', () => {
 		dialog.update(data({ metrics: getTurboFileTransferProgressView({ ...metrics, status: 'running' }), state: '正在完成', time: '已用时间：20 秒' }));
 		const track = dialog.element.querySelector<HTMLElement>('[role="progressbar"]')!;
 		const speedLabel = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-speed-label')!;
-		const footer = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-footer')!;
-		const finishing = { value: track.getAttribute('aria-valuenow'), settling: track.classList.contains('is-settling'), complete: track.classList.contains('is-complete'), speedLabel: speedLabel.textContent, footerHidden: footer.hidden };
+		const finishing = { value: track.getAttribute('aria-valuenow'), settling: track.classList.contains('is-settling'), complete: track.classList.contains('is-complete'), speedLabel: speedLabel.textContent };
 		dialog.update(data({ metrics: getTurboFileTransferProgressView({ ...metrics, status: 'success' }), state: '已完成', cancelable: false }));
-		assert.deepStrictEqual({ finishing, success: { value: track.getAttribute('aria-valuenow'), settling: track.classList.contains('is-settling'), complete: track.classList.contains('is-complete'), speedLabel: speedLabel.textContent, footerHidden: footer.hidden }, cancelHidden: dialog.element.querySelector<HTMLButtonElement>('.turbofile-transfer-progress-cancel')!.hidden }, {
-			finishing: { value: '99', settling: true, complete: false, speedLabel: '当前速度', footerHidden: false },
-			success: { value: '100', settling: false, complete: true, speedLabel: '平均速度', footerHidden: true },
+		assert.deepStrictEqual({ finishing, success: { value: track.getAttribute('aria-valuenow'), settling: track.classList.contains('is-settling'), complete: track.classList.contains('is-complete'), speedLabel: speedLabel.textContent }, cancelHidden: dialog.element.querySelector<HTMLButtonElement>('.turbofile-transfer-progress-cancel')!.hidden }, {
+			finishing: { value: '99', settling: true, complete: false, speedLabel: '当前速度' },
+			success: { value: '100', settling: false, complete: true, speedLabel: '平均速度' },
 			cancelHidden: true
 		});
 	});
 
-	test('the wide dock stays above the status bar on a 1536 by 1024 surface and shrinks after completion', () => {
+	test('the wide dock stays above the status bar on a 1536 by 1024 surface without jumping after completion', () => {
 		container.style.width = '1536px';
 		// The workbench allocates a 1002px editor above its separate native 22px status-bar slot.
 		container.style.height = '1002px';
@@ -205,12 +204,17 @@ suite('TurboFileTransferProgressDialog', () => {
 		const active = panel.getBoundingClientRect();
 		const surface = container.getBoundingClientRect();
 		const statusbarTop = statusbar.getBoundingClientRect().top;
+		const cancel = dialog.element.querySelector<HTMLButtonElement>('.turbofile-transfer-progress-cancel')!;
+		const detailRow = dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-detail-row')!;
+		assert.strictEqual(cancel.parentElement, detailRow);
+		assert.strictEqual(dialog.element.querySelector('.turbofile-transfer-progress-footer'), null);
 		assert.deepStrictEqual({ fullWidth: Math.abs(active.width - surface.width) <= 1, leftAligned: Math.abs(active.left - surface.left) <= 1, flushAboveStatusbar: Math.abs(active.bottom - statusbarTop) <= 1, compact: active.height <= 360, overlayPassesBackground: getComputedStyle(dialog.element).pointerEvents, panelInteractive: getComputedStyle(panel).pointerEvents, horizontalOverflow: panel.scrollWidth > panel.clientWidth }, {
 			fullWidth: true, leftAligned: true, flushAboveStatusbar: true, compact: true, overlayPassesBackground: 'none', panelInteractive: 'auto', horizontalOverflow: false
 		});
 		dialog.update(data({ metrics: getTurboFileTransferProgressView({ status: 'success', transferredBytes: 1000, totalBytes: 1000, elapsedMs: 20000, speedBytesPerSecond: 50 }), state: '已完成', cancelable: false }));
 		const completed = panel.getBoundingClientRect();
-		assert.ok(completed.height <= active.height - 30, 'Hiding the completed footer should reclaim its height');
+		assert.ok(Math.abs(completed.height - active.height) <= 1, 'Hiding cancel must preserve panel height');
+		assert.ok(cancel.hidden);
 		assert.ok(Math.abs(completed.bottom - statusbarTop) <= 1, 'Completion must retain bottom alignment');
 	});
 
@@ -313,14 +317,30 @@ suite('TurboFileTransferProgressDialog', () => {
 		});
 	});
 
-	test('the white endpoint remains hidden at zero without inflating measured progress', () => {
+	test('percentage follows the fill head inside track boundaries, without a circular endpoint', () => {
 		const { dialog } = createDialog();
 		dialog.update(data({ metrics: getTurboFileTransferProgressView({ status: 'running', transferredBytes: 0, totalBytes: 1000, elapsedMs: 0, speedBytesPerSecond: 0 }), state: '0%' }));
 		const track = dialog.element.querySelector<HTMLElement>('[role="progressbar"]')!;
 		const fill = track.firstElementChild as HTMLElement;
-		assert.deepStrictEqual({ percentage: track.getAttribute('aria-valuenow'), width: getComputedStyle(fill).width, endpointDisplay: getComputedStyle(fill, '::after').display }, {
-			percentage: '0', width: '0px', endpointDisplay: 'none'
+		assert.deepStrictEqual({ percentage: track.getAttribute('aria-valuenow'), width: getComputedStyle(fill).width, endpointContent: getComputedStyle(fill, '::after').content }, {
+			percentage: '0', width: '0px', endpointContent: 'none'
 		});
+		dialog.update(data());
+		assert.strictEqual(getComputedStyle(fill, '::after').content, 'none');
+		const percentage = fill.querySelector<HTMLElement>('.turbofile-transfer-progress-percentage')!;
+		assert.strictEqual(percentage.textContent, '62%');
+		assert.ok(dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-status')!.hidden);
+		dialog.update(data({ metrics: getTurboFileTransferProgressView({ status: 'success', transferredBytes: 1000, totalBytes: 1000, elapsedMs: 20000, speedBytesPerSecond: 0 }), cancelable: false }));
+		assert.strictEqual(getComputedStyle(fill, '::after').content, 'none');
+		for (const bytes of [0, 140, 1000]) {
+			dialog.update(data({ metrics: getTurboFileTransferProgressView({ status: bytes === 1000 ? 'success' : 'running', transferredBytes: bytes, totalBytes: 1000, elapsedMs: 0, speedBytesPerSecond: 0 }) }));
+			const bounds = percentage.getBoundingClientRect();
+			const bar = track.getBoundingClientRect();
+			assert.ok(bounds.left >= bar.left - 1 && bounds.right <= bar.right + 1);
+			assert.ok(bounds.bottom <= bar.top + 1);
+		}
+		dialog.update(data({ metrics: getTurboFileTransferProgressView({ status: 'running', transferredBytes: 140, elapsedMs: 0, speedBytesPerSecond: 0 }), state: '传输中' }));
+		assert.deepStrictEqual({ hidden: percentage.hidden, text: percentage.textContent, stateHidden: dialog.element.querySelector<HTMLElement>('.turbofile-transfer-progress-status')!.hidden }, { hidden: true, text: '', stateHidden: false });
 	});
 
 	test('background visibility pauses progress motion and disposal removes its document listener', () => {
