@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { archiveTurboFileInstaller } from './turbofile-archive-installer.mjs';
 
 const INSTALLER_PATTERN = /^TurboFileSetup-win32-x64-(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.exe$/i;
 const repository = process.env.TURBOFILE_UPDATE_REPOSITORY ?? 'DMwarrior/TurboFile-Windows';
@@ -35,6 +36,7 @@ if (repositoryInfo.visibility !== 'PUBLIC') {
 
 const tag = `v${version}`;
 const sha256 = await sha256File(installerPath);
+await archiveTurboFileInstaller(installerPath, sha256);
 const domesticManifestPath = resolve(process.env.TURBOFILE_UPDATE_DOMESTIC_MANIFEST ?? 'updater/update.json');
 const domesticManifest = JSON.parse(readFileSync(domesticManifestPath, 'utf8'));
 const domesticPlatform = domesticManifest.platforms?.['windows-x64'];

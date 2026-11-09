@@ -8,6 +8,7 @@ import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSy
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { archiveTurboFileInstaller } from './turbofile-archive-installer.mjs';
 
 const INSTALLER_PATTERN = /^TurboFileSetup-win32-x64-(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.exe$/i;
 const PART_BYTES = 32 * 1024 * 1024;
@@ -45,6 +46,7 @@ await ensureMainBranch(repository);
 
 const tag = `v${version}`;
 const fullSha256 = await sha256File(installerPath);
+await archiveTurboFileInstaller(installerPath, fullSha256);
 const releaseNotes = notesPath && existsSync(notesPath)
 	? readFileSync(notesPath, 'utf8')
 	: `极速传 ${version} Windows x64 正式版本。\n\n安装包：${installerName}\n\nSHA-256：${fullSha256}`;
