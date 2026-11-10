@@ -1,117 +1,117 @@
-# ⚡ TurboFile (极速传)
+# ⚡ 极速传（TurboFile）
 
 <p align="center">
-  <strong>A high-speed dual-pane file workspace for Windows, SSH servers, NAS devices, and edge systems.</strong>
+  <strong>面向 Windows、SSH 服务器、NAS 与边缘设备的高速双栏文件工作台。</strong>
 </p>
 
 <p align="center">
-  Move data directly between devices, preview remote image datasets, edit files, and work in a terminal—without constantly switching tools.
+  在设备之间直接传输数据，同时完成远端图片浏览、文件编辑与终端操作，不必反复切换软件。
 </p>
 
 <p align="center">
-  <a href="README_CN.md">简体中文</a> · <strong>English</strong>
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/DMwarrior/TurboFile-Windows?style=flat-square&color=2563eb"></a>
-  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square">
-  <img alt="Protocols" src="https://img.shields.io/badge/transfer-SCP%20%7C%20SFTP%20%7C%20tar%20%7C%20rsync-14b8a6?style=flat-square">
+  <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/DMwarrior/TurboFile-Windows?style=flat-square&color=2563eb"></a>
+  <a href="LICENSE.txt"><img alt="开源协议" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square"></a>
+  <img alt="系统平台" src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square">
+  <img alt="传输协议" src="https://img.shields.io/badge/transfer-SCP%20%7C%20SFTP%20%7C%20tar%20%7C%20rsync-14b8a6?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases/latest"><strong>Download from Gitee (China first)</strong></a> · <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest">GitHub fallback</a>
+  <a href="https://gitee.com/fkwarrior/TurboFile-Windows/releases/latest"><strong>国内优先下载（Gitee）</strong></a> · <a href="https://github.com/DMwarrior/TurboFile-Windows/releases/latest">GitHub 备用</a>
 </p>
 
-![TurboFile dual-pane workspace](docs/assets/screenshots/turbofile-home.png)
+![极速传双栏文件工作台](docs/assets/screenshots/turbofile-home.png)
 
-## Why TurboFile?
+## 为什么选择极速传？
 
-Traditional remote file tools often route a device-to-device copy through Windows: download from device A, then upload to device B. TurboFile probes both directions in the background, caches the viable route, and prefers a direct transfer when the endpoints can reach one another. When direct transfer is unavailable, it falls back to a compatible relay path.
+传统远程文件工具在执行设备到设备的复制时，经常需要先从设备 A 下载到 Windows，再从 Windows 上传到设备 B。极速传会在后台双向探测设备可达性，缓存正确的传输方向；当两端能够直连时优先走设备直传，无法直连时再使用兼容的中转路径。
 
-The result is one workspace for local disks, Linux servers, NAS storage, and lightweight edge devices—with the transfer protocol selected around the actual workload.
+本地磁盘、Linux 服务器、NAS 和轻量边缘设备可以放进同一个工作台，并根据实际文件特征选择合适的传输策略。
 
-## Highlights
+## 核心能力
 
-| Capability | What it gives you |
+| 能力 | 带来的体验 |
 | --- | --- |
-| **Dual-pane workflow** | Browse any two local or remote locations and move files with drag-and-drop, copy/paste, or toolbar actions. |
-| **Direct device transfer** | Detect reachable directions in advance and avoid a Windows relay when a valid direct route exists. |
-| **Adaptive transfer strategies** | Use SCP/SFTP for compatibility, tar streaming for folders and many small files, and rsync for incremental workloads. |
-| **Remote image workspace** | Open remote folders as an image grid, compare both sides, change grid density, sort by file size or image dimensions, and choose thumbnail-first or original-first quality. |
-| **Integrated editing and terminal** | Edit text files and run terminal commands without leaving the file workspace. |
-| **Broad device compatibility** | Use fast shell-based paths on full systems and compatible fallbacks on NAS and incomplete edge environments. |
-| **Independent tasks** | Keep browsing, previewing, editing, and transferring while other non-conflicting operations continue. |
+| **双栏文件管理** | 左右两侧可分别打开本地或远端路径，支持拖拽、复制粘贴和工具栏操作。 |
+| **设备直连传输** | 提前识别可达方向，在具备直连条件时跳过 Windows 二次中转。 |
+| **自适应传输策略** | SCP/SFTP 负责兼容性，tar 流式处理目录与大量小文件，rsync 适合增量任务。 |
+| **远端图片工作台** | 服务器目录可直接进入图片网格，支持双侧对比、密度调整、按文件大小或图片尺寸排序，以及缩略图优先/原图优先。 |
+| **编辑器与终端** | 无需离开文件工作台即可编辑文本、保存文件和执行终端命令。 |
+| **兼容 NAS 与边缘设备** | 完整系统优先高速 Shell 路径，不完整系统自动使用兼容回退。 |
+| **任务互不阻塞** | 非冲突操作可同时进行；传输期间仍可浏览、预览、编辑和继续创建任务。 |
 
-## Measured performance
+## 实测性能
 
-![TurboFile and WinSCP benchmark comparison](docs/assets/performance-comparison-en.svg)
+![极速传与 WinSCP 实测性能对比](docs/assets/performance-comparison-cn.svg)
 
-In the recorded test environment:
+在本次记录的测试环境中：
 
-- A 2.32 GB mixed-file workload completed in **24.6 s** with TurboFile and **234 s** with WinSCP.
-- A single 8.2 GB file completed in **81 s** at about **107 MB/s**, versus **91 s** with WinSCP.
-- A direct device 62 → 64 transfer completed in **23.7 s** at about **102.6 MB/s**, versus a **720 s** Windows-relayed workflow.
+- 2.32 GB 混合文件：极速传 **24.6 秒**，WinSCP **234 秒**。
+- 8.2 GB 单个大文件：极速传 **81 秒 / 约 107 MB/s**，WinSCP **91 秒**。
+- 设备 62 → 64 直连：极速传 **23.7 秒 / 约 102.6 MB/s**，Windows 中转方式 **720 秒**。
 
-These figures describe one specific device, network, dataset, and protocol configuration. Real-world performance depends on storage, CPU, network quality, file distribution, endpoint tools, and the selected transfer strategy.
+以上数据仅代表特定设备、网络、文件集和协议配置。实际表现会受到磁盘、CPU、网络质量、文件分布、设备工具完整性与传输策略等因素影响。
 
 <p align="center">
-  <img src="docs/assets/screenshots/transfer-speed-114mbps.png" alt="TurboFile status bar showing a measured 114.2 MB/s direct transfer" width="520">
+  <img src="docs/assets/screenshots/transfer-speed-114mbps.png" alt="极速传状态栏显示实测直连速度 114.2 MB/s" width="520">
 </p>
 
-## Product tour
+## 产品展示
 
-### Compare image datasets across two devices
+### 双设备图片数据对比
 
-Use both panes as synchronized image workspaces while keeping each device and path independent.
+左右面板可以同时作为图片网格使用，在保持设备与路径独立的同时快速对比两组数据。
 
-![Dual image-grid comparison](docs/assets/screenshots/dual-image-grid.png)
+![双侧图片网格对比](docs/assets/screenshots/dual-image-grid.png)
 
-### Inspect remote images without downloading folders first
+### 不下载整个目录，直接浏览服务器图片
 
-Open a server directory directly as an image grid. Thumbnail-first mode prioritizes responsiveness; original-first mode prioritizes image quality.
+远端目录可直接切换为图片网格。缩略图优先更注重加载速度，原图优先更注重显示质量。
 
-![Remote image grid](docs/assets/screenshots/remote-image-grid.png)
+![远端图片网格](docs/assets/screenshots/remote-image-grid.png)
 
-### Manage many endpoints from one place
+### 集中管理多台设备
 
-Keep Windows, SSH, NAS, and edge-device connections together and open any two endpoints in the dual-pane workspace.
+把 Windows、SSH 服务器、NAS 和边缘设备统一管理，并从中选择任意两个端点进入双栏工作区。
 
-![TurboFile device manager](docs/assets/screenshots/device-manager.png)
+![极速传设备管理界面](docs/assets/screenshots/device-manager.png)
 
-### Work with files and a terminal together
+### 文件与终端协同工作
 
-Keep the current remote paths visible while using the integrated terminal below them.
+远端目录始终保持可见，同时在下方终端执行训练、部署或运维命令。
 
-![Integrated terminal](docs/assets/screenshots/integrated-terminal.png)
+![极速传集成终端](docs/assets/screenshots/integrated-terminal.png)
 
-## Transfer model
+## 传输逻辑
 
-TurboFile separates **reachability**, **protocol capability**, and **transfer strategy**:
+极速传将**网络可达性**、**协议能力**和**传输策略**分开处理：
 
-1. When both panes are available, background probes learn which direction can reach the other endpoint.
-2. The result is cached so a user action can start without repeating slow route detection.
-3. The selected protocol is checked independently from network reachability.
-4. The transfer uses the valid direct direction when possible; otherwise it uses a compatible relay or fallback path.
-5. Directories and large batches can use a streaming strategy to reduce per-file round trips.
+1. 左右面板就绪后，在后台探测两端能够互相访问的方向。
+2. 缓存探测结果，真正发起传输时不再重复等待慢速判断。
+3. 协议可用性独立验证，避免把“某个工具不存在”误认为“设备不直连”。
+4. 有正确直连方向时直接传输；无法直连时走兼容的中转或回退路径。
+5. 目录和大量文件可使用流式策略，减少逐文件往返带来的耗时。
 
-This design keeps fast paths fast without assuming every NAS or edge device exposes a complete Linux userland.
+这套设计既保留完整 Linux 系统上的高速路径，也不假设 NAS 或边缘设备一定具备完整命令环境。
 
-## Get started
+## 快速开始
 
-1. Download [`TurboFileSetup-win32-x64-1.176.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe).
-2. Install and launch TurboFile on Windows x64.
-3. Add an SSH/NAS/edge-device connection, or choose a local Windows disk.
-4. Open endpoints in the left and right panes.
-5. Drag, copy/paste, or use the toolbar to transfer files and folders.
+1. 下载 [`TurboFileSetup-win32-x64-1.176.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe)。
+2. 在 Windows x64 上安装并启动极速传。
+3. 添加 SSH/NAS/边缘设备，或选择 Windows 本地磁盘。
+4. 在左右面板分别打开源端和目标端。
+5. 通过拖拽、复制粘贴或工具栏传输文件与文件夹。
 
-The release page also contains a SHA-256 checksum for installer verification.
+Release 页面同时提供安装包 SHA-256 校验文件。应用自动更新优先使用 Gitee 国内分片，GitHub 作为备用源。
 
-## Build from source
+## 从源码运行
 
-Source code and installers are published together in [GitHub](https://github.com/DMwarrior/TurboFile-Windows) and mirrored to [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows). See the [1.176.0 release notes](docs/releases/1.176.0.md).
+源码与安装包统一在 [GitHub](https://github.com/DMwarrior/TurboFile-Windows) 公开，并同步至 [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)。详见 [1.176.0 更新说明](docs/releases/1.176.0.md)。
 
-TurboFile is based on Code - OSS and uses the repository's existing Node.js and VS Code build toolchain.
+极速传基于 Code - OSS，并沿用仓库中的 Node.js 与 VS Code 构建工具链。
 
 ```powershell
 git clone https://github.com/DMwarrior/TurboFile-Windows.git
@@ -123,17 +123,17 @@ $env:VSCODE_SKIP_PRELAUNCH='1'
 .\scripts\code.bat
 ```
 
-For the full upstream development prerequisites and platform notes, see the build documentation under [`docs/`](docs/).
+完整的上游开发依赖与平台说明可在 [`docs/`](docs/) 中查看。
 
-## Project status
+## 项目状态
 
-- Current public release: **v1.176.0**
-- Current installer target: **Windows x64**
-- Primary branch: **`main`**
-- Issues and reproducible bug reports are welcome in [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues).
+- 当前公开版本：**v1.176.0**
+- 当前安装包平台：**Windows x64**
+- 唯一主分支：**`main`**
+- 欢迎通过 [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues) 提交可复现的问题和建议。
 
-## License and acknowledgements
+## 开源协议与致谢
 
-TurboFile is distributed under the [MIT License](LICENSE.txt). It is built on [Code - OSS](https://github.com/microsoft/vscode) and includes third-party components documented in [ThirdPartyNotices.txt](ThirdPartyNotices.txt).
+极速传使用 [MIT License](LICENSE.txt) 发布，基于 [Code - OSS](https://github.com/microsoft/vscode) 构建；第三方组件信息见 [ThirdPartyNotices.txt](ThirdPartyNotices.txt)。
 
-WinSCP is a trademark of its respective owner. The benchmark above is an environment-specific interoperability comparison and does not imply affiliation or endorsement.
+WinSCP 是其权利人的商标。本文性能数据仅用于特定测试环境下的互操作对比，不代表双方存在合作、授权或背书关系。
