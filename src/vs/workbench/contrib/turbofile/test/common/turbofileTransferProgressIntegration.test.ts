@@ -110,15 +110,20 @@ function latest(harness: IProgressHarness): ITurboFileTransferProgressDialogData
 
 suite('TurboFileTransferProgressIntegration', () => {
 	test('a new task immediately replaces the completed selection and its speed history', () => {
-		const previous = task(1, { status: 'success', endedAt: 20000 });
-		const harness = createHarness([previous]);
-		harness.refreshTransferProgressDialog();
-		const next = task(2, { label: '新的文件', startedAt: Date.now(), transferredBytes: 0, transferProgressBytes: 0, speedBytesPerSecond: 0 });
-		harness.tasks.unshift(next);
-		harness.onTransferTaskStarted();
-		assert.deepStrictEqual({ ids: harness.transferProgressTaskIds, name: latest(harness).name, bytes: latest(harness).metrics.transferredBytes, status: latest(harness).metrics.status, history: latest(harness).history }, {
-			ids: [2], name: '新的文件', bytes: 0, status: 'running', history: [{ elapsedMs: 0, speedBytesPerSecond: 0 }]
-		});
+		const clock = sinon.useFakeTimers({ now: 21000, toFake: ['Date'] });
+		try {
+			const previous = task(1, { status: 'success', endedAt: 20000 });
+			const harness = createHarness([previous]);
+			harness.refreshTransferProgressDialog();
+			const next = task(2, { label: '新的文件', startedAt: Date.now(), transferredBytes: 0, transferProgressBytes: 0, speedBytesPerSecond: 0 });
+			harness.tasks.unshift(next);
+			harness.onTransferTaskStarted();
+			assert.deepStrictEqual({ ids: harness.transferProgressTaskIds, name: latest(harness).name, bytes: latest(harness).metrics.transferredBytes, status: latest(harness).metrics.status, history: latest(harness).history }, {
+				ids: [2], name: '新的文件', bytes: 0, status: 'running', history: [{ elapsedMs: 0, speedBytesPerSecond: 0 }]
+			});
+		} finally {
+			clock.restore();
+		}
 	});
 
 	test('new concurrent transfers join the running selection without retaining completed tasks', () => {
