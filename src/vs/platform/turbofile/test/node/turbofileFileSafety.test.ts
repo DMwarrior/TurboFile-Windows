@@ -38,6 +38,8 @@ interface IHarness {
 	peakFileTasks: number;
 	fastPut(sftp: object, localPath: string, remotePath: string, options?: object, progressId?: string): Promise<void>;
 	fastGet(sftp: object, remotePath: string, localPath: string, options?: object, progressId?: string): Promise<void>;
+	saveRemoteDocument(sftp: object, remotePath: string, content: Buffer): Promise<void>;
+	readRemoteDocument(sftp: object, remotePath: string, maxBytes: number): Promise<Buffer>;
 	replaceRemoteFile(sftp: object, temporary: string, target: string, progressId?: string): Promise<void>;
 	deleteSftpMoveSources(source: { kind: string }, receipt: IReceipt, progressId?: string): Promise<void>;
 	deleteBatchSources(source: { kind: string }, items: { sourcePath: string; targetName: string }[], progressId?: string, receipts?: ReadonlyMap<string, IReceipt>): Promise<unknown[]>;
@@ -53,6 +55,7 @@ function createHarness(localFs: typeof fs.promises = fs.promises, useRealRaw = f
 	const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
 	const names = new Set(['fastPut', 'fastGet', 'replaceRemoteFile', 'getRemoteFileForReplacement', 'deleteSftpMoveSources', 'deleteBatchSources', 'moveLocalPathNative', 'relayRemoteFileInParallel', 'cleanupRemoteOwnedTemporary', 'runSftpWorkers', 'uploadDirectoryConcurrent']);
 	if (useRealRaw) { names.add('fastPutRaw'); }
+	for (const method of ['saveRemoteDocument', 'readRemoteDocument', 'writeRemoteBuffer']) { names.add(method); }
 	const methods: string[] = [];
 	const visit = (node: ts.Node): void => {
 		if (ts.isMethodDeclaration(node) && names.has(node.name.getText(source))) { methods.push(node.getText(source)); }
@@ -111,13 +114,14 @@ function createHarness(localFs: typeof fs.promises = fs.promises, useRealRaw = f
 		getDirectorySftpConnectionCount() { return 1; }
 		async withSftpPool(_endpoint, count, _progressId, callback) { this.calls.push('pool:' + count); return callback({ primary: {}, additional: [] }); }
 		async ensureRemoteDirectoriesForUpload() {}
+		async ensureRemoteDirectory() {}
 		async fastPutWithFallback() { this.activeFileTasks++; this.peakFileTasks = Math.max(this.peakFileTasks, this.activeFileTasks); await new Promise(resolve => setImmediate(resolve)); this.activeFileTasks--; }
 		${methods.join('\n')}
 	}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-	const Harness: new () => IHarness = new Function('fsp', 'randomUUID', 'join', 'dirname', 'joinRemotePath', 'getRemoteParentPath', 'localize', 'formatTransferError', 'SFTP_REQUEST_TIMEOUT_MS', 'platform', 'looksLikeWindowsPath', 'ensureLocalParentDirectory', 'isCrossDeviceMoveError', 'isRemotePathMissingError', 'SFTP_RELAY_CHUNK_SIZE', 'SFTP_RELAY_CONCURRENCY', 'mapLimit', 'captureTurboFileLocalMoveSnapshots', 'withTurboFileTimeout', 'REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS', `${code}; return Harness;`)(
+	const Harness: new () => IHarness = new Function('fsp', 'randomUUID', 'join', 'dirname', 'joinRemotePath', 'getRemoteParentPath', 'localize', 'formatTransferError', 'SFTP_REQUEST_TIMEOUT_MS', 'platform', 'looksLikeWindowsPath', 'ensureLocalParentDirectory', 'isCrossDeviceMoveError', 'isRemotePathMissingError', 'SFTP_RELAY_CHUNK_SIZE', 'SFTP_RELAY_CONCURRENCY', 'mapLimit', 'captureTurboFileLocalMoveSnapshots', 'withTurboFileTimeout', 'REMOTE_FILE_TRANSFER_INACTIVITY_TIMEOUT_MS', 'REMOTE_DIRECT_READ_CHUNK_BYTES', `${code}; return Harness;`)(
 		localFs, randomUUID, path.join, path.dirname, path.posix.join, path.posix.dirname, localize, (error: Error) => error.message, 30000,
 		() => 'win32', () => true, async () => { }, (error: NodeJS.ErrnoException) => error.code === 'EXDEV', (error: { code: number }) => error.code === 2,
-		4, 2, async (items: readonly number[], _limit: number, work: (item: number) => Promise<void>) => Promise.all(items.map(work)), captureTurboFileLocalMoveSnapshots, withTurboFileTimeout, 120000
+		4, 2, async (items: readonly number[], _limit: number, work: (item: number) => Promise<void>) => Promise.all(items.map(work)), captureTurboFileLocalMoveSnapshots, withTurboFileTimeout, 120000, 16
 	);
 	return new Harness();
 }
@@ -145,6 +149,31 @@ suite('TurboFileFileSafety', () => {
 			service.canceled = canceled;
 			await assert.rejects(service.fastPut({}, local, '/target'));
 			assert.deepStrictEqual([...service.remote].map(([name, value]) => [name, value.toString()]), [['/target', 'old content'], ['/unrelated.part', 'someone else']]);
+		}
+	});
+
+	test('editing and reopening preserves exact bytes and refuses an equal-size corrupted save', async () => {
+		const file = '/文档.cpp';
+		const original = Buffer.from('原始文本\r\n'.repeat(16));
+		const edited = Buffer.from('修改后的代码\n'.repeat(12));
+		service.remote.set(file, original);
+		let corruptStage = true;
+		const sftp = {
+			fstat(handle: Buffer, callback: (error: Error | undefined, stat: object) => void) {
+				const name = handle.toString();
+				const content = service.remote.get(name)!;
+				if (corruptStage && name.endsWith('.part')) {
+					content[17] = 0;
+				}
+				callback(undefined, { size: content.length, isDirectory: () => false });
+			}
+		};
+		await assert.rejects(service.saveRemoteDocument(sftp, file, edited), /original document was preserved/);
+		assert.deepStrictEqual([...service.remote], [[file, original]]);
+		corruptStage = false;
+		for (const content of [edited, Buffer.alloc(0), original]) {
+			await service.saveRemoteDocument(sftp, file, content);
+			assert.deepStrictEqual(await service.readRemoteDocument(sftp, file, 1024), content);
 		}
 	});
 

@@ -336,7 +336,7 @@ suite('TurboFileSshMainServiceStatic', () => {
 		assert.ok(startIndex >= 0);
 		assert.ok(startBlock.includes("const operation = request.operation ?? 'copy';"));
 		assert.ok(startBlock.includes("request.source.kind === 'local' && operation === 'copy'"));
-		assert.ok(startBlock.includes('return this.startCapturedWindowsFileDrag(request, window);'));
+		assert.ok(startBlock.includes('return await this.startCapturedWindowsFileDrag(request, window);'));
 	});
 
 	test('uses the 1.148 Electron fake-directory drag for captured Windows targets', () => {
@@ -344,9 +344,8 @@ suite('TurboFileSshMainServiceStatic', () => {
 		const capturedDrag = methodBlock(service, 'private async startCapturedWindowsFileDrag', 'private getWindowsDragCopyHookPaths');
 		const completion = methodBlock(service, 'async completeWindowsFileDrag', 'private async startCapturedWindowsFileDrag');
 
-		assert.ok(capturedDrag.includes('window.webContents.startDrag({'));
-		assert.ok(capturedDrag.includes('file: paths.fakeDirectory'));
-		assert.ok(capturedDrag.includes('files: [paths.fakeDirectory]'));
+		assert.ok(capturedDrag.includes('this.performWindowsOleDrag(window, [paths.fakeDirectory]);'));
+		assert.ok(capturedDrag.indexOf('if (pending.canceled') < capturedDrag.indexOf('this.performWindowsOleDrag(window'));
 		assert.ok(capturedDrag.includes('const token = request.sessionId'));
 		assert.ok(capturedDrag.includes('waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName, token)'));
 		assert.ok(completion.includes('this.activeWindowsDragSessions.has(sessionId)'));

@@ -255,6 +255,7 @@ interface ISFTPWrapper {
 	readdir(path: string, callback: (err: Error | undefined, list: ISFTPFileEntry[]) => void): void;
 	realpath(path: string, callback: (err: Error | undefined, resolvedPath: string) => void): void;
 	stat(path: string, callback: (err: Error | undefined, stats: ISFTPStats) => void): void;
+	fstat(handle: Buffer, callback: (err: Error | undefined, stats: ISFTPStats) => void): void;
 	lstat(path: string, callback: (err: Error | undefined, stats: ISFTPStats) => void): void;
 	mkdir(path: string, callback: (err: Error | undefined) => void): void;
 	rmdir(path: string, callback: (err: Error | undefined) => void): void;
@@ -671,6 +672,8 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 	private imageResourceCleanupTimer: ReturnType<typeof setInterval> | undefined;
 	private windowsDragCopyHookRegistrationPromise: Promise<void> | undefined;
 	private readonly activeWindowsDragSessions = new Set<string>();
+	private pendingWindowsDragSession: { readonly id: string; canceled: boolean } | undefined;
+	private windowsOleDragActive = false;
 	private readonly completedInternalWindowsDrags = new Set<string>();
 	// Caps concurrent SSH image reads. The image grid renders cards as <img src="turbofile-image://">,
 	// and Chromium fetches every visible card at once — dozens of simultaneous `client.exec` calls on
@@ -6795,7 +6798,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		this.activeWindowsDragSessions.add(request.sessionId);
 
 		try {
-			const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && !candidate.webContents.isDestroyed());
+			const window = BrowserWindow.fromId(request.windowId);
 			if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
 				return { ok: false, message: 'No TurboFile window is available for Windows drag.' };
 			}
@@ -6806,7 +6809,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 			const useDirectLocalDrag = request.source.kind === 'local' && operation === 'copy';
 			if (!useDirectLocalDrag) {
-				return this.startCapturedWindowsFileDrag(request, window);
+				return await this.startCapturedWindowsFileDrag(request, window);
 			}
 
 			const files = request.items
@@ -6817,11 +6820,10 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 			}
 
 			try {
-				window.webContents.startDrag({
-					file: files[0],
-					files,
-					icon: createWindowsDragIcon()
-				});
+				if (!this.canStartWindowsFileDrag(request, window)) {
+					return { ok: false, canceled: true, message: 'Windows drag gesture ended.' };
+				}
+				this.performWindowsOleDrag(window, files);
 				return { ok: true, message: 'Windows file drag started.' };
 			} catch (error) {
 				return {
@@ -6841,31 +6843,53 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}
 	}
 
-	private async startCapturedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileStartWindowsDragResult> {
-		if (request.source.kind === 'ssh' && !request.source.connection) {
-			return {
-				ok: false,
-				message: 'Missing SSH source connection for Windows drag.'
-			};
+	async cancelPendingWindowsFileDrag(sessionId: string): Promise<void> {
+		if (this.pendingWindowsDragSession?.id === sessionId) {
+			this.pendingWindowsDragSession.canceled = true;
 		}
+	}
+
+	private canStartWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): boolean {
+		// A delayed IPC or shell setup must not start another drag after the gesture is over.
+		return !this.windowsOleDragActive && !window.isDestroyed() && !window.webContents.isDestroyed()
+			&& Date.now() - request.initiatedAt < 500;
+	}
+
+	private performWindowsOleDrag(window: BrowserWindow, files: string[]): void {
+		this.windowsOleDragActive = true;
+		try {
+			window.webContents.startDrag({ file: files[0], files, icon: createWindowsDragIcon() });
+		} finally {
+			this.windowsOleDragActive = false;
+		}
+	}
+
+	private async startCapturedWindowsFileDrag(request: ITurboFileStartWindowsDragRequest, window: BrowserWindow): Promise<ITurboFileStartWindowsDragResult> {
 		if (!request.items.length) {
-			return { ok: false, message: 'No SSH files are available to drag.' };
+			return { ok: false, message: 'No files are available to drag.' };
 		}
 
 		const token = request.sessionId;
 		const fakeDirectoryName = createWindowsDragFakeDirectoryName(token);
 		const paths = this.getWindowsDragCopyHookPaths(token, fakeDirectoryName);
+		const pending = { id: token, canceled: false };
+		this.pendingWindowsDragSession = pending;
 		try {
-			await this.ensureWindowsDragCopyHookRegistered();
-			await fsp.rm(paths.activeRoot, { recursive: true, force: true }).catch(() => undefined);
-			await fsp.rm(paths.targetFile, { force: true }).catch(() => undefined);
-			await fsp.mkdir(paths.fakeDirectory, { recursive: true });
-			await fsp.mkdir(dirname(paths.targetFile), { recursive: true });
-			window.webContents.startDrag({
-				file: paths.fakeDirectory,
-				files: [paths.fakeDirectory],
-				icon: createWindowsDragIcon()
-			});
+			// Wait for both operations to settle so cleanup cannot race marker creation on failure.
+			const preparations = await Promise.allSettled([
+				this.ensureWindowsDragCopyHookRegistered(),
+				fsp.mkdir(paths.fakeDirectory, { recursive: true })
+			]);
+			for (const preparation of preparations) {
+				if (preparation.status === 'rejected') {
+					throw preparation.reason;
+				}
+			}
+			if (pending.canceled || this.pendingWindowsDragSession !== pending || !this.canStartWindowsFileDrag(request, window)) {
+				return { ok: false, canceled: true, message: 'Windows drag gesture ended.' };
+			}
+			this.pendingWindowsDragSession = undefined;
+			this.performWindowsOleDrag(window, [paths.fakeDirectory]);
 
 			const targetDirectory = await this.waitForWindowsDragCopyHookTarget(paths.targetFile, fakeDirectoryName, token);
 			if (!targetDirectory) {
@@ -6880,7 +6904,11 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				canceled: message.includes('timed out')
 			};
 		} finally {
-			await fsp.rm(paths.activeRoot, { recursive: true, force: true }).catch(() => undefined);
+			if (this.pendingWindowsDragSession === pending) {
+				this.pendingWindowsDragSession = undefined;
+			}
+			await fsp.rmdir(paths.fakeDirectory).catch(() => undefined);
+			await fsp.rmdir(paths.activeRoot).catch(() => undefined);
 			await fsp.rm(paths.targetFile, { force: true }).catch(() => undefined);
 		}
 	}
@@ -6938,7 +6966,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				const landedFolder = join(desktopDir, fakeDirectoryName);
 				try {
 					if ((await fsp.stat(landedFolder)).isDirectory()) {
-						await fsp.rm(landedFolder, { recursive: true, force: true }).catch(() => undefined);
+						await fsp.rmdir(landedFolder);
 						return desktopDir;
 					}
 				} catch {
@@ -7046,7 +7074,7 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		try {
 			const buffer = endpoint.kind === 'local'
 				? await this.readLocalFileBuffer(endpoint.path, maxBytes)
-				: await this.readRemoteFileBuffer(endpoint, maxBytes);
+				: await this.withDirectorySftp(endpoint, sftp => this.readRemoteDocument(sftp, endpoint.path, maxBytes));
 			const imageSize = mime.startsWith('image/') ? getImageSize(buffer) : undefined;
 			return {
 				ok: true,
@@ -7357,25 +7385,60 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 				await fsp.mkdir(dirname(endpoint.path), { recursive: true });
 				await fsp.writeFile(endpoint.path, buffer);
 			} else {
-				const tempRoot = join(tmpdir(), `turbofile-write-${randomUUID()}`);
-				const tempPath = join(tempRoot, basename(endpoint.path) || 'content');
-				try {
-					await fsp.mkdir(tempRoot, { recursive: true });
-					await fsp.writeFile(tempPath, buffer);
-					// Reuse the open directory session rather than opening a fresh SSH connection per call,
-					// so creating/saving a file on a high-latency remote host is not gated on a handshake.
-					await this.withDirectorySftp(endpoint, async sftp => {
-						await this.ensureRemoteDirectory(sftp, getRemoteParentPath(endpoint.path));
-						await this.fastPut(sftp, tempPath, endpoint.path, this.createSftpTransferOptions());
-					});
-				} finally {
-					await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
-				}
+				await this.withDirectorySftp(endpoint, sftp => this.saveRemoteDocument(sftp, endpoint.path, buffer));
 			}
 			this.clearRemoteDirectoryListingCache(endpoint);
 			return { ok: true, message: 'File saved.' };
 		} catch (error) {
 			return { ok: false, message: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private async saveRemoteDocument(sftp: ISFTPWrapper, remotePath: string, content: Buffer): Promise<void> {
+		const parent = getRemoteParentPath(remotePath);
+		await this.ensureRemoteDirectory(sftp, parent);
+		await this.getRemoteFileForReplacement(sftp, remotePath);
+		const temporaryPath = joinRemotePath(parent, `.turbofile-${randomUUID()}.part`);
+		let created = false;
+		try {
+			await this.writeRemoteBuffer(sftp, temporaryPath, content, () => { created = true; });
+			// Verify the editor's staged bytes before replacing the original, including equal-size corruption.
+			await this.readRemoteDocument(sftp, temporaryPath, content.length, content);
+			await this.replaceRemoteFile(sftp, temporaryPath, remotePath);
+			created = false;
+		} finally {
+			if (created) {
+				await this.cleanupRemoteOwnedTemporary(sftp, temporaryPath);
+			}
+		}
+	}
+
+	private async readRemoteDocument(sftp: ISFTPWrapper, remotePath: string, maxBytes: number, expected?: Buffer): Promise<Buffer> {
+		const handle = await this.openRemoteFile(sftp, remotePath, 'r');
+		try {
+			// Read the size and contents from the same open file. A save may replace the path in between.
+			const stat = await this.getSftpOperationWatchdog(sftp).run(() => new Promise<ISFTPStats>((resolve, reject) => {
+				sftp.fstat(handle, (error, result) => error ? reject(error) : resolve(result));
+			}), SFTP_REQUEST_TIMEOUT_MS, localize('turbofile.sftpStatTimeout', 'SFTP timed out while reading remote file attributes.'));
+			if (stat.isDirectory() || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > maxBytes) {
+				throw new Error(localize('turbofile.remoteDocumentReadSize', 'Cannot read remote document: {0}', remotePath));
+			}
+			const mismatch = () => new Error(localize('turbofile.remoteDocumentSaveMismatch', 'The saved bytes could not be verified. The original document was preserved.'));
+			if (expected && stat.size !== expected.length) {
+				throw mismatch();
+			}
+			const content = Buffer.alloc(expected ? Math.min(stat.size, REMOTE_DIRECT_READ_CHUNK_BYTES) : stat.size);
+			for (let position = 0; position < stat.size; position += REMOTE_DIRECT_READ_CHUNK_BYTES) {
+				const length = Math.min(REMOTE_DIRECT_READ_CHUNK_BYTES, stat.size - position);
+				const chunk = expected ? content.subarray(0, length) : content.subarray(position, position + length);
+				await this.readRemoteFileChunkExact(sftp, handle, chunk, length, position, remotePath);
+				if (expected && !chunk.equals(expected.subarray(position, position + length))) {
+					throw mismatch();
+				}
+			}
+			return content;
+		} finally {
+			await this.closeRemoteFile(sftp, handle);
 		}
 	}
 
@@ -13168,8 +13231,9 @@ export class TurboFileSshMainService implements ITurboFileSshService {
 		}), SFTP_REQUEST_TIMEOUT_MS, localize('turbofile.sftpRealpathTimeout', 'SFTP timed out while resolving remote path.'));
 	}
 
-	private async writeRemoteBuffer(sftp: ISFTPWrapper, remotePath: string, content: Buffer): Promise<void> {
+	private async writeRemoteBuffer(sftp: ISFTPWrapper, remotePath: string, content: Buffer, onCreated?: () => void): Promise<void> {
 		const handle = await this.openRemoteFile(sftp, remotePath, 'wx');
+		onCreated?.();
 		let writeError: Error | undefined;
 		try {
 			let position = 0;

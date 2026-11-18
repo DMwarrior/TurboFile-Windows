@@ -61,7 +61,7 @@ suite('TurboFileDeviceForm', () => {
 
 		assert.deepStrictEqual({
 			usesOwnerWindowFrame: renderDeviceForm.includes('getWindow(form).requestAnimationFrame(() => {'),
-			checksAttachment: renderDeviceForm.includes('if (!form.isConnected)')
+			checksAttachment: renderDeviceForm.includes('if (!form.isConnected || form.contains(form.ownerDocument.activeElement))')
 		}, {
 			usesOwnerWindowFrame: true,
 			checksAttachment: true

@@ -22,6 +22,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { joinPath } from '../../../../base/common/resources.js';
 import { FileAccess } from '../../../../base/common/network.js';
+import { isWindows } from '../../../../base/common/platform.js';
 import { IAction, Separator, SubmenuAction, toAction } from '../../../../base/common/actions.js';
 import { localize } from '../../../../nls.js';
 import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
@@ -75,7 +76,7 @@ import { TurboFileDirectoryInflightTracker, TurboFileDirectoryLoadPurpose } from
 import { TurboFileDirectoryPrefetchQueue } from '../common/turbofileDirectoryPrefetchQueue.js';
 import { createTurboFileCopyNames } from '../common/turbofileCopyName.js';
 import { getTurboFileDropEffect, getTurboFileRowDragEffectAllowed, resolveTurboFileDragOperation, shouldHandleTurboFilePaneDropAtPage, TurboFileDragOperation } from '../common/turbofileDragDrop.js';
-import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, shouldHandoffTurboFileDragToWindows, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
+import { createTurboFileNativeDragSession, dropTurboFileNativeDragSessionInternally, settleTurboFileNativeDragSession, startTurboFileNativeDragSession, TurboFileNativeDragSession, TurboFileNativeDragTarget } from '../common/turbofileNativeDragSession.js';
 import { applyTurboFileOptimisticTransfer, createTurboFilePostTransferRefreshPlan, createTurboFileTransferProgressSemanticKey } from '../common/turbofileTransferRefresh.js';
 import { getTurboFileImageGridPasteTargetSide } from '../common/turbofileImageGridClipboard.js';
 import { formatTurboFileImageDimensions } from '../common/turbofileImageDimensions.js';
@@ -360,7 +361,7 @@ interface TurboFileSyncPreviewState {
 }
 
 interface TurboFileDialogState {
-	readonly kind: 'confirm' | 'prompt' | 'info';
+	readonly kind: 'confirm' | 'prompt' | 'info' | 'releaseNotes';
 	readonly title: string;
 	readonly message: string;
 	readonly detail?: string;
@@ -905,6 +906,8 @@ export class TurboFileEditor extends EditorPane {
 	private appearanceTransitionTimer: number | undefined;
 	private externalDropTargetSide: 'left' | 'right' | undefined;
 	private nativeDragSession: TurboFileNativeDragSession<TurboFileFileItem> | undefined;
+	private readonly fileDragGesture = this._register(new MutableDisposable<DisposableStore>());
+	private windowsFileDragSessionId: string | undefined;
 	private maximizedPane: 'left' | 'right' | undefined;
 	private paneSplitRatio = TURBOFILE_PANE_SPLIT_DEFAULT_RATIO;
 	private paneSplitReflowRaf = 0;
@@ -1200,13 +1203,19 @@ export class TurboFileEditor extends EditorPane {
 			this.ensureTitlebarChrome();
 			this.prewarmCurrentTransferPair(true);
 		} else {
+			this.clearCurrentFileDragState();
 			this.preparedTransferPairScheduler.cancel();
 			this.finishDeviceOrderDrag();
 		}
 	}
 
 	override focus(): void {
-		this.container?.focus();
+		const form = this.container?.querySelector<HTMLFormElement>(':scope > .turbofile-device-overlay > form');
+		if (!this.isDeviceFormVisible || !form) {
+			this.container?.focus();
+		} else if (!form.contains(form.ownerDocument.activeElement)) {
+			form.querySelector<HTMLInputElement>('input[name="name"]')?.focus({ preventScroll: true });
+		}
 	}
 
 	override dispose(): void {
@@ -1280,6 +1289,7 @@ export class TurboFileEditor extends EditorPane {
 		void this.renderLegacyImageGridOverlay;
 
 		const shell = $('.turbofile-editor-shell');
+		shell.inert = this.isDeviceFormVisible;
 		const content = $('.turbofile-editor-content');
 		content.appendChild(this.renderActivePage());
 		shell.appendChild(content);
@@ -1795,6 +1805,7 @@ export class TurboFileEditor extends EditorPane {
 
 	/** Clears the current native drag session and every transient target highlight. */
 	private clearCurrentFileDragState(): void {
+		this.fileDragGesture.clear();
 		this.nativeDragSession = undefined;
 		this.setExternalDropTargetSide(undefined);
 		this.clearInternalDropTargetHighlight();
@@ -1838,6 +1849,9 @@ export class TurboFileEditor extends EditorPane {
 		}
 		const completed = settleTurboFileNativeDragSession(dropped, 'completed');
 		this.nativeDragSession = completed;
+		if (this.windowsFileDragSessionId === session.id) {
+			void this.sshService.completeWindowsFileDrag(session.id);
+		}
 		this.clearCurrentFileDragState();
 		this.deferAfterDrag(() => this.executeNativeInternalDrop(completed));
 		return true;
@@ -1861,7 +1875,10 @@ export class TurboFileEditor extends EditorPane {
 		if (!event.dataTransfer || this.nativeDragSession) {
 			return;
 		}
+		this.snapshotFileDragSession(side, allowWindowsHandoff);
+	}
 
+	private snapshotFileDragSession(side: 'left' | 'right', allowWindowsHandoff: boolean): void {
 		const items = this.getSelectedTransferItems(side)
 			.filter(item => !!item.path && !item.parent)
 			.map(item => ({ ...item }));
@@ -1876,49 +1893,28 @@ export class TurboFileEditor extends EditorPane {
 
 	private handoffFileDragSessionToWindows(): void {
 		const session = this.nativeDragSession;
-		if (!session || session.state !== 'dragging' || !session.allowWindowsHandoff) {
+		if (!session || session.state !== 'dragging' || !session.allowWindowsHandoff || this.windowsFileDragSessionId === session.id) {
 			return;
 		}
 
-		// End TurboFile's internal ownership before starting the Windows OLE drag. This does not
-		// re-render either pane, so Chromium can tear down its drag image without leaving a shadow.
-		this.clearCurrentFileDragState();
+		this.windowsFileDragSessionId = session.id;
 		void this.runNativeFileDrag(session);
 	}
 
-	private maybeHandoffFileDragSessionToWindows(event: DragEvent): void {
-		if (!this.nativeDragSession?.allowWindowsHandoff) {
-			return;
-		}
-
-		const ownerWindow = getWindow(this.container);
-		if (shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
-			this.handoffFileDragSessionToWindows();
-		}
-	}
-
 	private async runNativeFileDrag(session: TurboFileNativeDragSession<TurboFileFileItem>): Promise<void> {
-		const device = this.getPaneDevice(session.sourceSide);
-		if (!device) {
-			return;
-		}
-
-		const dragItems: ITurboFileWindowsDragItem[] = session.items
-			.filter((item): item is TurboFileFileItem & { path: string } => !!item.path && !item.parent)
-			.map(item => ({
-				sourcePath: item.path,
-				name: item.name,
-				type: item.type,
-				size: item.directory ? undefined : item.rawSize
-			}));
-		if (!dragItems.length) {
-			return;
-		}
-
 		try {
+			const device = this.getPaneDevice(session.sourceSide);
+			if (!device) {
+				return;
+			}
+			const dragItems: ITurboFileWindowsDragItem[] = session.items
+				.filter((item): item is TurboFileFileItem & { path: string } => !!item.path && !item.parent)
+				.map(item => ({ sourcePath: item.path, name: item.name, type: item.type }));
 			const result = await this.sshService.startWindowsFileDrag({
 				sessionId: session.id,
-				source: await this.toTransferEndpoint(device, this.paneStates[session.sourceSide].path),
+				windowId: getWindow(this.container).vscodeWindowId,
+				initiatedAt: Date.now(),
+				source: { kind: device.id === LOCAL_WINDOWS_DEVICE_ID ? 'local' : 'ssh' },
 				items: dragItems,
 				operation: session.operation
 			});
@@ -1934,7 +1930,133 @@ export class TurboFileEditor extends EditorPane {
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = `拖到 Windows 失败：${message}`;
 			this.render();
+		} finally {
+			if (this.windowsFileDragSessionId === session.id) {
+				this.windowsFileDragSessionId = undefined;
+			}
+			if (this.nativeDragSession?.id === session.id) {
+				this.clearCurrentFileDragState();
+			}
 		}
+	}
+
+	private beginWindowsFileRowGesture(side: 'left' | 'right', item: TurboFileFileItem, event: PointerEvent): void {
+		const root = this.container;
+		if (!root || event.button !== 0 || event.pointerType !== 'mouse' || !event.isPrimary) {
+			return;
+		}
+		this.clearCurrentFileDragState();
+		const ownerWindow = getWindow(root);
+		const { pointerId, clientX: startX, clientY: startY } = event;
+		const gesture = this.fileDragGesture.value = new DisposableStore();
+		let session: TurboFileNativeDragSession<TurboFileFileItem> | undefined;
+		let image: HTMLElement | undefined;
+		let hoverTarget: Element | null = null;
+		const findTarget = (pointer: PointerEvent) => {
+			const target = root.ownerDocument.elementFromPoint(pointer.clientX, pointer.clientY);
+			return target && root.contains(target) && target.closest('.turbofile-transfer-page') ? target : null;
+		};
+		const dispatch = (target: Element, type: string, pointer: PointerEvent, relatedTarget?: Element | null) => {
+			target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: pointer.clientX, clientY: pointer.clientY, relatedTarget }));
+		};
+		const finish = () => {
+			if (session && this.nativeDragSession?.id === session.id && this.windowsFileDragSessionId !== session.id) {
+				this.clearCurrentFileDragState();
+			} else {
+				this.fileDragGesture.clear();
+			}
+		};
+		const cancel = () => {
+			if (session && this.windowsFileDragSessionId === session.id) {
+				void this.sshService.cancelPendingWindowsFileDrag(session.id);
+			}
+			finish();
+		};
+		const move = (pointer: PointerEvent) => {
+			if (pointer.pointerId !== pointerId) {
+				return;
+			}
+			if (!(pointer.buttons & 1)) {
+				release(pointer);
+				return;
+			}
+			if (session && this.windowsFileDragSessionId === session.id) {
+				return;
+			}
+			if (!session) {
+				if (Math.max(Math.abs(pointer.clientX - startX), Math.abs(pointer.clientY - startY)) < 5) {
+					return;
+				}
+				this.selectFileRowForDrag(side, item);
+				this.snapshotFileDragSession(side, true);
+				session = this.nativeDragSession;
+				if (!session) {
+					finish();
+					return;
+				}
+				root.setPointerCapture(pointerId);
+				image = $('.turbofile-file-drag-image');
+				image.textContent = session.items.length === 1 ? item.name : localize('turbofile.dragItemCount', "{0} 项", session.items.length);
+				root.ownerDocument.body.appendChild(image);
+			}
+			if (pointer.clientX < 0 || pointer.clientY < 0 || pointer.clientX >= ownerWindow.innerWidth || pointer.clientY >= ownerWindow.innerHeight) {
+				image?.remove();
+				this.setExternalDropTargetSide(undefined);
+				this.clearInternalDropTargetHighlight();
+				this.handoffFileDragSessionToWindows();
+				return;
+			}
+			const target = findTarget(pointer);
+			if (hoverTarget && hoverTarget !== target) {
+				dispatch(hoverTarget, 'dragleave', pointer, target);
+			}
+			hoverTarget = target;
+			if (target) {
+				dispatch(target, 'dragover', pointer);
+			}
+			if (image) {
+				image.style.transform = `translate(${pointer.clientX + 12}px, ${pointer.clientY + 12}px)`;
+			}
+		};
+		const release = (pointer: PointerEvent) => {
+			if (pointer.pointerId !== pointerId) {
+				return;
+			}
+			if (session && this.windowsFileDragSessionId === session.id) {
+				void this.sshService.cancelPendingWindowsFileDrag(session.id);
+			} else if (session && pointer.type === 'pointerup' && pointer.button === 0) {
+				const target = findTarget(pointer);
+				if (target) {
+					dispatch(target, 'drop', pointer);
+				}
+			}
+			finish();
+		};
+		const cancelOnEscape = (key: KeyboardEvent) => {
+			if (key.key === 'Escape' && session) {
+				key.preventDefault();
+				key.stopImmediatePropagation();
+				cancel();
+			}
+		};
+		ownerWindow.addEventListener('pointermove', move, true);
+		ownerWindow.addEventListener('pointerup', release, true);
+		ownerWindow.addEventListener('pointercancel', release, true);
+		ownerWindow.addEventListener('keydown', cancelOnEscape, true);
+		ownerWindow.addEventListener('blur', cancel);
+		root.addEventListener('lostpointercapture', cancel);
+		gesture.add({ dispose: () => {
+			ownerWindow.removeEventListener('pointermove', move, true);
+			ownerWindow.removeEventListener('pointerup', release, true);
+			ownerWindow.removeEventListener('pointercancel', release, true);
+			ownerWindow.removeEventListener('keydown', cancelOnEscape, true);
+			ownerWindow.removeEventListener('blur', cancel);
+			root.removeEventListener('lostpointercapture', cancel);
+			if (root.hasPointerCapture(pointerId)) {
+				root.releasePointerCapture(pointerId);
+			}
+			image?.remove();
+		} });
 	}
 
 	/**
@@ -1951,14 +2073,7 @@ export class TurboFileEditor extends EditorPane {
 			return;
 		}
 
-		const state = this.paneStates[side];
-		if (!state.selectedPaths.has(item.path)) {
-			state.selectedPaths.clear();
-			state.selectedPaths.add(item.path);
-			this.updateRenderedSelection(side);
-		}
-
-		this.setActiveFilePaneSide(side);
+		this.selectFileRowForDrag(side, item);
 		const operation = this.getCurrentDragOperation(side);
 
 		event.dataTransfer.effectAllowed = getTurboFileRowDragEffectAllowed();
@@ -1969,6 +2084,20 @@ export class TurboFileEditor extends EditorPane {
 		const labels = items.length ? items.map(i => i.name) : [item.name];
 		event.dataTransfer.setData('text/plain', labels.join('\n'));
 		this.beginFileDragSession(side, event);
+	}
+
+	private selectFileRowForDrag(side: 'left' | 'right', item: TurboFileFileItem): void {
+		if (!item.path) {
+			return;
+		}
+		const state = this.paneStates[side];
+		if (!state.selectedPaths.has(item.path)) {
+			state.selectedPaths.clear();
+			state.selectedPaths.add(item.path);
+			this.updateRenderedSelection(side);
+		}
+
+		this.setActiveFilePaneSide(side);
 	}
 
 	private renderTransferPage(): HTMLElement {
@@ -2176,17 +2305,14 @@ export class TurboFileEditor extends EditorPane {
 		const handleDragEnter = (event: DragEvent) => this.handleTransferPageDragOver(event);
 		const handleDragOver = (event: DragEvent) => this.handleTransferPageDragOver(event);
 		const handleDrop = (event: DragEvent) => this.handleTransferPageDrop(event);
-		const handleDragLeave = (event: DragEvent) => this.handleTransferPageDragLeave(event);
 		page.addEventListener('dragenter', handleDragEnter, true);
 		page.addEventListener('dragover', handleDragOver, true);
 		page.addEventListener('drop', handleDrop, true);
-		page.addEventListener('dragleave', handleDragLeave, true);
 		this.renderDisposables.add({
 			dispose: () => {
 				page.removeEventListener('dragenter', handleDragEnter, true);
 				page.removeEventListener('dragover', handleDragOver, true);
 				page.removeEventListener('drop', handleDrop, true);
-				page.removeEventListener('dragleave', handleDragLeave, true);
 			}
 		});
 	}
@@ -2253,32 +2379,6 @@ export class TurboFileEditor extends EditorPane {
 	private shouldLetConcreteDropTargetHandle(event: DragEvent): boolean {
 		const target = event.target instanceof HTMLElement ? event.target : undefined;
 		return !!target?.closest('.turbofile-file-list, .turbofile-image-page-body');
-	}
-
-	private handleTransferPageDragLeave(event: DragEvent): void {
-		if (!this.nativeDragSession?.allowWindowsHandoff) {
-			return;
-		}
-		const relatedTarget = event.relatedTarget;
-		if (relatedTarget instanceof Node && this.container?.ownerDocument.contains(relatedTarget)) {
-			return;
-		}
-
-		// Chromium commonly reports every coordinate as zero after a drag leaves the Electron window.
-		// That sample is ambiguous for ordinary `drag` events, but a page `dragleave` whose related
-		// target is outside the owner document confirms the exit. Preserve the boundary classifier for
-		// non-zero samples so a transient null relatedTarget inside the page cannot steal internal drops.
-		const hasChromiumZeroExitSample = event.clientX === 0
-			&& event.clientY === 0
-			&& event.screenX === 0
-			&& event.screenY === 0;
-		const ownerWindow = getWindow(this.container);
-		if (!hasChromiumZeroExitSample && !shouldHandoffTurboFileDragToWindows(event, { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight })) {
-			return;
-		}
-
-		this.setExternalDropTargetSide(undefined);
-		this.handoffFileDragSessionToWindows();
 	}
 
 	private isTransferPageFileDrag(event: DragEvent): boolean {
@@ -2950,7 +3050,15 @@ export class TurboFileEditor extends EditorPane {
 	}
 
 	private showReleaseNotes(): void {
-		this.showDialogInfo(localize('turbofile.releaseNotes', "更新日志"), localize('turbofile.releaseNotesVersion', "当前版本：{0}", this.productService.version), getTurboFileReleaseHistory());
+		this.dialogState = {
+			kind: 'releaseNotes',
+			title: localize('turbofile.releaseNotes', "更新日志"),
+			message: localize('turbofile.releaseNotesVersion', "当前版本：{0}", this.productService.version),
+			detail: getTurboFileReleaseHistory(),
+			confirmLabel: localize('turbofile.releaseNotesDone', "知道了"),
+			resolve: () => undefined
+		};
+		this.render();
 	}
 
 	private async openThirdPartyNotices(): Promise<void> {
@@ -5073,12 +5181,14 @@ export class TurboFileEditor extends EditorPane {
 		}
 		row.classList.add('is-clickable');
 		if (item.path && !item.parent && !renaming) {
-			row.draggable = true;
-			row.addEventListener('dragstart', event => {
-				this.beginFileRowDrag(side, item, event);
-			});
-			row.addEventListener('drag', event => this.maybeHandoffFileDragSessionToWindows(event));
-			row.addEventListener('dragend', () => this.clearCurrentFileDragState());
+			if (isWindows) {
+				// Keep pointer ownership until the workbench edge. Windows receives a single OLE drag.
+				row.addEventListener('pointerdown', event => this.beginWindowsFileRowGesture(side, item, event));
+			} else {
+				row.draggable = true;
+				row.addEventListener('dragstart', event => this.beginFileRowDrag(side, item, event));
+				row.addEventListener('dragend', () => this.clearCurrentFileDragState());
+			}
 		}
 		row.addEventListener('click', event => {
 			this.setActiveFilePaneSide(side);
@@ -7212,7 +7322,6 @@ export class TurboFileEditor extends EditorPane {
 		});
 		card.addEventListener('click', event => this.completeImageGridItemPointerSelection(state, index, event));
 		card.addEventListener('dragstart', event => this.beginImageGridCardDrag(state, index, event));
-		card.addEventListener('drag', event => this.maybeHandoffFileDragSessionToWindows(event));
 		card.addEventListener('dragend', () => this.clearCurrentFileDragState());
 		card.addEventListener('contextmenu', event => {
 			this.setActiveImageGridState(state);
@@ -8734,6 +8843,13 @@ export class TurboFileEditor extends EditorPane {
 		}
 
 		const panel = $('.turbofile-dialog-panel');
+		const isReleaseNotes = state.kind === 'releaseNotes';
+		if (isReleaseNotes) {
+			panel.classList.add('turbofile-release-notes-panel');
+			panel.setAttribute('role', 'dialog');
+			panel.setAttribute('aria-modal', 'true');
+			panel.setAttribute('aria-label', state.title);
+		}
 		if (state.danger) {
 			panel.classList.add('is-danger');
 		}
@@ -8748,13 +8864,18 @@ export class TurboFileEditor extends EditorPane {
 		message.textContent = state.message;
 		copy.appendChild(title);
 		copy.appendChild(message);
+		header.appendChild(copy);
+		panel.appendChild(header);
 		if (state.detail) {
 			const detail = $('div.turbofile-dialog-detail');
 			detail.textContent = state.detail;
-			copy.appendChild(detail);
+			if (isReleaseNotes) {
+				detail.tabIndex = 0;
+				panel.appendChild(detail);
+			} else {
+				copy.appendChild(detail);
+			}
 		}
-		header.appendChild(copy);
-		panel.appendChild(header);
 
 		let input: HTMLInputElement | undefined;
 		if (state.kind === 'prompt') {
@@ -8789,6 +8910,15 @@ export class TurboFileEditor extends EditorPane {
 		actions.appendChild(confirm);
 		panel.appendChild(actions);
 		overlay.appendChild(panel);
+		if (isReleaseNotes) {
+			panel.addEventListener('keydown', event => {
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					this.resolveDialog(undefined);
+				}
+			});
+			getWindow(panel).requestAnimationFrame(() => confirm.focus({ preventScroll: true }));
+		}
 		overlay.addEventListener('click', event => {
 			if (event.target === overlay) {
 				this.resolveDialog(undefined);
@@ -8925,6 +9055,7 @@ export class TurboFileEditor extends EditorPane {
 			this.menuAction('turbofile.cut', localize('turbofile.cutFiles', "剪切"), Codicon.arrowRight, () => this.copySelectedToInternalClipboard(side, 'move'), canOperate),
 			this.menuAction('turbofile.paste', localize('turbofile.pasteFiles', "粘贴"), Codicon.clippy, () => this.pasteIntoPane(side), !this.paneStates[side].trashMode.active),
 			this.menuAction('turbofile.rename', '重命名', Codicon.edit, () => this.renameSelected(side), canOperate),
+			this.menuAction('turbofile.copyName', localize('turbofile.copyFileName', "复制文件名称"), Codicon.copy, () => this.clipboardService.writeText(item.name), canOperate),
 			this.menuAction('turbofile.copyPath', '复制路径', Codicon.copy, () => this.copySelectedPath(side), canOperate),
 			this.menuAction('turbofile.calculateSize', '计算大小', Codicon.symbolNumeric, () => this.calculateSelectedSize(side), canOperate)
 		];
@@ -16597,6 +16728,8 @@ export class TurboFileEditor extends EditorPane {
 		const overlay = $('.turbofile-device-overlay');
 		const form = document.createElement('form');
 		form.className = 'turbofile-device-form';
+		form.setAttribute('role', 'dialog');
+		form.setAttribute('aria-modal', 'true');
 		this.bindDeviceFormEventIsolation(form);
 		const editingDevice = this.editingDeviceId ? this.getAllDevices().find(device => device.id === this.editingDeviceId) : undefined;
 		const isEditing = !!editingDevice;
@@ -16604,6 +16737,7 @@ export class TurboFileEditor extends EditorPane {
 
 		const title = $('.turbofile-device-form-title');
 		title.textContent = isEditingLocalWindows ? '编辑本机 Windows' : isEditing ? '编辑 SSH 设备' : '添加 SSH 设备';
+		form.setAttribute('aria-label', title.textContent);
 		form.appendChild(title);
 
 		if (isEditingLocalWindows) {
@@ -16704,7 +16838,7 @@ export class TurboFileEditor extends EditorPane {
 
 		overlay.appendChild(form);
 		getWindow(form).requestAnimationFrame(() => {
-			if (!form.isConnected) {
+			if (!form.isConnected || form.contains(form.ownerDocument.activeElement)) {
 				return;
 			}
 			const firstInput = form.querySelector<HTMLInputElement>('input[name="name"]');
@@ -17002,7 +17136,9 @@ class TurboFileRemoteFileSystemProvider extends Disposable implements IFileSyste
 		});
 		this.devices.set(device.id, { connection, label: device.name });
 		this.remotePaths.set(resource.toString(), item.path ?? resource.path);
-		this.stats.set(resource.toString(), this.toStat(item));
+		if (!this.stats.has(resource.toString())) {
+			this.stats.set(resource.toString(), this.toStat(item));
+		}
 		return resource;
 	}
 

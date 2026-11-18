@@ -99,7 +99,7 @@
 
 ## 快速开始
 
-1. 下载 [`TurboFileSetup-win32-x64-1.176.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe)。
+1. 下载 [`TurboFileSetup-win32-x64-1.177.0.exe`](https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe)。
 2. 在 Windows x64 上安装并启动极速传。
 3. 添加 SSH/NAS/边缘设备，或选择 Windows 本地磁盘。
 4. 在左右面板分别打开源端和目标端。
@@ -109,7 +109,7 @@ Release 页面同时提供安装包 SHA-256 校验文件。应用自动更新优
 
 ## 从源码运行
 
-源码与安装包统一在 [GitHub](https://github.com/DMwarrior/TurboFile-Windows) 公开，并同步至 [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)。详见 [1.176.0 更新说明](docs/releases/1.176.0.md)。
+源码与安装包统一在 [GitHub](https://github.com/DMwarrior/TurboFile-Windows) 公开，并同步至 [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)。详见 [1.177.0 更新说明](docs/releases/1.177.0.md)。
 
 极速传基于 Code - OSS，并沿用仓库中的 Node.js 与 VS Code 构建工具链。
 
@@ -127,7 +127,7 @@ $env:VSCODE_SKIP_PRELAUNCH='1'
 
 ## 项目状态
 
-- 当前公开版本：**v1.176.0**
+- 当前公开版本：**v1.177.0**
 - 当前安装包平台：**Windows x64**
 - 唯一主分支：**`main`**
 - 欢迎通过 [GitHub Issues](https://github.com/DMwarrior/TurboFile-Windows/issues) 提交可复现的问题和建议。

@@ -148,8 +148,13 @@ body.turbofile-shell.turbofile-main-editor-visible .part.statusbar {
 }
 
 body.turbofile-shell .part.statusbar .statusbar-item[id="status.problems"],
-body.turbofile-shell .part.statusbar .statusbar-item[id="status.problemsVisibility"] {
+body.turbofile-shell .part.statusbar .statusbar-item[id="status.problemsVisibility"],
+body.turbofile-shell .part.statusbar .statusbar-item[id^="status.scm."] {
 	display: none !important;
+}
+
+body.turbofile-shell .part.titlebar > .titlebar-container > .titlebar-center > .window-title {
+	display: none;
 }
 
 /* The side bar always hosts the TurboFile navigation. Keep its TurboFile background even when a
@@ -2117,6 +2122,22 @@ body.turbofile-shell .part.sidebar > .turbofile-page-nav {
 .turbofile-file-list-spacer {
 	width: 1px;
 	pointer-events: none;
+}
+
+.turbofile-file-drag-image {
+	position: fixed;
+	top: 0;
+	left: 0;
+	z-index: 10000;
+	max-width: 240px;
+	padding: 3px 8px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	pointer-events: none;
+	border-radius: 4px;
+	background: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground);
 }
 
 .turbofile-file-row {
@@ -4863,6 +4884,27 @@ body.turbofile-shell .turbofile-theme-toggle {
 	overflow-y: auto;
 }
 
+.turbofile-release-notes-panel {
+	box-sizing: border-box;
+	width: min(760px, 100%);
+	min-width: 0;
+	max-height: 100%;
+	grid-template-rows: auto minmax(0, 1fr) auto;
+	padding: 18px clamp(12px, 3vw, 24px);
+}
+
+.turbofile-release-notes-panel > .turbofile-dialog-detail {
+	min-height: 0;
+	margin-top: 0;
+	padding: 12px 16px;
+	color: var(--vscode-foreground);
+	line-height: 1.6;
+	overflow-wrap: anywhere;
+	scrollbar-width: thin;
+	scrollbar-color: color-mix(in srgb, var(--vscode-foreground) 35%, transparent) transparent;
+	scrollbar-gutter: stable both-edges;
+}
+
 .turbofile-about-overlay {
 	position: fixed;
 	inset: 0;
@@ -4917,20 +4959,19 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .turbofile-about-content {
-	min-height: 292px;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 16px;
-	padding: 22px 32px 30px;
+	gap: 12px;
+	padding: 12px 32px 26px;
 	box-sizing: border-box;
 	text-align: center;
 }
 
 .turbofile-about-app-icon {
-	width: 112px;
-	height: 112px;
+	width: 84px;
+	height: 84px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -4939,8 +4980,9 @@ body.turbofile-shell .turbofile-theme-toggle {
 }
 
 .turbofile-about-app-icon .turbofile-bi-icon {
-	width: 96px;
-	height: 96px;
+	width: 72px;
+	height: 72px;
+	flex: none;
 }
 
 .turbofile-about-name {

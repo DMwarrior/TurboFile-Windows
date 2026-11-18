@@ -72,6 +72,7 @@ export interface ITurboFileSshService {
 	readWindowsClipboardFiles(): Promise<ITurboFileWindowsClipboardFilesResult>;
 	startWindowsFileDrag(request: ITurboFileStartWindowsDragRequest): Promise<ITurboFileStartWindowsDragResult>;
 	completeWindowsFileDrag(sessionId: string): Promise<void>;
+	cancelPendingWindowsFileDrag(sessionId: string): Promise<void>;
 	readFile(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadFileOptions): Promise<ITurboFileReadFileResult>;
 	readImage(endpoint: ITurboFileTransferEndpoint, options?: ITurboFileReadImageOptions): Promise<ITurboFileReadFileResult>;
 	/**
@@ -342,7 +343,9 @@ export interface ITurboFileWindowsDragItem {
 
 export interface ITurboFileStartWindowsDragRequest {
 	readonly sessionId: string;
-	readonly source: ITurboFileTransferEndpoint;
+	readonly windowId: number;
+	readonly initiatedAt: number;
+	readonly source: Pick<ITurboFileTransferEndpoint, 'kind'>;
 	readonly items: readonly ITurboFileWindowsDragItem[];
 	readonly operation?: 'copy' | 'move';
 	readonly progressId?: string;

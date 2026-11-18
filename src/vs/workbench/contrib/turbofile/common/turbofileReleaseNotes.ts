@@ -8,6 +8,17 @@ import { localize } from '../../../../nls.js';
 /** Keep released versions here so the installed application can show its history offline. */
 export const turboFileReleaseNotes: readonly { readonly version: string; readonly date: string; readonly changes: readonly string[] }[] = [
 	{
+		version: '1.177.0',
+		date: '2026-11-18',
+		changes: [
+			localize('turbofile.release177.document', "修复远程文档保存后偶发无法重新打开的问题。核对临时文件内容后再替换原件，校验失败时保留原文件。"),
+			localize('turbofile.release177.drag', "改进文件列表到 Windows 资源管理器和桌面的拖拽交接，松开鼠标时清理浮标，远程文件确认落点后开始传输。"),
+			localize('turbofile.release177.copyName', "右键菜单新增“复制文件名称”，支持文件和文件夹。"),
+			localize('turbofile.release177.deviceFocus', "修复添加或编辑设备时输入框偶发丢失焦点的问题。"),
+			localize('turbofile.release177.ui', "加宽更新日志并对齐两侧留白，放大关于窗口的闪电标志，简化标题栏和左下角状态区域。")
+		]
+	},
+	{
 		version: '1.176.0',
 		date: '2026-11-09',
 		changes: [

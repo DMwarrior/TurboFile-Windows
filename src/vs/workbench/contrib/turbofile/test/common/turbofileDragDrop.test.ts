@@ -118,13 +118,14 @@ suite('TurboFileDragDrop', () => {
 		assert.ok(editor.includes('this.consumeTurboFileDropEvent(event);'));
 	});
 
-	test('keeps internal drops in Chromium and hands the frozen session to Windows only after leaving the window', () => {
+	test('routes Windows file-row pointer gestures through the same internal drop handlers until the pointer leaves the window', () => {
 		const editor = readTurboFileEditor();
 		const windowInterceptor = methodBlock(editor, 'private registerWindowFileDropInterceptor', 'private shouldInterceptExternalFileDrop');
 		const dragEnterCapture = methodBlock(editor, 'private handleTurboFileDragEnterCapture', 'private shouldInterceptExternalFileDrop');
 		const beginSession = methodBlock(editor, 'private beginFileDragSession', 'private handoffFileDragSessionToWindows');
 		const handoff = methodBlock(editor, 'private handoffFileDragSessionToWindows', 'private async runNativeFileDrag');
-		const pageDragLeave = methodBlock(editor, 'private handleTransferPageDragLeave', 'private isTransferPageFileDrag');
+		const pointerGesture = methodBlock(editor, 'private beginWindowsFileRowGesture', 'private beginFileRowDrag');
+		const row = methodBlock(editor, 'private renderFileRow', 'private renderInlineRenameInput');
 
 		assert.deepStrictEqual({
 			registersContainerDragEnterCapture: windowInterceptor.includes("this.container.addEventListener('dragenter', onDragEnter, true);") && windowInterceptor.includes("removeEventListener('dragenter', onDragEnter, true)"),
@@ -134,13 +135,13 @@ suite('TurboFileDragDrop', () => {
 			fileRowsReuseEntry: editor.includes('this.beginFileDragSession(side, event);'),
 			imageGridReusesEntry: editor.includes('this.beginFileDragSession(state.side, event, false);'),
 			imageGridBlocksWindowsHandoff: editor.includes('this.beginFileDragSession(state.side, event, false);'),
-			pageExitHandsOff: editor.includes('private handleTransferPageDragLeave') && editor.includes('this.handoffFileDragSessionToWindows();'),
-			pageExitAcceptsChromiumZeroCoordinates: pageDragLeave.includes('hasChromiumZeroExitSample') && pageDragLeave.includes('event.screenY === 0'),
-			pageExitKeepsBoundaryClassifier: pageDragLeave.includes('!hasChromiumZeroExitSample && !shouldHandoffTurboFileDragToWindows(event'),
-			pageExitChecksSessionPolicy: pageDragLeave.includes('this.nativeDragSession?.allowWindowsHandoff'),
-			pointerExitFallback: editor.includes('private maybeHandoffFileDragSessionToWindows'),
+			pointerCaptured: pointerGesture.includes('root.setPointerCapture(pointerId);'),
+			keepsInternalDropHandlers: pointerGesture.includes("dispatch(target, 'drop', pointer);"),
+			windowsRowsAvoidChromiumDrag: row.includes("row.addEventListener('pointerdown', event => this.beginWindowsFileRowGesture(side, item, event));\n\t\t\t} else {\n\t\t\t\trow.draggable = true;".replace(/\n/g, editor.includes('\r\n') ? '\r\n' : '\n')),
+			checksButtonBeforeHandoff: pointerGesture.indexOf('!(pointer.buttons & 1)') < pointerGesture.indexOf('this.handoffFileDragSessionToWindows();'),
+			clearsImageBeforeHandoff: pointerGesture.indexOf('image?.remove();') < pointerGesture.indexOf('this.handoffFileDragSessionToWindows();'),
 			handoffChecksSessionPolicy: handoff.includes('!session.allowWindowsHandoff'),
-			handoffClearsBeforeNativeStart: handoff.indexOf('this.clearCurrentFileDragState();') < handoff.indexOf('void this.runNativeFileDrag(session);'),
+			handoffRegistersBeforeNativeStart: handoff.indexOf('this.windowsFileDragSessionId = session.id;') < handoff.indexOf('void this.runNativeFileDrag(session);'),
 			noRenderDuringHandoff: !handoff.includes('this.render()')
 		}, {
 			registersContainerDragEnterCapture: true,
@@ -150,13 +151,13 @@ suite('TurboFileDragDrop', () => {
 			fileRowsReuseEntry: true,
 			imageGridReusesEntry: true,
 			imageGridBlocksWindowsHandoff: true,
-			pageExitHandsOff: true,
-			pageExitAcceptsChromiumZeroCoordinates: true,
-			pageExitKeepsBoundaryClassifier: true,
-			pageExitChecksSessionPolicy: true,
-			pointerExitFallback: true,
+			pointerCaptured: true,
+			keepsInternalDropHandlers: true,
+			windowsRowsAvoidChromiumDrag: true,
+			checksButtonBeforeHandoff: true,
+			clearsImageBeforeHandoff: true,
 			handoffChecksSessionPolicy: true,
-			handoffClearsBeforeNativeStart: true,
+			handoffRegistersBeforeNativeStart: true,
 			noRenderDuringHandoff: true
 		});
 	});
