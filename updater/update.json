@@ -1,41 +1,37 @@
 {
-  "version": "1.176.0",
-  "name": "极速传 1.176.0",
-  "notes": "# 极速传 1.176.0\n\n发布日期：2026-11-09\n\n- 新增“视图 → 传输时自动打开进度面板”，默认开启并保存选择；手动收起后同一任务不会反复弹出。\n- 新任务开始后立即刷新面板，替换上一任务的结果与曲线；自动展开不抢键盘焦点。\n- “取消传输”并入详情区域，完成后隐藏按钮，保持面板高度，避免界面跳动。\n- 进度条去掉白色圆点，百分比跟随蓝色填充前端显示，保留平滑动画；总大小未知时不显示虚假百分比。\n- 面板复用已有进度采样，速度曲线最多保留 120 个点；隐藏窗口暂停绘图，不增加目录大小扫描或设备请求。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.176.0.exe`\n\n自动更新优先 Gitee 国内源，GitHub 提供完整 EXE 下载和备用源。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
-  "pub_date": "2026-11-09T07:03:29.165Z",
+  "version": "1.177.0",
+  "name": "极速传 1.177.0",
+  "notes": "# 极速传 1.177.0\n\n发布日期：2026-11-18\n\n- 修复远程文档保存后偶发无法重新打开的问题。保存时核对临时文件的内容，验证通过后再替换原文件。\n- 改进文件列表拖到 Windows 资源管理器和桌面时的识别与交接。松开鼠标后清理拖拽浮标，远程文件确认落点后开始传输。\n- 右键菜单在“复制路径”上方加入“复制文件名称”，适用于文件和文件夹。\n- 修复添加或编辑设备时输入框偶发丢失焦点的问题。\n- 加宽更新日志窗口并对齐左右留白，放大关于窗口的闪电标志，简化标题栏和左下角状态区域。\n\nWindows x64 安装包：`TurboFileSetup-win32-x64-1.177.0.exe`\n\n自动更新优先 Gitee 国内源，GitHub 提供完整 EXE 下载和备用源。\n\n源码与发行版：[GitHub](https://github.com/DMwarrior/TurboFile-Windows) · [Gitee](https://gitee.com/fkwarrior/TurboFile-Windows)\n",
+  "pub_date": "2026-11-18T04:45:31.587Z",
   "platforms": {
     "windows-x64": {
-      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe",
-      "sha256": "8729e994d135a797a3bda6fcb4aba9d22b50facd0719c52161c6ad7b7964b265",
-      "size": 113666971,
+      "url": "https://github.com/DMwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe",
+      "sha256": "fa43b8de05515202bed5ad825ce2255cac08d2b9913fc53700aa7f97e9106c98",
+      "size": 113677801,
       "parts": [
         {
-          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part001",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe.part001",
           "size": 33554432,
-          "sha256": "24ea622323f5ddf5277f70bd379d9460f267675932b81eab5f755770f3363ca7",
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part001"
+          "sha256": "0762bfa9d6c0cac989c0965e0ff94a75e49c86c664cad1ea658de8d0a820e197"
         },
         {
-          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part002",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe.part002",
           "size": 33554432,
-          "sha256": "f7c1bc09605a1ff40e4ffdae32b7c460ada4f14353d955b36c807d2f38e7cc2c",
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part002"
+          "sha256": "0d4dae341c827fb743d5ab41fdddd66ae583ee44129ff0ec51bbc7b17e38eb76"
         },
         {
-          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part003",
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe.part003",
           "size": 33554432,
-          "sha256": "329014336ffd6935906a8a23f7b3851d4fd759f3877a3a6f610d248b31409c02",
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part003"
+          "sha256": "4bb31efa5d184462b3bd22e2785836814cfb882f20dbb3da8cf657433d495cec"
         },
         {
-          "name": "TurboFileSetup-win32-x64-1.176.0.exe.part004",
-          "size": 13003675,
-          "sha256": "d81ead7bec584e1139b1bb236d0639d067087a7f36f9406f4af9e7bbda39e515",
-          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.176.0/TurboFileSetup-win32-x64-1.176.0.exe.part004"
+          "url": "https://gitee.com/fkwarrior/TurboFile-Windows/releases/download/v1.177.0/TurboFileSetup-win32-x64-1.177.0.exe.part004",
+          "size": 13014505,
+          "sha256": "6622e8654c609f60259bfb754ee1f4e9b6c827b4975daa7c6e8cf70c77d484a9"
         }
       ],
       "mirrors": [
-        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/726552734"
+        "https://api.github.com/repos/DMwarrior/TurboFile-Windows/releases/assets/761944010"
       ]
     }
   }
